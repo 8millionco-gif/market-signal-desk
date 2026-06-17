@@ -71,7 +71,11 @@ Write-Check "Naver news status" (-not $naverReady -or $naverReady) "ready=$naver
 
 $gdeltDashboardStatus = $dashboard.integrations.news.gdelt.items
 if ($gdeltDashboardStatus) {
-  Write-Check "GDELT dashboard source" ($gdeltDashboardStatus.source -eq "gdelt") "source=$($gdeltDashboardStatus.source), news=$($gdeltDashboardStatus.newsCount)"
+  $detail = "source=$($gdeltDashboardStatus.source), news=$($gdeltDashboardStatus.newsCount)"
+  if ($gdeltDashboardStatus.error) {
+    $detail = "$detail, error=$($gdeltDashboardStatus.error)"
+  }
+  Write-Check "GDELT dashboard source" ($gdeltDashboardStatus.source -eq "gdelt") $detail
 }
 
 Write-Host ""

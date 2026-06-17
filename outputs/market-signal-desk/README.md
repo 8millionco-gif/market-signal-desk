@@ -254,9 +254,13 @@ $env:GDELT_DOC_BASE_URL="https://api.gdeltproject.org/api/v2/doc/doc"
 $env:GDELT_NEWS_DISPLAY="5"
 $env:GDELT_NEWS_TIMESPAN="1week"
 $env:GDELT_NEWS_CACHE_SECONDS="300"
-$env:GDELT_NEWS_MAX_CANDIDATES="3"
-$env:GDELT_REQUEST_TIMEOUT_SECONDS="6"
+$env:GDELT_NEWS_MAX_CANDIDATES="1"
+$env:GDELT_REQUEST_TIMEOUT_SECONDS="20"
+$env:GDELT_REQUEST_SPACING_SECONDS="5.2"
 ```
+
+GDELT는 짧은 시간에 연속 요청하면 제한에 걸릴 수 있어 기본 조회 후보 수를 1개로 둡니다. 더 많은 후보를 조회하려면 `GDELT_NEWS_MAX_CANDIDATES`를 늘리되 응답 시간이 길어질 수 있습니다.
+화면에서 `글로벌 출처`가 `제한`으로 표시되면 GDELT 요청 제한에 걸린 상태이므로 몇 분 뒤 새로고침해 확인합니다.
 
 연결 테스트는 기존 뉴스 검색 API에 `provider=gdelt`를 붙이면 됩니다.
 

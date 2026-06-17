@@ -977,6 +977,20 @@ function renderDartStatus() {
     .join("");
 }
 
+function newsSourceLabel(status, liveSource, sampleLabel = "샘플") {
+  if (!status) return sampleLabel;
+  if (status.source === liveSource) {
+    return `${status.newsCount ?? status.disclosureCount ?? 0}건`;
+  }
+  if (status.error) {
+    if (String(status.detail ?? "").includes("limit requests")) return "제한";
+    return "오류";
+  }
+  if (status.source === "skipped") return "건너뜀";
+  if (status.enabled === false) return "꺼짐";
+  return sampleLabel;
+}
+
 function renderNewsStatus() {
   const naver = state.newsStatus?.naver;
   const gdelt = state.newsStatus?.gdelt;
@@ -989,7 +1003,7 @@ function renderNewsStatus() {
     [
       "네이버 출처",
       naverStatus?.source === "naver",
-      naverStatus?.source === "naver" ? `${naverStatus.newsCount ?? 0}건` : "샘플"
+      newsSourceLabel(naverStatus, "naver")
     ],
     [
       "GDELT",
@@ -999,7 +1013,7 @@ function renderNewsStatus() {
     [
       "글로벌 출처",
       gdeltStatus?.source === "gdelt",
-      gdeltStatus?.source === "gdelt" ? `${gdeltStatus.newsCount ?? 0}건` : "샘플"
+      newsSourceLabel(gdeltStatus, "gdelt")
     ]
   ];
   els.newsStatus.innerHTML = rows

@@ -121,3 +121,13 @@ https://market-signal-desk.onrender.com
 5. Toss 키와 Toss live flags
 6. SIGNAL_SCHEDULER_ENABLED=1
 ```
+
+GDELT는 요청 제한이 있으므로 처음에는 아래 기본값을 유지합니다.
+
+```text
+GDELT_NEWS_MAX_CANDIDATES=1
+GDELT_REQUEST_TIMEOUT_SECONDS=20
+GDELT_REQUEST_SPACING_SECONDS=5.2
+```
+
+화면에서 `뉴스 소스 상태 > 글로벌 출처`가 `제한`으로 표시되면 GDELT 요청 제한입니다. 몇 분 뒤 새로고침하거나 후보 조회 수를 1로 유지한 상태에서 다시 확인합니다.

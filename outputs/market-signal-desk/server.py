@@ -106,8 +106,9 @@ GDELT_LIVE_NEWS = os.getenv("GDELT_LIVE_NEWS", "0").lower() not in {"0", "false"
 GDELT_NEWS_DISPLAY = int(os.getenv("GDELT_NEWS_DISPLAY", "5"))
 GDELT_NEWS_TIMESPAN = os.getenv("GDELT_NEWS_TIMESPAN", "1week")
 GDELT_NEWS_CACHE_SECONDS = int(os.getenv("GDELT_NEWS_CACHE_SECONDS", "300"))
-GDELT_NEWS_MAX_CANDIDATES = int(os.getenv("GDELT_NEWS_MAX_CANDIDATES", "3"))
-GDELT_REQUEST_TIMEOUT_SECONDS = int(os.getenv("GDELT_REQUEST_TIMEOUT_SECONDS", "6"))
+GDELT_NEWS_MAX_CANDIDATES = int(os.getenv("GDELT_NEWS_MAX_CANDIDATES", "1"))
+GDELT_REQUEST_TIMEOUT_SECONDS = int(os.getenv("GDELT_REQUEST_TIMEOUT_SECONDS", "20"))
+GDELT_REQUEST_SPACING_SECONDS = float(os.getenv("GDELT_REQUEST_SPACING_SECONDS", "5.2"))
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -141,6 +142,8 @@ GDELT_NEWS_CACHE: dict[tuple[str, int, str, str], dict[str, object]] = {}
 ANALYSIS_CACHE: dict[str, dict[str, object]] = {}
 FX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
+GDELT_RATE_LOCK = threading.Lock()
+GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
@@ -254,6 +257,7 @@ def gdelt_news_config_status() -> dict:
         "timespan": GDELT_NEWS_TIMESPAN,
         "maxCandidates": GDELT_NEWS_MAX_CANDIDATES,
         "cacheSeconds": GDELT_NEWS_CACHE_SECONDS,
+        "requestSpacingSeconds": GDELT_REQUEST_SPACING_SECONDS,
     }
 
 
@@ -1725,6 +1729,7 @@ def parse_gdelt_date(value: str) -> str:
 
 
 def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | None = None, sort: str = "datedesc") -> dict:
+    global GDELT_LAST_REQUEST_AT
     query = query.strip()
     if not query:
         return {"articles": [], "query": query}
@@ -1751,6 +1756,14 @@ def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | Non
         }
     )
     request = Request(f"{GDELT_DOC_BASE_URL}?{params}", headers={"User-Agent": "market-signal-desk/1.0"}, method="GET")
+    if GDELT_REQUEST_SPACING_SECONDS > 0:
+        with GDELT_RATE_LOCK:
+            now = datetime.now(timezone.utc)
+            elapsed = (now - GDELT_LAST_REQUEST_AT).total_seconds()
+            wait_seconds = GDELT_REQUEST_SPACING_SECONDS - elapsed
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            GDELT_LAST_REQUEST_AT = datetime.now(timezone.utc)
     with urlopen(request, timeout=GDELT_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
     payload["query"] = query
@@ -2732,6 +2745,9 @@ def dashboard(mode: str) -> dict:
             "enabled": GDELT_LIVE_NEWS,
             "error": payload.get("error", "unknown"),
             "message": payload.get("message", "GDELT 글로벌 뉴스 반영에 실패해 샘플 뉴스를 사용합니다."),
+            "detail": payload.get("detail", ""),
+            "status": payload.get("status", ""),
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         }
 
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
