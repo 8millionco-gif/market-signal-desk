@@ -25,6 +25,7 @@ http://127.0.0.1:8787
 Render에는 먼저 샘플/제한 모드로 배포해 화면, 라우팅, 성과 검증, 헬스 체크가 정상인지 확인합니다. 실제 Toss/Naver/OpenDART/OpenAI 키는 접근제어를 붙인 뒤 켜는 것을 권장합니다.
 
 상세 순서는 [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)를 기준으로 진행합니다.
+배포 후 상태 확인은 `test-render-deploy.ps1`로 실행할 수 있습니다.
 
 이 폴더를 Git 저장소 루트로 올리는 경우 `render.yaml`을 그대로 사용할 수 있습니다.
 
