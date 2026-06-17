@@ -26,6 +26,7 @@ Render에는 먼저 샘플/제한 모드로 배포해 화면, 라우팅, 성과 
 
 상세 순서는 [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)를 기준으로 진행합니다.
 배포 후 상태 확인은 `test-render-deploy.ps1`로 실행할 수 있습니다.
+네이버 뉴스 키를 Render에 넣은 뒤에도 같은 스크립트로 실제 검색 호출까지 확인합니다.
 
 이 폴더를 Git 저장소 루트로 올리는 경우 `render.yaml`을 그대로 사용할 수 있습니다.
 

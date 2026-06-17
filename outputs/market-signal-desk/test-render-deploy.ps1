@@ -67,7 +67,7 @@ $news = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/news/status
 $gdeltReady = [bool]$news.gdelt.readyForNews
 $naverReady = [bool]$news.naver.readyForNews
 Write-Check "GDELT status" $gdeltReady "ready=$gdeltReady"
-Write-Check "Naver news status" (-not $naverReady -or $naverReady) "ready=$naverReady"
+Write-Check "Naver news status" $naverReady "ready=$naverReady"
 
 $gdeltDashboardStatus = $dashboard.integrations.news.gdelt.items
 if ($gdeltDashboardStatus) {
@@ -76,6 +76,22 @@ if ($gdeltDashboardStatus) {
     $detail = "$detail, error=$($gdeltDashboardStatus.error)"
   }
   Write-Check "GDELT dashboard source" ($gdeltDashboardStatus.source -eq "gdelt") $detail
+}
+
+$naverDashboardStatus = $dashboard.integrations.news.naver.items
+if ($naverDashboardStatus) {
+  $detail = "source=$($naverDashboardStatus.source), news=$($naverDashboardStatus.newsCount)"
+  if ($naverDashboardStatus.error) {
+    $detail = "$detail, error=$($naverDashboardStatus.error)"
+  }
+  Write-Check "Naver dashboard source" ($naverDashboardStatus.source -eq "naver") $detail
+}
+
+if ($naverReady) {
+  $naverSearch = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/news/search?query=%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90&display=3&sort=date") -Headers $headers -Method Get -TimeoutSec 30
+  Write-Check "Naver search API" (($naverSearch.items | Measure-Object).Count -gt 0) "items=$(($naverSearch.items | Measure-Object).Count)"
+} else {
+  Write-Check "Naver search API" $false "waiting for NAVER_CLIENT_ID/SECRET and NAVER_LIVE_NEWS=1"
 }
 
 Write-Host ""

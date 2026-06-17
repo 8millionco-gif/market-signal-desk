@@ -131,3 +131,27 @@ GDELT_REQUEST_SPACING_SECONDS=5.2
 ```
 
 화면에서 `뉴스 소스 상태 > 글로벌 출처`가 `제한`으로 표시되면 GDELT 요청 제한입니다. 몇 분 뒤 새로고침하거나 후보 조회 수를 1로 유지한 상태에서 다시 확인합니다.
+
+## 네이버 뉴스 활성화
+
+GDELT가 확인되면 Render Environment에 아래 값을 추가합니다.
+
+```text
+NAVER_CLIENT_ID=네이버_애플리케이션_Client_ID
+NAVER_CLIENT_SECRET=네이버_애플리케이션_Client_Secret
+NAVER_LIVE_NEWS=1
+```
+
+저장 후 재배포가 끝나면 아래 스크립트를 실행합니다.
+
+```powershell
+.\test-render-deploy.ps1
+```
+
+정상 기준:
+
+```text
+Naver news status      ready=True
+Naver dashboard source source=naver
+Naver search API       items=1개 이상
+```
