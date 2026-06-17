@@ -62,6 +62,7 @@ OPENAI_API_KEY=
 ## 첫 배포 기본 플래그
 
 초기에는 외부 API 호출량을 막기 위해 아래 값이 `render.yaml`에서 꺼져 있습니다.
+수동 Web Service 생성으로 `render.yaml` 값이 일부 적용되지 않더라도, 스케줄러와 GDELT 글로벌 뉴스는 코드 기본값도 꺼짐으로 둡니다.
 
 ```text
 SIGNAL_SCHEDULER_ENABLED=0
