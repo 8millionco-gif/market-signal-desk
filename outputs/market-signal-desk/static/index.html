@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Market Signal Desk</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">장마감/장전 종목 분석</p>
+          <h1>Market Signal Desk</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="mode-switch" aria-label="분석 모드">
+            <button class="mode-button active" data-mode="close">장마감</button>
+            <button class="mode-button" data-mode="preopen">장전</button>
+            <button class="mode-button" data-mode="intraday">장중</button>
+          </div>
+          <button class="tool-button" id="performanceButton" type="button">성과</button>
+          <button class="icon-button" id="refreshButton" title="새로고침" aria-label="새로고침">
+            <span>↻</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="signal-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">오늘의 후보</p>
+              <h2 id="candidateCount">0개</h2>
+            </div>
+            <span class="status-dot"></span>
+          </div>
+
+          <div class="tabs" aria-label="종목 필터">
+            <button class="tab active" data-filter="all">전체</button>
+            <button class="tab" data-filter="domestic">국내</button>
+            <button class="tab" data-filter="overseas">해외</button>
+            <button class="tab" data-filter="watched">관심</button>
+          </div>
+
+          <label class="search-box">
+            <span>검색</span>
+            <input id="searchInput" type="search" placeholder="종목명 또는 코드" />
+          </label>
+
+          <div class="feed" id="candidateFeed"></div>
+        </aside>
+
+        <section class="detail-panel">
+          <div class="market-strip">
+            <div>
+              <span>코스피</span>
+              <strong id="kospiValue">-</strong>
+            </div>
+            <div>
+              <span>코스닥</span>
+              <strong id="kosdaqValue">-</strong>
+            </div>
+            <div>
+              <span>나스닥</span>
+              <strong id="nasdaqValue">-</strong>
+            </div>
+            <div>
+              <span>환율</span>
+              <strong id="usdKrwValue">-</strong>
+            </div>
+            <div class="market-note" id="marketNote">시장 점검 중</div>
+          </div>
+
+          <article class="signal-detail" id="signalDetail">
+            <div class="empty-state">
+              <h2>후보를 불러오는 중입니다</h2>
+              <p>뉴스, 공시, 시세 반응을 묶어 진입 조건을 정리합니다.</p>
+            </div>
+          </article>
+        </section>
+
+        <aside class="decision-panel">
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">운영 원칙</p>
+              <h2>오늘 지킬 것</h2>
+            </div>
+            <ol class="principles" id="principles"></ol>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">요약</p>
+              <h2>데스크 상태</h2>
+            </div>
+            <div class="metrics-grid">
+              <div>
+                <span>후보</span>
+                <strong id="metricCandidates">0</strong>
+              </div>
+              <div>
+                <span>고득점</span>
+                <strong id="metricHighScore">0</strong>
+              </div>
+              <div>
+                <span>준비됨</span>
+                <strong id="metricReady">0</strong>
+              </div>
+              <div>
+                <span>관심</span>
+                <strong id="metricWatched">0</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">다음 작업</p>
+              <h2>개발 연결</h2>
+            </div>
+            <div class="next-steps">
+              <div>
+                <strong>1</strong>
+                <span>해외 뉴스 보강</span>
+              </div>
+              <div>
+                <strong>2</strong>
+                <span>선정 기준 튜닝</span>
+              </div>
+              <div>
+                <strong>3</strong>
+                <span>외부 알림 채널 확장</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">접근 보호</p>
+              <h2>관리자 토큰</h2>
+            </div>
+            <div class="connection-list" id="authStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">알림 연결</p>
+              <h2>브라우저 알림</h2>
+            </div>
+            <div class="connection-list" id="notificationStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">자동 실행</p>
+              <h2>스케줄러 상태</h2>
+            </div>
+            <div class="connection-list" id="schedulerStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">히스토리</p>
+              <h2>스냅샷 히스토리</h2>
+            </div>
+            <div class="snapshot-history" id="snapshotHistory">
+              <div class="history-empty">저장된 스냅샷 확인 중</div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">시장 연결</p>
+              <h2>시장 지표 상태</h2>
+            </div>
+            <div class="connection-list" id="marketStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">API 연결</p>
+              <h2>토스증권 상태</h2>
+            </div>
+            <div class="connection-list" id="tossStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">공시 연결</p>
+              <h2>OpenDART 상태</h2>
+            </div>
+            <div class="connection-list" id="dartStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">뉴스 연결</p>
+              <h2>뉴스 소스 상태</h2>
+            </div>
+            <div class="connection-list" id="newsStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">AI 분석</p>
+              <h2>OpenAI 상태</h2>
+            </div>
+            <div class="connection-list" id="openaiStatus">
+              <div>
+                <span>설정 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

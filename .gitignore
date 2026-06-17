@@ -1,0 +1,34 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Market Signal Desk runtime data
+outputs/market-signal-desk/data/runs/
+outputs/market-signal-desk/data/watchlist.json
+outputs/market-signal-desk/data/dart-corp-codes.json
+outputs/market-signal-desk/__pycache__/
+
+# Local test run artifacts
+work/*test-runs/

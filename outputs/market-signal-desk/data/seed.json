@@ -1,0 +1,481 @@
+{
+  "market": {
+    "date": "2026-06-16",
+    "session": "장 시작 전 점검",
+    "kospi": "+0.4%",
+    "kosdaq": "+0.7%",
+    "nasdaq": "+1.1%",
+    "usdKrw": "1,382.4",
+    "wti": "-0.8%",
+    "dominantTheme": "AI 반도체, 보험, 원전 기자재",
+    "riskMood": "중립 이상",
+    "note": "미국 기술주 강세와 원화 안정 흐름은 성장주에 우호적이지만, 최근 급등 종목은 장 초반 변동성 확대 가능성이 있습니다."
+  },
+  "principles": [
+    "종목 선정은 전날 끝내고 당일은 조건 충족 여부만 확인합니다.",
+    "좋은 뉴스가 아니라 시장이 실제 돈으로 반응하는 종목만 봅니다.",
+    "손절 기준이 진입가에서 3% 이상 멀면 진입하지 않습니다.",
+    "후보는 최대 10개, 실제 관찰은 3개 안쪽으로 제한합니다."
+  ],
+  "candidates": [
+    {
+      "symbol": "005930",
+      "name": "삼성전자",
+      "market": "KR",
+      "category": "domestic",
+      "price": "84,200원",
+      "change": "+1.7%",
+      "updated": "38분 전",
+      "headline": "반도체 투자심리 개선과 HBM 수요 기대가 동시에 반영",
+      "verdict": "장전 관심",
+      "stage": "preopen",
+      "preopenPriority": 93,
+      "triggerReadiness": 78,
+      "score": {
+        "event": 24,
+        "news": 18,
+        "volume": 16,
+        "price": 12,
+        "market": 9,
+        "attention": 8,
+        "riskPenalty": 6,
+        "heatPenalty": 4
+      },
+      "tags": ["AI 투자 확대", "HBM", "외국인 수급", "실적 기대"],
+      "thesis": "AI 인프라 투자 확대와 메모리 업황 회복 기대가 함께 작동했습니다. 섹터 전체에 온기가 퍼져 있어 단독 이슈보다 지속성이 좋지만, 장 초반 갭 상승을 바로 추격하면 손절선이 멀어질 수 있습니다.",
+      "why": [
+        "해외 반도체 지수 강세와 국내 대형 반도체 수급 개선이 같은 방향입니다.",
+        "뉴스가 개별 루머보다 업황 개선, HBM 수요, 증권사 목표가 상향으로 묶입니다.",
+        "전일 거래대금이 20일 평균 대비 높아 실제 매수세가 확인됐습니다."
+      ],
+      "entryConditions": [
+        "장 시작 후 10분 동안 시초가를 지키고 전일 고점을 재돌파",
+        "5분 거래대금이 최근 20일 같은 시간 평균의 2배 이상",
+        "SK하이닉스와 반도체 ETF가 동시에 약세로 꺾이지 않을 것",
+        "돌파 가격 재이탈 시 손절이 2% 안쪽에 있을 것"
+      ],
+      "noEntry": [
+        "갭 상승 후 5분 안에 장대 음봉으로 시초가 이탈",
+        "뉴스는 많은데 거래대금이 전일보다 줄어드는 경우",
+        "반도체 섹터가 동반 약세로 전환되는 경우"
+      ],
+      "stopRules": [
+        "돌파 기준가 재이탈",
+        "VWAP 아래에서 5분 이상 회복 실패",
+        "지수 급락과 동시에 거래량 실린 음봉 발생"
+      ],
+      "trend": {
+        "newsCount": 20,
+        "newsSpike": "2.8배",
+        "volumeSpike": "2.3배",
+        "sentiment": "긍정 68%, 중립 24%, 부정 8%",
+        "sectorStrength": "상위 18%"
+      },
+      "sources": [
+        {
+          "title": "삼성전자, HBM 기대감에 반도체 투자심리 개선",
+          "publisher": "경제신문",
+          "time": "06:40"
+        },
+        {
+          "title": "글로벌 AI 투자 확대에 메모리 업황 개선 전망",
+          "publisher": "증권리포트",
+          "time": "07:12"
+        },
+        {
+          "title": "외국인 대형 반도체 순매수 확대",
+          "publisher": "시장동향",
+          "time": "08:02"
+        }
+      ],
+      "disclosures": [
+        "최근 7일 내 주가에 직접 영향을 줄 대형 공시는 발견되지 않았습니다.",
+        "실적 전망 관련 뉴스는 증권사 추정치 기반이므로 실제 실적 발표 전 변동 가능성이 있습니다."
+      ],
+      "related": [
+        {
+          "symbol": "000660",
+          "name": "SK하이닉스",
+          "relation": "동일 섹터",
+          "change": "+2.1%"
+        },
+        {
+          "symbol": "091160",
+          "name": "KODEX 반도체",
+          "relation": "섹터 ETF",
+          "change": "+1.4%"
+        }
+      ],
+      "chart": [72, 74, 73, 75, 79, 80, 78, 81, 83, 84]
+    },
+    {
+      "symbol": "000660",
+      "name": "SK하이닉스",
+      "market": "KR",
+      "category": "domestic",
+      "price": "238,500원",
+      "change": "+2.4%",
+      "updated": "22분 전",
+      "headline": "HBM 공급 부족 기대가 이어지며 섹터 주도주 역할",
+      "verdict": "눌림 대기",
+      "stage": "preopen",
+      "preopenPriority": 89,
+      "triggerReadiness": 72,
+      "score": {
+        "event": 22,
+        "news": 17,
+        "volume": 18,
+        "price": 11,
+        "market": 9,
+        "attention": 8,
+        "riskPenalty": 7,
+        "heatPenalty": 7
+      },
+      "tags": ["HBM", "AI 서버", "수급 강세", "과열 주의"],
+      "thesis": "HBM 수요와 AI 서버 투자 뉴스가 반복되며 주도주 프리미엄이 유지됩니다. 다만 최근 상승 각도가 커서 돌파 매수보다 VWAP 부근 눌림 확인이 더 유리합니다.",
+      "why": [
+        "동일 테마 내에서 뉴스와 가격 반응이 가장 빠른 편입니다.",
+        "기관/외국인 수급이 동반될 때 추세 지속 확률이 높아집니다.",
+        "전일 고점 부근의 매물 소화 여부가 단기 방향을 가릅니다."
+      ],
+      "entryConditions": [
+        "시초가 급등 시 1차 추격 금지",
+        "VWAP 부근에서 거래량 감소 후 재상승 확인",
+        "당일 고점 돌파 시 직전 눌림 저점이 손절선으로 가까울 것",
+        "삼성전자와 반도체 ETF가 동반 강세 유지"
+      ],
+      "noEntry": [
+        "첫 15분 거래량은 큰데 고점이 낮아지는 경우",
+        "뉴스가 기존 재료 반복이고 신규 모멘텀이 없는 경우",
+        "전일 저가까지 손절폭이 넓어지는 경우"
+      ],
+      "stopRules": [
+        "VWAP 이탈 후 거래량 증가",
+        "눌림 저점 이탈",
+        "섹터 ETF가 장중 음전"
+      ],
+      "trend": {
+        "newsCount": 16,
+        "newsSpike": "2.1배",
+        "volumeSpike": "2.6배",
+        "sentiment": "긍정 63%, 중립 29%, 부정 8%",
+        "sectorStrength": "상위 12%"
+      },
+      "sources": [
+        {
+          "title": "HBM 공급 부족 장기화 기대",
+          "publisher": "테크뉴스",
+          "time": "06:55"
+        },
+        {
+          "title": "AI 서버 투자 확대에 메모리주 강세",
+          "publisher": "시장브리핑",
+          "time": "07:40"
+        }
+      ],
+      "disclosures": [
+        "단기 가격 상승률이 높아 변동성 확대 가능성이 큽니다."
+      ],
+      "related": [
+        {
+          "symbol": "005930",
+          "name": "삼성전자",
+          "relation": "동일 섹터",
+          "change": "+1.7%"
+        }
+      ],
+      "chart": [69, 72, 74, 77, 80, 79, 82, 85, 87, 86]
+    },
+    {
+      "symbol": "316140",
+      "name": "우리금융지주",
+      "market": "KR",
+      "category": "domestic",
+      "price": "17,940원",
+      "change": "+1.1%",
+      "updated": "1시간 전",
+      "headline": "주주환원 기대와 금리 안정이 은행주 재평가 재료로 작용",
+      "verdict": "조건부 관찰",
+      "stage": "close",
+      "preopenPriority": 73,
+      "triggerReadiness": 64,
+      "score": {
+        "event": 18,
+        "news": 13,
+        "volume": 14,
+        "price": 10,
+        "market": 8,
+        "attention": 5,
+        "riskPenalty": 5,
+        "heatPenalty": 2
+      },
+      "tags": ["배당", "주주환원", "금리 안정"],
+      "thesis": "은행주는 화려한 테마보다 배당과 주주환원 기대가 누적될 때 강합니다. 단기 급등보다는 지수 방어력이 필요할 때 후보로 보는 편이 좋습니다.",
+      "why": [
+        "금리 부담 완화 뉴스가 금융주 멀티플 개선 기대와 연결됩니다.",
+        "배당 성향과 자사주 소각 기대가 방어적 수요를 만들 수 있습니다."
+      ],
+      "entryConditions": [
+        "은행 섹터가 지수 대비 강한 흐름",
+        "전일 고점 돌파 후 거래대금이 20일 평균 이상",
+        "배당/주주환원 관련 신규 뉴스 유지"
+      ],
+      "noEntry": [
+        "코스피가 강한데 은행주만 소외",
+        "금리 급등 뉴스가 동반되는 경우",
+        "거래량 없이 천천히 밀리는 경우"
+      ],
+      "stopRules": [
+        "전일 종가 이탈",
+        "섹터 ETF 약세 전환"
+      ],
+      "trend": {
+        "newsCount": 8,
+        "newsSpike": "1.4배",
+        "volumeSpike": "1.6배",
+        "sentiment": "긍정 52%, 중립 42%, 부정 6%",
+        "sectorStrength": "상위 35%"
+      },
+      "sources": [
+        {
+          "title": "금리 안정에 은행주 배당 매력 부각",
+          "publisher": "금융뉴스",
+          "time": "07:20"
+        }
+      ],
+      "disclosures": [
+        "금융주는 금리와 정책 뉴스에 민감합니다."
+      ],
+      "related": [
+        {
+          "symbol": "055550",
+          "name": "신한지주",
+          "relation": "동일 섹터",
+          "change": "+0.8%"
+        }
+      ],
+      "chart": [48, 49, 51, 50, 52, 53, 54, 54, 56, 57]
+    },
+    {
+      "symbol": "035720",
+      "name": "카카오",
+      "market": "KR",
+      "category": "domestic",
+      "price": "48,300원",
+      "change": "-0.6%",
+      "updated": "47분 전",
+      "headline": "AI 서비스 기대는 있지만 규제 뉴스가 상승을 제한",
+      "verdict": "보류",
+      "stage": "close",
+      "preopenPriority": 52,
+      "triggerReadiness": 41,
+      "score": {
+        "event": 13,
+        "news": 11,
+        "volume": 9,
+        "price": 5,
+        "market": 6,
+        "attention": 8,
+        "riskPenalty": 13,
+        "heatPenalty": 2
+      },
+      "tags": ["AI 서비스", "플랫폼 규제", "수급 약함"],
+      "thesis": "관심도는 높지만 가격이 뉴스에 반응하지 못하고 있습니다. 좋은 이야기가 있어도 실제 수급이 확인되기 전까지는 관찰만 하는 편이 안전합니다.",
+      "why": [
+        "AI 서비스 관련 기대 뉴스가 있으나 규제 이슈가 동시에 존재합니다.",
+        "상승 시도 대비 거래량 확신이 약합니다."
+      ],
+      "entryConditions": [
+        "플랫폼 규제 악재가 추가되지 않을 것",
+        "전일 고점 회복과 거래대금 증가가 동시에 발생",
+        "인터넷/게임 섹터가 동반 강세"
+      ],
+      "noEntry": [
+        "뉴스만 많고 가격이 전일 종가 아래",
+        "장 초반 반등 후 고점이 낮아지는 구조",
+        "규제성 기사 추가 발생"
+      ],
+      "stopRules": [
+        "전일 저가 이탈",
+        "섹터 동반 약세"
+      ],
+      "trend": {
+        "newsCount": 14,
+        "newsSpike": "1.9배",
+        "volumeSpike": "0.9배",
+        "sentiment": "긍정 36%, 중립 39%, 부정 25%",
+        "sectorStrength": "하위 40%"
+      },
+      "sources": [
+        {
+          "title": "플랫폼 AI 서비스 고도화 기대",
+          "publisher": "IT데일리",
+          "time": "07:34"
+        },
+        {
+          "title": "플랫폼 규제 논의 재부각",
+          "publisher": "정책뉴스",
+          "time": "08:11"
+        }
+      ],
+      "disclosures": [
+        "규제 이슈는 단기 가격 반응을 크게 흔들 수 있습니다."
+      ],
+      "related": [
+        {
+          "symbol": "035420",
+          "name": "NAVER",
+          "relation": "동일 섹터",
+          "change": "-0.2%"
+        }
+      ],
+      "chart": [58, 57, 59, 56, 54, 55, 53, 52, 51, 50]
+    },
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "market": "US",
+      "category": "overseas",
+      "price": "$204.80",
+      "change": "+0.9%",
+      "updated": "장 마감",
+      "headline": "온디바이스 AI 기대가 제품 사이클 회복 기대와 연결",
+      "verdict": "해외 관심",
+      "stage": "close",
+      "preopenPriority": 76,
+      "triggerReadiness": 60,
+      "score": {
+        "event": 18,
+        "news": 16,
+        "volume": 10,
+        "price": 10,
+        "market": 9,
+        "attention": 8,
+        "riskPenalty": 6,
+        "heatPenalty": 4
+      },
+      "tags": ["온디바이스 AI", "제품 사이클", "나스닥 강세"],
+      "thesis": "미국 기술주 분위기가 우호적인 날에는 국내 애플 밸류체인과 반도체 심리에도 간접 영향을 줄 수 있습니다. 직접 매매보다 국내 연관 섹터 참고 지표로 쓰기 좋습니다.",
+      "why": [
+        "나스닥 강세와 대형 기술주 수급이 우호적입니다.",
+        "AI 기능 기대가 제품 교체 수요 전망과 연결됩니다."
+      ],
+      "entryConditions": [
+        "나스닥 선물이 장전 강세 유지",
+        "국내 애플 밸류체인 종목 거래량 증가",
+        "달러 강세가 과도하지 않을 것"
+      ],
+      "noEntry": [
+        "미국 선물이 장전 급락",
+        "국내 관련주가 시초가 이후 바로 밀림",
+        "환율 급등으로 성장주 심리가 악화"
+      ],
+      "stopRules": [
+        "나스닥 선물 급락 전환",
+        "관련 국내 섹터 동반 음전"
+      ],
+      "trend": {
+        "newsCount": 31,
+        "newsSpike": "2.2배",
+        "volumeSpike": "1.3배",
+        "sentiment": "긍정 58%, 중립 34%, 부정 8%",
+        "sectorStrength": "상위 25%"
+      },
+      "sources": [
+        {
+          "title": "Apple AI features raise device replacement expectations",
+          "publisher": "Global Tech",
+          "time": "05:20"
+        }
+      ],
+      "disclosures": [
+        "해외 종목 뉴스는 국내장 개장 전 간접 신호로만 사용합니다."
+      ],
+      "related": [
+        {
+          "symbol": "011070",
+          "name": "LG이노텍",
+          "relation": "애플 밸류체인",
+          "change": "+0.5%"
+        }
+      ],
+      "chart": [61, 62, 63, 63, 65, 66, 65, 67, 68, 69]
+    },
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "market": "US",
+      "category": "overseas",
+      "price": "$142.15",
+      "change": "+1.6%",
+      "updated": "장 마감",
+      "headline": "AI 인프라 투자 확대의 글로벌 기준 종목",
+      "verdict": "섹터 온도계",
+      "stage": "close",
+      "preopenPriority": 81,
+      "triggerReadiness": 63,
+      "score": {
+        "event": 20,
+        "news": 16,
+        "volume": 12,
+        "price": 12,
+        "market": 10,
+        "attention": 9,
+        "riskPenalty": 7,
+        "heatPenalty": 8
+      },
+      "tags": ["AI 인프라", "GPU", "글로벌 주도주", "과열 점검"],
+      "thesis": "국내 반도체 후보를 볼 때 NVIDIA의 장 마감 흐름은 중요한 배경 신호입니다. 다만 이미 시장 기대가 높은 종목이라 국내 후발주 추격에는 과열 점검이 필요합니다.",
+      "why": [
+        "AI 인프라 투자 뉴스가 글로벌 반도체 심리의 기준점입니다.",
+        "미국장 강세가 국내 반도체 대형주 장전 관심도를 높입니다."
+      ],
+      "entryConditions": [
+        "필라델피아 반도체 지수 강세 유지",
+        "국내 반도체 대형주가 갭만 띄우지 않고 거래량 유지",
+        "전일 고점 돌파 후 재이탈이 없을 것"
+      ],
+      "noEntry": [
+        "미국 반도체 선물이 장전 하락 전환",
+        "국내 반도체주가 모두 시초가 아래로 밀림",
+        "기사량은 급증하지만 신규 재료가 없는 경우"
+      ],
+      "stopRules": [
+        "반도체 ETF 동반 음전",
+        "장 초반 고점 대비 2% 이상 하락"
+      ],
+      "trend": {
+        "newsCount": 44,
+        "newsSpike": "2.5배",
+        "volumeSpike": "1.5배",
+        "sentiment": "긍정 61%, 중립 30%, 부정 9%",
+        "sectorStrength": "상위 10%"
+      },
+      "sources": [
+        {
+          "title": "AI infrastructure spending keeps chip sentiment elevated",
+          "publisher": "Market Wire",
+          "time": "05:55"
+        }
+      ],
+      "disclosures": [
+        "국내 종목 직접 신호가 아니라 섹터 배경 지표로 해석합니다."
+      ],
+      "related": [
+        {
+          "symbol": "005930",
+          "name": "삼성전자",
+          "relation": "국내 반도체 대형주",
+          "change": "+1.7%"
+        },
+        {
+          "symbol": "000660",
+          "name": "SK하이닉스",
+          "relation": "국내 반도체 주도주",
+          "change": "+2.4%"
+        }
+      ],
+      "chart": [70, 72, 71, 74, 76, 78, 77, 80, 82, 83]
+    }
+  ]
+}
