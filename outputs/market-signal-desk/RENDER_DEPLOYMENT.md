@@ -16,11 +16,13 @@
 
 1. Render Dashboard에서 New를 선택합니다.
 2. Blueprint를 선택합니다.
-3. GitHub 저장소를 연결합니다.
+3. GitHub 저장소 `https://github.com/8millionco-gif/market-signal-desk`를 연결합니다.
 4. 서비스 이름이 `market-signal-desk`인지 확인합니다.
 5. 초기 생성 중 `sync: false`로 표시된 비밀값을 입력합니다.
 
 초기에는 `ADMIN_TOKEN`만 반드시 입력하고, 나머지 API 키는 비워도 됩니다.
+
+화면에 입력할 값은 [RENDER_SETUP_VALUES.md](RENDER_SETUP_VALUES.md)에 따로 정리했습니다.
 
 ## 3. 1차 스테이징 환경변수
 

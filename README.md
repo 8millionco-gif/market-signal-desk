@@ -35,6 +35,12 @@ http://127.0.0.1:8787
 outputs/market-signal-desk/RENDER_DEPLOYMENT.md
 ```
 
+Render 화면 입력값은 다음 문서에 정리되어 있습니다.
+
+```text
+outputs/market-signal-desk/RENDER_SETUP_VALUES.md
+```
+
 ## 보안 메모
 
 실제 API 키는 저장소에 넣지 않습니다.
