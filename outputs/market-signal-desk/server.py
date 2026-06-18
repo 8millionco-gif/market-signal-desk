@@ -2238,6 +2238,7 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
 
     enriched = []
     news_count = 0
+    filtered_count = 0
     queried_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
@@ -2252,19 +2253,29 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         queried_count += 1
         normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
         normalized = [news_item for news_item in normalized if news_item.get("title")]
+        relevant = filter_relevant_news_items(item, normalized)
+        filtered_out = max(0, len(normalized) - len(relevant))
+        filtered_count += filtered_out
+        normalized = relevant
         news_count += len(normalized)
         item["liveNews"] = {
             "source": "naver",
             "query": query,
-            "total": payload.get("total", 0),
-            "display": payload.get("display", len(normalized)),
+            "total": len(normalized),
+            "rawTotal": payload.get("total", 0),
+            "display": len(normalized),
+            "rawDisplay": payload.get("display", len(normalized)),
+            "filteredOut": filtered_out,
             "items": normalized,
         }
         if normalized:
             live_sources = [source_from_news_item(news_item) for news_item in normalized[:3]]
             item["sources"] = [*live_sources, *item.get("sources", [])][:6]
             trend = dict(item.get("trend", {}))
-            trend["newsCount"] = int(payload.get("total", trend.get("newsCount", 0)) or 0)
+            trend["newsCount"] = max(
+                bounded_int(trend.get("newsCount", 0), 0, 10_000_000),
+                len(normalized),
+            )
             item["trend"] = trend
         enriched.append(item)
 
@@ -2274,6 +2285,7 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         "message": "네이버 뉴스 검색 결과를 반영했습니다.",
         "queriedCount": queried_count,
         "newsCount": news_count,
+        "filteredNewsCount": filtered_count,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -2763,8 +2775,15 @@ def dynamic_news_score(candidate: dict, base_score: dict, notes: list[str]) -> i
     if isinstance(live_news, dict) and live_news.get("source") == "naver":
         display_count = bounded_int(live_news.get("display", 0), 0, 100)
         item_count = len(live_news.get("items", [])) if isinstance(live_news.get("items"), list) else 0
-        score = max(score, bounded_int(8 + min(display_count, 10) * 2 + min(item_count, 5), 0, 22))
-        notes.append(f"네이버 최신 뉴스 {item_count}건을 후보 점수에 반영")
+        filtered_count = bounded_int(live_news.get("filteredOut", 0), 0, 100)
+        if item_count:
+            score = max(score, bounded_int(8 + min(display_count, 10) * 2 + min(item_count, 5), 0, 22))
+            notes.append(f"네이버 최신 뉴스 {item_count}건을 후보 점수에 반영")
+        elif filtered_count:
+            score = min(score, 8)
+            notes.append("뉴스 검색 결과가 있었지만 종목명/티커와 맞지 않아 점수 반영 제외")
+        if filtered_count:
+            notes.append(f"관련성 낮은 뉴스 {filtered_count}건 제외")
 
     global_news = candidate.get("globalNews", {})
     if isinstance(global_news, dict) and global_news.get("source") == "gdelt":
@@ -3229,6 +3248,47 @@ def universe_query(entry: dict) -> str:
     return " ".join(value for value in [name or symbol, themes] if value).strip()
 
 
+def compact_match_text(value: str) -> str:
+    return re.sub(r"[\s·\-_.,'\"()\[\]{}:;|/\\]+", "", clean_news_text(value)).lower()
+
+
+def news_relevance_terms(entry: dict) -> list[str]:
+    terms = [
+        str(entry.get("symbol", "")),
+        str(entry.get("name", "")),
+        str(entry.get("englishName", "")),
+    ]
+    aliases = entry.get("aliases", [])
+    if isinstance(aliases, list):
+        terms.extend(str(alias) for alias in aliases)
+    return unique_texts([term for term in terms if len(str(term).strip()) >= 2], limit=12)
+
+
+def news_matches_entry(entry: dict, item: dict) -> bool:
+    text = compact_match_text(
+        " ".join(
+            [
+                str(item.get("title", "")),
+                str(item.get("summary", "")),
+            ]
+        )
+    )
+    if not text:
+        return False
+    for term in news_relevance_terms(entry):
+        normalized = compact_match_text(term)
+        if len(normalized) >= 2 and normalized in text:
+            return True
+    return False
+
+
+def filter_relevant_news_items(entry: dict, items: list[dict]) -> list[dict]:
+    relevant = [item for item in items if news_matches_entry(entry, item)]
+    if relevant:
+        return relevant
+    return []
+
+
 def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
     if not (NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"]):
         return [], {
@@ -3240,11 +3300,15 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
     payload = fetch_naver_news(query, display=SIGNAL_DISCOVERY_NEWS_DISPLAY, sort="date")
     normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
     normalized = [news_item for news_item in normalized if news_item.get("title")]
-    return normalized, {
+    relevant = filter_relevant_news_items(entry, normalized)
+    return relevant, {
         "source": "naver",
         "query": query,
-        "total": payload.get("total", 0),
-        "display": payload.get("display", len(normalized)),
+        "total": len(relevant),
+        "rawTotal": payload.get("total", 0),
+        "display": len(relevant),
+        "rawDisplay": payload.get("display", len(normalized)),
+        "filteredOut": max(0, len(normalized) - len(relevant)),
     }
 
 
@@ -3261,6 +3325,7 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
         "name": name,
         "market": entry.get("market", "KR"),
         "category": entry.get("category", "domestic"),
+        "aliases": text_list(entry.get("aliases", []), limit=10),
         "price": "-",
         "change": "",
         "updated": "자동 선정",
@@ -3321,6 +3386,13 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
     symbol = str(entry.get("symbol", "")).strip().upper()
     news_items, news_status = discovery_news_for_entry(entry)
     base = copy.deepcopy(seed_lookup.get(symbol)) if symbol in seed_lookup else default_candidate_for_entry(entry, news_items, news_status)
+    base["aliases"] = unique_texts(
+        [
+            *text_list(entry.get("aliases", []), limit=12),
+            *text_list(base.get("aliases", []), limit=12),
+        ],
+        limit=12,
+    )
     if symbol in seed_lookup and news_items:
         live_sources = [source_from_news_item(item) for item in news_items[:3]]
         base["sources"] = [*live_sources, *base.get("sources", [])][:6]
@@ -3343,7 +3415,10 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
             "source": "naver",
             "query": news_status.get("query", universe_query(entry)),
             "total": news_status.get("total", len(news_items)),
+            "rawTotal": news_status.get("rawTotal", news_status.get("total", len(news_items))),
             "display": news_status.get("display", len(news_items)),
+            "rawDisplay": news_status.get("rawDisplay", news_status.get("display", len(news_items))),
+            "filteredOut": news_status.get("filteredOut", 0),
             "items": news_items,
             "discovery": True,
         }
@@ -3351,12 +3426,19 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
     focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
     news_total = bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000)
     seed_score = score_candidate(base)
+    no_relevant_live_news = (
+        news_status.get("source") == "naver"
+        and not news_items
+        and bounded_int(news_status.get("rawDisplay", 0), 0, 100) > 0
+    )
+    relevance_penalty = 16 if no_relevant_live_news else 0
     discovery_score = bounded_int(
         focus * 3
         + len(news_items) * 12
         + min(news_total, 50) * 0.25
         + min(seed_score, 90) * 0.18
-        + (10 if symbol in watched else 0),
+        + (10 if symbol in watched else 0)
+        - relevance_penalty,
         0,
         100,
     )
@@ -3366,8 +3448,11 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         "query": news_status.get("query", universe_query(entry)),
         "score": discovery_score,
         "newsItems": len(news_items),
+        "rawNewsItems": bounded_int(news_status.get("rawDisplay", 0), 0, 100),
+        "filteredNewsItems": bounded_int(news_status.get("filteredOut", 0), 0, 100),
         "newsTotal": news_total,
         "focusWeight": focus,
+        "quality": "matched-news" if news_items else ("filtered-news" if no_relevant_live_news else "universe"),
     }
     return base
 
@@ -3437,7 +3522,15 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
     )
     limit = max(1, min(SIGNAL_AUTO_CANDIDATE_LIMIT, len(discovered) or len(seed_candidates)))
     selected = discovered[:limit] if discovered else seed_candidates[:limit]
-    source = "auto-news" if any(item.get("discovery", {}).get("source") == "naver" for item in selected) else "auto-universe"
+    source = (
+        "auto-news"
+        if any(
+            item.get("discovery", {}).get("source") == "naver"
+            and bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) > 0
+            for item in selected
+        )
+        else "auto-universe"
+    )
     status = {
         "source": source,
         "enabled": True,
@@ -3445,7 +3538,9 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         "universeCount": len(entries),
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
-        "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
+        "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in discovered),
+        "selectedNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
+        "filteredNewsCount": sum(bounded_int(item.get("discovery", {}).get("filteredNewsItems", 0), 0, 1_000) for item in discovered),
         "errorCount": len(errors),
         "errors": errors[:3],
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -3627,6 +3722,7 @@ def dashboard(mode: str) -> dict:
             "universeCount": discovery_status.get("universeCount"),
             "scannedCount": discovery_status.get("scannedCount"),
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
+            "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
         },
         "integrations": {

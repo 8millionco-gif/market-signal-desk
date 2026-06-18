@@ -878,7 +878,10 @@ function renderMetrics() {
           : "샘플 후보";
     const scanned = summary.scannedCount ?? discovery.scannedCount;
     const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
-    const detail = scanned ? ` · ${scanned}종목 점검${newsCount ? ` · 뉴스 ${newsCount}건` : ""}` : "";
+    const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
+    const detail = scanned
+      ? ` · ${scanned}종목 점검${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 제외 ${filtered}건` : ""}`
+      : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
