@@ -875,6 +875,114 @@ function notificationPermissionLabel(permission) {
 
 function notificationCandidate() {
   const candidates = state.dashboard?.candidates ?? [];
+  return notificationTriggers(candidates)[0] ?? null;
+}
+
+function notificationTriggers(candidates = []) {
+  return candidates
+    .map(notificationTriggerForCandidate)
+    .filter(Boolean)
+    .sort((a, b) => {
+      const priorityDiff = a.priority - b.priority;
+      if (priorityDiff !== 0) return priorityDiff;
+      const readinessDiff = Number(b.item?.triggerReadiness ?? 0) - Number(a.item?.triggerReadiness ?? 0);
+      if (readinessDiff !== 0) return readinessDiff;
+      return Number(b.item?.totalScore ?? 0) - Number(a.item?.totalScore ?? 0);
+    });
+}
+
+function rowValue(plan, label) {
+  return plan.rows.find(([rowLabel]) => rowLabel === label)?.[1] ?? "-";
+}
+
+function notificationTriggerForCandidate(item) {
+  const plan = tradePlan(item);
+  if (!plan.hasPrice) return null;
+  const score = Number(item.totalScore ?? 0);
+  const readiness = Number(item.triggerReadiness ?? 0);
+  const verdict = String(item.verdict ?? "");
+  const group = decisionGroupForDisplay(item);
+  const watched = Boolean(item.isWatched);
+  const baseReady =
+    score >= 72 ||
+    readiness >= 70 ||
+    watched ||
+    verdict.includes("조건 충족") ||
+    verdict.includes("준비") ||
+    group.key === "action";
+  const entryRange = rowValue(plan, "관찰 매수");
+  const pullback = rowValue(plan, "눌림 대기");
+  const rebound = rowValue(plan, "반등 확인");
+  const stopLine = rowValue(plan, "손절 점검");
+  const trimLine = rowValue(plan, "분할매도");
+
+  let trigger = null;
+  if (plan.tone === "sell") {
+    trigger = {
+      type: "trim",
+      label: "분할매도 점검",
+      title: "분할매도 구간 점검",
+      criterion: trimLine,
+      body: `${item.name} ${trimLine} · 보유 수익을 일부 확정할지 점검합니다.`,
+      priority: 0
+    };
+  } else if (plan.tone === "risk" && plan.holding) {
+    trigger = {
+      type: "risk",
+      label: "위험 기준 이탈 점검",
+      title: "위험 기준 점검",
+      criterion: stopLine,
+      body: `${item.name} ${stopLine} · 추가 매수보다 리스크 축소를 먼저 봅니다.`,
+      priority: 1
+    };
+  } else if (plan.tone === "buy" && baseReady) {
+    trigger = {
+      type: "entry",
+      label: "관찰 매수 구간",
+      title: "매수 관찰 구간 도달",
+      criterion: entryRange,
+      body: `${item.name} ${entryRange} · 조건 충족 시 관찰 매수 후보입니다.`,
+      priority: 2
+    };
+  } else if (plan.action.includes("눌림") && baseReady) {
+    trigger = {
+      type: "pullback",
+      label: "눌림 대기",
+      title: "눌림 구간 대기",
+      criterion: pullback,
+      body: `${item.name} ${pullback} · 추격보다 눌림 확인이 우선입니다.`,
+      priority: 3
+    };
+  } else if (plan.action.includes("반등") && (readiness >= 65 || watched)) {
+    trigger = {
+      type: "rebound",
+      label: "반등 확인",
+      title: "반등 확인 필요",
+      criterion: rebound,
+      body: `${item.name} ${rebound} · 약세 구간에서 회복 여부를 확인합니다.`,
+      priority: 4
+    };
+  } else if ((group.key === "hidden" || group.key === "momentum") && (score >= 68 || readiness >= 65 || watched)) {
+    trigger = {
+      type: "watch",
+      label: group.key === "hidden" ? "숨은 기회 관찰" : "모멘텀 관찰",
+      title: "관찰 후보 변화 감지",
+      criterion: entryRange,
+      body: `${item.name} ${entryRange} · ${plan.summary}`,
+      priority: 5
+    };
+  }
+
+  if (!trigger) return null;
+  return {
+    ...trigger,
+    item,
+    plan
+  };
+}
+
+function legacyNotificationCandidate() {
+  const candidates = state.dashboard?.candidates ?? [];
   return candidates.find((item) => {
     const score = Number(item.totalScore ?? 0);
     const readiness = Number(item.triggerReadiness ?? 0);
@@ -883,13 +991,16 @@ function notificationCandidate() {
   });
 }
 
-function notificationKeyForCandidate(item) {
+function notificationKeyForCandidate(trigger) {
+  const item = trigger.item ?? trigger;
   return [
     "candidate",
     state.dashboard?.generatedAt ?? "",
     item.symbol ?? "",
+    trigger.type ?? "legacy",
     item.totalScore ?? "",
-    item.triggerReadiness ?? ""
+    item.triggerReadiness ?? "",
+    item.price ?? ""
   ].join(":");
 }
 
@@ -910,12 +1021,12 @@ function sendBrowserNotification(title, body, tag) {
 
 function maybeNotifyDashboard() {
   if (state.viewingSnapshot) return;
-  const item = notificationCandidate();
-  if (!item || !notificationEnabled()) return;
-  const key = notificationKeyForCandidate(item);
+  const trigger = notificationCandidate();
+  if (!trigger || !notificationEnabled()) return;
+  const key = notificationKeyForCandidate(trigger);
   if (state.lastNotifiedKey === key) return;
-  const body = shortText(`${item.name} ${item.totalScore}점 · ${item.verdict || item.headline}`, 90);
-  if (sendBrowserNotification("관찰 후보 감지", body, key)) {
+  const body = shortText(trigger.body, 90);
+  if (sendBrowserNotification(trigger.title, body, key)) {
     state.lastNotifiedKey = key;
     writeStoredValue("marketSignalLastNotifiedKey", key);
   }
@@ -966,7 +1077,7 @@ function disableNotifications() {
 function testNotification() {
   sendBrowserNotification(
     "Market Signal Desk 테스트",
-    "조건이 준비된 후보가 나오면 이 방식으로 알림을 보냅니다.",
+    "매수 구간, 위험 기준, 분할매도 구간이 감지되면 이 방식으로 알림을 보냅니다.",
     "market-signal-test"
   );
 }
@@ -976,13 +1087,19 @@ function renderNotificationStatus() {
   const supported = notificationSupported();
   const permission = notificationPermission();
   const enabled = notificationEnabled();
-  const candidate = notificationCandidate();
+  const trigger = notificationCandidate();
+  const legacyCandidate = trigger ? null : legacyNotificationCandidate();
   const autoText = enabled ? "켜짐" : state.notificationsEnabled ? "권한 필요" : "꺼짐";
   const rows = [
     ["브라우저 지원", supported, supported ? "가능" : "미지원"],
     ["권한", permission === "granted", notificationPermissionLabel(permission)],
     ["자동 알림", enabled, autoText],
-    ["감시 조건", Boolean(candidate), candidate ? `${candidate.name} ${candidate.totalScore}점` : "대기"]
+    [
+      "감시 조건",
+      Boolean(trigger),
+      trigger ? `${trigger.item.name} · ${trigger.label}` : legacyCandidate ? `${legacyCandidate.name} 후보 대기` : "대기"
+    ],
+    ["가격 기준", Boolean(trigger), trigger ? trigger.criterion : "조건 계산 대기"]
   ];
   const deniedHint =
     permission === "denied"
