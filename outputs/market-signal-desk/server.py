@@ -41,10 +41,12 @@ TOSS_LIVE_PRICES = os.getenv("TOSS_LIVE_PRICES", "1").lower() not in {"0", "fals
 TOSS_LIVE_CANDLES = os.getenv("TOSS_LIVE_CANDLES", "1").lower() not in {"0", "false", "no", "off"}
 TOSS_LIVE_ORDERBOOK = os.getenv("TOSS_LIVE_ORDERBOOK", "1").lower() not in {"0", "false", "no", "off"}
 TOSS_LIVE_TRADES = os.getenv("TOSS_LIVE_TRADES", "1").lower() not in {"0", "false", "no", "off"}
+TOSS_LIVE_PORTFOLIO = os.getenv("TOSS_LIVE_PORTFOLIO", "0").lower() not in {"0", "false", "no", "off"}
 TOSS_PRICE_CACHE_SECONDS = int(os.getenv("TOSS_PRICE_CACHE_SECONDS", "15"))
 TOSS_CANDLE_CACHE_SECONDS = int(os.getenv("TOSS_CANDLE_CACHE_SECONDS", "60"))
 TOSS_ORDERBOOK_CACHE_SECONDS = int(os.getenv("TOSS_ORDERBOOK_CACHE_SECONDS", "5"))
 TOSS_TRADES_CACHE_SECONDS = int(os.getenv("TOSS_TRADES_CACHE_SECONDS", "5"))
+TOSS_PORTFOLIO_CACHE_SECONDS = int(os.getenv("TOSS_PORTFOLIO_CACHE_SECONDS", "30"))
 TOSS_REQUEST_TIMEOUT_SECONDS = int(os.getenv("TOSS_REQUEST_TIMEOUT_SECONDS", "5"))
 TOSS_CANDLE_MAX_CANDIDATES = int(os.getenv("TOSS_CANDLE_MAX_CANDIDATES", "2"))
 TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "2"))
@@ -139,6 +141,10 @@ PRICE_CACHE: dict[str, object] = {"symbols": (), "payload": None, "expires_at": 
 CANDLE_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 ORDERBOOK_CACHE: dict[str, dict[str, object]] = {}
 TRADES_CACHE: dict[tuple[str, int], dict[str, object]] = {}
+ACCOUNT_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
+HOLDINGS_CACHE: dict[tuple[str, str], dict[str, object]] = {}
+BUYING_POWER_CACHE: dict[tuple[str, str], dict[str, object]] = {}
+SELLABLE_QUANTITY_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 OUTBOUND_IP_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 CORP_CODE_CACHE: dict[str, object] = {"payload": None}
 DISCLOSURE_CACHE: dict[tuple[str, int], dict[str, object]] = {}
@@ -206,6 +212,7 @@ def toss_config_status() -> dict:
         "liveCandlesEnabled": TOSS_LIVE_CANDLES,
         "liveOrderbookEnabled": TOSS_LIVE_ORDERBOOK,
         "liveTradesEnabled": TOSS_LIVE_TRADES,
+        "livePortfolioEnabled": TOSS_LIVE_PORTFOLIO,
         "clientIdConfigured": bool(TOSS_CLIENT_ID),
         "clientIdPreview": mask_secret(TOSS_CLIENT_ID),
         "clientSecretConfigured": bool(TOSS_CLIENT_SECRET),
@@ -213,9 +220,10 @@ def toss_config_status() -> dict:
         "accountSeqConfigured": bool(TOSS_ACCOUNT_SEQ),
         "readyForTokenIssue": bool(TOSS_CLIENT_ID and TOSS_CLIENT_SECRET),
         "readyForMarketData": bool(TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET)),
-        "readyForAccountData": bool(TOSS_ACCOUNT_SEQ and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
+        "readyForAccountData": bool(TOSS_LIVE_PORTFOLIO and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
         "orderbookMaxCandidates": TOSS_ORDERBOOK_MAX_CANDIDATES,
         "tradesMaxCandidates": TOSS_TRADES_MAX_CANDIDATES,
+        "portfolioCacheSeconds": TOSS_PORTFOLIO_CACHE_SECONDS,
     }
 
 
@@ -506,6 +514,80 @@ def fetch_toss_trades(symbol: str, count: int | None = None) -> dict:
         return payload
 
 
+def toss_api_get(path: str, query: dict | None = None, account_seq: str = "") -> dict:
+    token = toss_access_token()
+    query_string = f"?{urlencode(query)}" if query else ""
+    headers = {"Authorization": f"Bearer {token}"}
+    if account_seq:
+        headers["X-Tossinvest-Account"] = str(account_seq)
+    request = Request(
+        f"{TOSS_BASE_URL}{path}{query_string}",
+        headers=headers,
+        method="GET",
+    )
+    with urlopen(request, timeout=TOSS_REQUEST_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_toss_accounts() -> dict:
+    expires_at = ACCOUNT_CACHE.get("expires_at")
+    if ACCOUNT_CACHE.get("payload") is not None and isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+        return ACCOUNT_CACHE["payload"]  # type: ignore[return-value]
+    payload = toss_api_get("/api/v1/accounts")
+    ACCOUNT_CACHE["payload"] = payload
+    ACCOUNT_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=TOSS_PORTFOLIO_CACHE_SECONDS)
+    return payload
+
+
+def fetch_toss_holdings(account_seq: str, symbol: str = "") -> dict:
+    symbol = symbol.strip()
+    cache_key = (str(account_seq), symbol)
+    cached = HOLDINGS_CACHE.get(cache_key)
+    if cached:
+        expires_at = cached.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+            return cached["payload"]  # type: ignore[return-value]
+    query = {"symbol": symbol} if symbol else None
+    payload = toss_api_get("/api/v1/holdings", query=query, account_seq=str(account_seq))
+    HOLDINGS_CACHE[cache_key] = {
+        "payload": payload,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_PORTFOLIO_CACHE_SECONDS),
+    }
+    return payload
+
+
+def fetch_toss_buying_power(account_seq: str, currency: str) -> dict:
+    currency = currency.strip().upper()
+    cache_key = (str(account_seq), currency)
+    cached = BUYING_POWER_CACHE.get(cache_key)
+    if cached:
+        expires_at = cached.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+            return cached["payload"]  # type: ignore[return-value]
+    payload = toss_api_get("/api/v1/buying-power", query={"currency": currency}, account_seq=str(account_seq))
+    BUYING_POWER_CACHE[cache_key] = {
+        "payload": payload,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_PORTFOLIO_CACHE_SECONDS),
+    }
+    return payload
+
+
+def fetch_toss_sellable_quantity(account_seq: str, symbol: str) -> dict:
+    symbol = symbol.strip()
+    cache_key = (str(account_seq), symbol)
+    cached = SELLABLE_QUANTITY_CACHE.get(cache_key)
+    if cached:
+        expires_at = cached.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+            return cached["payload"]  # type: ignore[return-value]
+    payload = toss_api_get("/api/v1/sellable-quantity", query={"symbol": symbol}, account_seq=str(account_seq))
+    SELLABLE_QUANTITY_CACHE[cache_key] = {
+        "payload": payload,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_PORTFOLIO_CACHE_SECONDS),
+    }
+    return payload
+
+
 def decimal_text(value: str) -> str:
     try:
         number = Decimal(str(value))
@@ -566,6 +648,13 @@ def display_percent_abs(rate: Decimal) -> str:
 def display_decimal_percent(rate: Decimal) -> str:
     sign = "+" if rate >= 0 else ""
     return f"{sign}{rate.quantize(Decimal('0.1'))}%"
+
+
+def display_ratio_percent(value) -> str:
+    ratio = decimal_or_none(value)
+    if ratio is None:
+        return "-"
+    return display_decimal_percent(ratio * Decimal(100))
 
 
 def display_multiplier(value: Decimal) -> str:
@@ -1080,6 +1169,195 @@ def summarize_trades(payload: dict) -> dict | None:
         "pressure": pressure,
         "latestTimestamp": first.get("timestamp"),
         "currency": first.get("currency"),
+    }
+
+
+def account_rows(payload: dict) -> list[dict]:
+    result = payload.get("result", [])
+    return result if isinstance(result, list) else []
+
+
+def holdings_result(payload: dict) -> dict:
+    result = payload.get("result", {})
+    return result if isinstance(result, dict) else {}
+
+
+def holding_items(payload: dict) -> list[dict]:
+    items = holdings_result(payload).get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def masked_account(account: dict) -> dict:
+    account_no = str(account.get("accountNo", ""))
+    tail = account_no[-4:] if len(account_no) >= 4 else account_no
+    return {
+        "accountSeq": str(account.get("accountSeq", "")),
+        "accountNoPreview": f"****{tail}" if tail else "",
+        "accountType": account.get("accountType", ""),
+    }
+
+
+def selected_account_seq(accounts: list[dict]) -> str:
+    if TOSS_ACCOUNT_SEQ:
+        return str(TOSS_ACCOUNT_SEQ)
+    first = accounts[0] if accounts else {}
+    value = first.get("accountSeq", "")
+    return str(value) if value != "" else ""
+
+
+def find_account(accounts: list[dict], account_seq: str) -> dict:
+    for account in accounts:
+        if str(account.get("accountSeq", "")) == str(account_seq):
+            return account
+    return accounts[0] if accounts else {}
+
+
+def currency_amounts(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def money_display(value, currency: str) -> str:
+    number = decimal_or_none(value)
+    if number is None:
+        return "-"
+    return display_price(str(number), currency)
+
+
+def portfolio_position_label(profit_rate: Decimal | None, allocation_percent: Decimal | None) -> str:
+    if allocation_percent is not None and allocation_percent >= Decimal("35"):
+        return "비중 점검"
+    if profit_rate is not None and profit_rate <= Decimal("-7"):
+        return "손절 경계"
+    if profit_rate is not None and profit_rate >= Decimal("12"):
+        return "분할매도 검토"
+    if profit_rate is not None and profit_rate <= Decimal("-3"):
+        return "추가매수 대기"
+    return "보유 유지"
+
+
+def normalize_holding_item(item: dict, totals_by_currency: dict) -> dict:
+    currency = str(item.get("currency", "KRW"))
+    market_value = item.get("marketValue", {}) if isinstance(item.get("marketValue"), dict) else {}
+    profit_loss = item.get("profitLoss", {}) if isinstance(item.get("profitLoss"), dict) else {}
+    daily_profit_loss = item.get("dailyProfitLoss", {}) if isinstance(item.get("dailyProfitLoss"), dict) else {}
+    amount = decimal_or_none(market_value.get("amount"))
+    total_amount = decimal_or_none(totals_by_currency.get(currency.lower()) or totals_by_currency.get(currency))
+    allocation_percent = None
+    if amount is not None and total_amount is not None and total_amount > 0:
+        allocation_percent = (amount / total_amount) * Decimal(100)
+    profit_rate = decimal_or_none(profit_loss.get("rate"))
+    return {
+        "symbol": item.get("symbol", ""),
+        "name": item.get("name", ""),
+        "marketCountry": item.get("marketCountry", ""),
+        "currency": currency,
+        "quantity": item.get("quantity", "0"),
+        "marketValueAmount": str(amount) if amount is not None else "",
+        "lastPrice": money_display(item.get("lastPrice"), currency),
+        "averagePurchasePrice": money_display(item.get("averagePurchasePrice"), currency),
+        "marketValue": money_display(market_value.get("amount"), currency),
+        "purchaseAmount": money_display(market_value.get("purchaseAmount"), currency),
+        "profitLoss": money_display(profit_loss.get("amount"), currency),
+        "profitLossRate": display_ratio_percent(profit_loss.get("rate")),
+        "dailyProfitLossRate": display_ratio_percent(daily_profit_loss.get("rate")),
+        "allocation": display_decimal_percent(allocation_percent) if allocation_percent is not None else "-",
+        "judgement": portfolio_position_label(profit_rate, allocation_percent),
+    }
+
+
+def portfolio_status() -> dict:
+    base = {
+        "enabled": TOSS_LIVE_PORTFOLIO,
+        "readOnly": True,
+        "cacheSeconds": TOSS_PORTFOLIO_CACHE_SECONDS,
+        "ready": bool(TOSS_LIVE_PORTFOLIO and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
+    }
+    if not TOSS_LIVE_PORTFOLIO:
+        return {
+            **base,
+            "source": "disabled",
+            "message": "TOSS_LIVE_PORTFOLIO가 꺼져 있어 내 자산을 조회하지 않습니다.",
+            "accounts": [],
+            "items": [],
+            "summary": {},
+            "buyingPower": {},
+        }
+    if not base["ready"]:
+        return {
+            **base,
+            "source": "not-configured",
+            "message": "토스 API 키 또는 액세스 토큰이 필요합니다.",
+            "accounts": [],
+            "items": [],
+            "summary": {},
+            "buyingPower": {},
+        }
+
+    accounts_payload = fetch_toss_accounts()
+    accounts = account_rows(accounts_payload)
+    account_seq = selected_account_seq(accounts)
+    if not account_seq:
+        return {
+            **base,
+            "source": "toss",
+            "message": "조회 가능한 종합매매 계좌가 없습니다.",
+            "accounts": [masked_account(account) for account in accounts],
+            "selectedAccountSeq": "",
+            "items": [],
+            "summary": {},
+            "buyingPower": {},
+        }
+
+    selected_account = find_account(accounts, account_seq)
+    holdings_payload = fetch_toss_holdings(account_seq)
+    result = holdings_result(holdings_payload)
+    overview_market_value = result.get("marketValue", {}) if isinstance(result.get("marketValue"), dict) else {}
+    totals_by_currency = currency_amounts(overview_market_value.get("amount"))
+    raw_items = holding_items(holdings_payload)
+    items = [normalize_holding_item(item, totals_by_currency) for item in raw_items if isinstance(item, dict)]
+    items.sort(
+        key=lambda item: decimal_or_none(item.get("marketValueAmount")) or Decimal("0"),
+        reverse=True,
+    )
+
+    buying_power = {}
+    for currency in ["KRW", "USD"]:
+        try:
+            payload = fetch_toss_buying_power(account_seq, currency)
+            value = (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("cashBuyingPower")
+            buying_power[currency] = {
+                "cashBuyingPower": money_display(value, currency),
+                "source": "toss",
+            }
+        except Exception as error:
+            buying_power[currency] = {
+                "cashBuyingPower": "-",
+                "source": "unavailable",
+                "error": str(error)[:160],
+            }
+
+    profit_loss = result.get("profitLoss", {}) if isinstance(result.get("profitLoss"), dict) else {}
+    daily_profit_loss = result.get("dailyProfitLoss", {}) if isinstance(result.get("dailyProfitLoss"), dict) else {}
+    return {
+        **base,
+        "source": "toss",
+        "message": "토스 보유 주식 정보를 읽기 전용으로 조회했습니다.",
+        "accounts": [masked_account(account) for account in accounts],
+        "selectedAccount": masked_account(selected_account),
+        "selectedAccountSeq": account_seq,
+        "summary": {
+            "holdingCount": len(items),
+            "profitLossRate": display_ratio_percent(profit_loss.get("rate")),
+            "profitLossRateAfterCost": display_ratio_percent(profit_loss.get("rateAfterCost")),
+            "dailyProfitLossRate": display_ratio_percent(daily_profit_loss.get("rate")),
+            "marketValue": {
+                "KRW": money_display(totals_by_currency.get("krw"), "KRW"),
+                "USD": money_display(totals_by_currency.get("usd"), "USD"),
+            },
+        },
+        "buyingPower": buying_power,
+        "items": items[:12],
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
 
@@ -3403,6 +3681,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/integrations/toss/status":
             self.send_json(toss_config_status())
+            return
+
+        if parsed.path == "/api/portfolio/status":
+            try:
+                self.send_json(portfolio_status())
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
             return
 
         if parsed.path == "/api/network/outbound-ip":

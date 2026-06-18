@@ -35,6 +35,7 @@ const state = {
   adminToken: readStoredValue("marketSignalAdminToken", ""),
   schedulerStatus: null,
   storageStatus: null,
+  portfolioStatus: null,
   viewingSnapshot: null,
   selectedSymbol: null,
   notificationsEnabled: readStoredValue("marketSignalNotifications") === "1",
@@ -65,6 +66,7 @@ const els = {
   schedulerStatus: document.querySelector("#schedulerStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
   storageStatus: document.querySelector("#storageStatus"),
+  portfolioStatus: document.querySelector("#portfolioStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
   networkStatus: document.querySelector("#networkStatus"),
   tossStatus: document.querySelector("#tossStatus"),
@@ -216,6 +218,14 @@ function statusFallbacks() {
       persistent: false,
       recentRunCount: 0
     },
+    portfolio: {
+      enabled: false,
+      ready: false,
+      source: "disabled",
+      summary: {},
+      buyingPower: {},
+      items: []
+    },
     network: {
       source: "unavailable",
       provider: "",
@@ -259,15 +269,17 @@ async function loadDashboard() {
     safeFetchJson("/api/auth/status", fallbacks.auth),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
     safeFetchJson("/api/storage/status", fallbacks.storage),
+    safeFetchJson("/api/portfolio/status", fallbacks.portfolio),
     safeFetchJson("/api/network/outbound-ip", fallbacks.network),
     safeFetchJson("/api/integrations/toss/status", fallbacks.toss),
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, storageStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, storageStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.schedulerStatus = schedulerStatus;
     state.storageStatus = storageStatus;
+    state.portfolioStatus = portfolioStatus;
     state.networkStatus = networkStatus;
     state.tossStatus = tossStatus;
     state.dartStatus = dartStatus;
@@ -278,6 +290,7 @@ async function loadDashboard() {
     renderSchedulerStatus();
     renderReadinessStatus();
     renderStorageStatus();
+    renderPortfolioStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
     renderNextSteps();
@@ -386,6 +399,7 @@ function render() {
   renderSchedulerStatus();
   renderReadinessStatus();
   renderStorageStatus();
+  renderPortfolioStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
   renderNextSteps();
@@ -968,6 +982,52 @@ function renderStorageStatus() {
     .join("");
 }
 
+function isPositiveText(value) {
+  const text = String(value ?? "").trim();
+  return Boolean(text && text !== "-" && !text.startsWith("-"));
+}
+
+function renderPortfolioStatus() {
+  if (!els.portfolioStatus) return;
+  const status = state.portfolioStatus;
+  if (!status) return;
+  const summary = status.summary ?? {};
+  const buyingPower = status.buyingPower ?? {};
+  const selectedAccount = status.selectedAccount ?? {};
+  const items = Array.isArray(status.items) ? status.items : [];
+  const krwPower = buyingPower.KRW?.cashBuyingPower ?? "-";
+  const usdPower = buyingPower.USD?.cashBuyingPower ?? "-";
+  const accountLabel = selectedAccount.accountNoPreview || (status.selectedAccountSeq ? "연결됨" : "-");
+  const rows = [
+    [
+      "자산 조회",
+      Boolean(status.enabled && status.ready && status.source === "toss"),
+      !status.enabled ? "꺼짐" : status.ready ? "읽기 가능" : "대기"
+    ],
+    ["계좌", Boolean(status.selectedAccountSeq), accountLabel],
+    ["보유", Number(summary.holdingCount ?? 0) > 0, `${summary.holdingCount ?? 0}종목`],
+    ["총 손익률", isPositiveText(summary.profitLossRate), summary.profitLossRate ?? "-"],
+    ["오늘", isPositiveText(summary.dailyProfitLossRate), summary.dailyProfitLossRate ?? "-"],
+    ["매수 가능", krwPower !== "-" || usdPower !== "-", `${krwPower}${usdPower !== "-" ? ` · ${usdPower}` : ""}`]
+  ];
+  const holdingRows = items.slice(0, 3).map((item) => [
+    item.name || item.symbol || "보유 종목",
+    !String(item.judgement ?? "").includes("경계"),
+    `${item.judgement ?? "보유"} · ${item.profitLossRate ?? "-"}`
+  ]);
+  els.portfolioStatus.innerHTML = [...rows, ...holdingRows]
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderSnapshotHistory() {
   if (!els.snapshotHistory) return;
   const runs = state.schedulerStatus?.recentRuns ?? [];
@@ -1151,6 +1211,7 @@ function renderTossStatus() {
     ["Client Secret", status.clientSecretConfigured, status.clientSecretConfigured ? "설정됨" : "미설정"],
     ["토큰 발급", status.readyForTokenIssue, status.readyForTokenIssue ? "준비됨" : "대기"],
     ["시세 조회", status.readyForMarketData, status.readyForMarketData ? "가능" : "대기"],
+    ["자산 조회", status.readyForAccountData, status.livePortfolioEnabled ? "준비됨" : "꺼짐"],
     ["오류 사유", !tossIssue, tossIssue || "없음"],
     ["가격 live", status.livePricesEnabled, status.livePricesEnabled ? "켜짐" : "꺼짐"],
     [
@@ -1909,11 +1970,14 @@ els.refreshButton.addEventListener("click", () => {
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
   const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
+  const portfolio = await safeFetchJson("/api/portfolio/status", statusFallbacks().portfolio, 5000);
   state.schedulerStatus = status;
   state.storageStatus = storage;
+  state.portfolioStatus = portfolio;
   maybeNotifySchedulerRun(status);
   renderSchedulerStatus();
   renderStorageStatus();
+  renderPortfolioStatus();
   renderSnapshotHistory();
 }
 

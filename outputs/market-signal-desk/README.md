@@ -67,6 +67,7 @@ TOSS_LIVE_PRICES=0
 TOSS_LIVE_CANDLES=0
 TOSS_LIVE_ORDERBOOK=0
 TOSS_LIVE_TRADES=0
+TOSS_LIVE_PORTFOLIO=0
 DART_LIVE_DISCLOSURES=0
 NAVER_LIVE_NEWS=0
 OPENAI_ANALYSIS_ENABLED=0
@@ -136,15 +137,17 @@ Render 배포 환경에서는 오른쪽 `Render 외부 IP` 카드 또는 `GET /a
 환경변수가 설정되어 있으면 대시보드는 후보 종목의 현재가를 `GET /api/v1/prices`로 조회해 샘플 가격을 덮어씁니다. 또한 `GET /api/v1/candles` 일봉 데이터를 이용해 미니 차트와 전일 대비 등락률을 보강합니다.
 
 호가와 최근 체결은 주문 API가 아니라 시장 데이터 API입니다. 화면은 `GET /api/v1/orderbook`과 `GET /api/v1/trades`를 이용해 호가 잔량, 스프레드, 최근 체결 방향을 수급 참고 지표로만 사용합니다. 주문 생성이나 매매 실행과는 연결하지 않습니다.
-Render에서는 토스 키와 live 플래그를 넣은 뒤 `test-render-deploy.ps1`로 토큰 발급 가능 상태, 대시보드 반영, 가격/차트/호가/체결 API를 함께 확인합니다. 토스증권 허용 IP가 켜져 있으면 Render 서버 외부 IP가 등록되어 있어야 합니다.
+보유 자산 판단은 `TOSS_LIVE_PORTFOLIO=1`을 켠 뒤 계좌 목록, 보유 주식, 매수 가능 금액을 읽기 전용으로 조회합니다. 여러 계좌가 있으면 `TOSS_ACCOUNT_SEQ`를 지정하고, 지정하지 않으면 첫 계좌를 조회합니다. 이 기능도 주문 생성이나 자동 매매와 연결하지 않습니다.
+Render에서는 토스 키와 live 플래그를 넣은 뒤 `test-render-deploy.ps1`로 토큰 발급 가능 상태, 대시보드 반영, 가격/차트/호가/체결/포트폴리오 API를 함께 확인합니다. 토스증권 허용 IP가 켜져 있으면 Render 서버 외부 IP가 등록되어 있어야 합니다.
 
-API 호출량을 줄이기 위해 현재가는 기본 15초, 캔들은 기본 60초, 호가/체결은 기본 5초 동안 캐시합니다.
+API 호출량을 줄이기 위해 현재가는 기본 15초, 캔들은 기본 60초, 호가/체결은 기본 5초, 포트폴리오는 기본 30초 동안 캐시합니다.
 
 ```powershell
 $env:TOSS_PRICE_CACHE_SECONDS="15"
 $env:TOSS_CANDLE_CACHE_SECONDS="60"
 $env:TOSS_ORDERBOOK_CACHE_SECONDS="5"
 $env:TOSS_TRADES_CACHE_SECONDS="5"
+$env:TOSS_PORTFOLIO_CACHE_SECONDS="30"
 $env:TOSS_REQUEST_TIMEOUT_SECONDS="5"
 $env:TOSS_CANDLE_MAX_CANDIDATES="2"
 $env:TOSS_ORDERBOOK_MAX_CANDIDATES="2"
@@ -168,6 +171,7 @@ $env:TOSS_LIVE_PRICES="0"
 $env:TOSS_LIVE_CANDLES="0"
 $env:TOSS_LIVE_ORDERBOOK="0"
 $env:TOSS_LIVE_TRADES="0"
+$env:TOSS_LIVE_PORTFOLIO="0"
 ```
 
 ## OpenDART 공시 설정
@@ -370,6 +374,7 @@ $env:SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT="1"
 - 백엔드 API
 - 토스증권 현재가 반영 및 연결 상태 표시
 - 토스증권 호가/최근 체결 기반 수급 지표 반영
+- 토스증권 보유 자산 읽기 전용 조회 및 포트폴리오 상태 표시
 - USD/KRW 환율 갱신 및 출처 표시
 - OpenDART 공시 조회 및 연결 상태 표시
 - 네이버 뉴스 검색 및 연결 상태 표시
@@ -389,6 +394,7 @@ GET  /api/integrations/toss/prices?symbols=005930,AAPL
 GET  /api/integrations/toss/candles?symbol=005930&interval=1d&count=20
 GET  /api/integrations/toss/orderbook?symbol=005930
 GET  /api/integrations/toss/trades?symbol=005930&count=30
+GET  /api/portfolio/status
 GET  /api/integrations/dart/status
 GET  /api/integrations/dart/corp-code?symbol=005930
 GET  /api/integrations/dart/disclosures?symbol=005930&days=7

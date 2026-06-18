@@ -70,6 +70,7 @@ TOSS_LIVE_PRICES=0
 TOSS_LIVE_CANDLES=0
 TOSS_LIVE_ORDERBOOK=0
 TOSS_LIVE_TRADES=0
+TOSS_LIVE_PORTFOLIO=0
 DART_LIVE_DISCLOSURES=0
 NAVER_LIVE_NEWS=0
 GDELT_LIVE_NEWS=0
@@ -119,7 +120,8 @@ https://market-signal-desk.onrender.com
 3. DART_API_KEY / DART_LIVE_DISCLOSURES=1
 4. OPENAI_API_KEY / OPENAI_ANALYSIS_ENABLED=1
 5. Toss 키와 Toss live flags
-6. SIGNAL_SCHEDULER_ENABLED=1
+6. TOSS_LIVE_PORTFOLIO=1
+7. SIGNAL_SCHEDULER_ENABLED=1
 ```
 
 GDELT는 요청 제한이 있으므로 처음에는 아래 기본값을 유지합니다.
@@ -234,6 +236,7 @@ TOSS_LIVE_PRICES=1
 TOSS_LIVE_CANDLES=1
 TOSS_LIVE_ORDERBOOK=1
 TOSS_LIVE_TRADES=1
+TOSS_LIVE_PORTFOLIO=0
 ```
 
 선택값은 처음에는 후보 수를 작게 둡니다.
@@ -243,6 +246,7 @@ TOSS_CANDLE_MAX_CANDIDATES=2
 TOSS_ORDERBOOK_MAX_CANDIDATES=2
 TOSS_TRADES_MAX_CANDIDATES=2
 TOSS_TRADES_COUNT=30
+TOSS_PORTFOLIO_CACHE_SECONDS=30
 TOSS_REQUEST_TIMEOUT_SECONDS=8
 TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT=50
 ```
@@ -274,6 +278,15 @@ Toss trades API          items=1개 이상
 ```
 
 현재가만 먼저 확인하고 싶으면 `TOSS_LIVE_PRICES=1`만 켜고 나머지 live 플래그는 `0`으로 둡니다. 화면 가격이 안정적으로 맞으면 차트, 호가, 체결 순서로 하나씩 켭니다.
+
+가격, 차트, 호가, 체결이 안정적으로 확인된 뒤 내 보유 종목을 판단에 반영하려면 Render Environment에서 `TOSS_LIVE_PORTFOLIO=1`을 추가합니다. 여러 계좌가 있으면 `TOSS_ACCOUNT_SEQ`도 함께 지정합니다. 이 단계는 계좌 목록, 보유 주식, 매수 가능 금액만 읽으며 주문 실행은 하지 않습니다.
+
+정상 기준:
+
+```text
+Toss portfolio API      account=****1234, holdings=보유 종목 수, readOnly=True
+화면 포트폴리오 상태     자산 조회 읽기 가능
+```
 
 화면에서 `토큰 발급 준비됨`, `시세 조회 가능`인데도 가격/차트/호가/체결 출처가 `샘플`이면 live 플래그가 꺼져 있는 상태일 가능성이 큽니다. 이때는 먼저 `TOSS_LIVE_PRICES=1`만 켜고 재배포한 뒤 가격 출처가 `토스`로 바뀌는지 확인합니다.
 

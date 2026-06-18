@@ -116,7 +116,8 @@ try {
 
 $toss = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/status") -Headers $headers -Method Get -TimeoutSec 30
 $tossReady = [bool]$toss.readyForMarketData
-Write-Check "Toss status" $tossReady "ready=$tossReady, prices=$($toss.livePricesEnabled), candles=$($toss.liveCandlesEnabled), orderbook=$($toss.liveOrderbookEnabled), trades=$($toss.liveTradesEnabled)"
+$tossPortfolioReady = [bool]$toss.readyForAccountData
+Write-Check "Toss status" $tossReady "ready=$tossReady, prices=$($toss.livePricesEnabled), candles=$($toss.liveCandlesEnabled), orderbook=$($toss.liveOrderbookEnabled), trades=$($toss.liveTradesEnabled), portfolio=$($toss.livePortfolioEnabled)"
 
 $dart = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/dart/status") -Headers $headers -Method Get -TimeoutSec 30
 $dartReady = [bool]$dart.readyForDisclosures
@@ -223,6 +224,19 @@ if ($tossReady) {
   Write-Check "Toss candles API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_CANDLES=1"
   Write-Check "Toss orderbook API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_ORDERBOOK=1"
   Write-Check "Toss trades API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_TRADES=1"
+}
+
+if ($tossPortfolioReady) {
+  try {
+    $portfolio = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/portfolio/status") -Headers $headers -Method Get -TimeoutSec 45
+    $holdingCount = if ($portfolio.summary) { $portfolio.summary.holdingCount } else { 0 }
+    $account = if ($portfolio.selectedAccount -and $portfolio.selectedAccount.accountNoPreview) { $portfolio.selectedAccount.accountNoPreview } else { "-" }
+    Write-Check "Toss portfolio API" ($portfolio.source -eq "toss") "account=$account, holdings=$holdingCount, readOnly=$($portfolio.readOnly)"
+  } catch {
+    Write-Check "Toss portfolio API" $false (Format-ApiError $_)
+  }
+} else {
+  Write-Check "Toss portfolio API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_PORTFOLIO=1"
 }
 
 $dartDashboardStatus = $dashboard.integrations.dart.disclosures
