@@ -176,9 +176,15 @@ SIGNAL_DISCOVERY_CACHE_SECONDS=600
 SIGNAL_DISCOVERY_BOT_ENABLED=1
 SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS=600
 SIGNAL_DISCOVERY_BOT_MODE=intraday
+SIGNAL_CANDIDATE_POOL_ENABLED=1
+SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT=8
+SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE=58
+SIGNAL_CANDIDATE_POOL_TOP_LIMIT=5
 ```
 
 화면에서 `뉴스 소스 상태 > 글로벌 출처`가 `제한`으로 표시되면 GDELT 요청 제한입니다. 몇 분 뒤 새로고침하거나 후보 조회 수를 1로 유지한 상태에서 다시 확인합니다.
+
+메인 화면의 `후보 풀` 카드는 DB에 누적된 상시 감시 후보 중 현재 살아 있는 후보 수, 진입/검증/눌림 상태, 상위 후보를 보여줍니다. 후보 풀 가중치는 최종 압축·정렬에 반영되지만, 리스크와 가격 반응 기준을 통과하지 못한 종목을 매수 후보로 강제로 올리지는 않습니다.
 
 ## 네이버 뉴스 활성화
 

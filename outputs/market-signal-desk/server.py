@@ -169,6 +169,7 @@ SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS",
 SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
 SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "8"))
 SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
+SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -4530,10 +4531,12 @@ def candidate_compression_score(candidate: dict) -> int:
         0,
         20,
     )
+    pool_bonus = candidate_pool_decision_bonus(candidate)
     score = (
         base
         + gate_bonus
         + official_bonus
+        + pool_bonus
         + (bounded_int(candidate.get("totalScore", 0), 0, 100) * 0.18)
         + (bounded_int(candidate.get("triggerReadiness", 0), 0, 100) * 0.16)
         + (bounded_int(confidence.get("score", 0), 0, 100) * 0.18)
@@ -4702,6 +4705,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         validation_key = str(validation.get("key", "insufficient"))
         validation_counts[validation_key] = validation_counts.get(validation_key, 0) + 1
         compression_score = candidate_compression_score(item)
+        pool_bonus = candidate_pool_decision_bonus(item)
 
         if id(item) in core_item_ids:
             tier, label = "core", "핵심"
@@ -4741,6 +4745,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "reactionScore": bounded_int(reaction.get("score", 0), 0, 100),
             "validationKey": validation_key,
             "validationLabel": validation.get("label", ""),
+            "poolBonus": pool_bonus,
         }
         item["candidateCompression"] = compression
         if tier == "core":
@@ -4782,6 +4787,37 @@ CANDIDATE_POOL_STATES = {
     "excluded": {"label": "제외", "rank": 5},
     "expired": {"label": "만료", "rank": 0},
 }
+
+
+def candidate_pool_decision_bonus(candidate: dict) -> int:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    memory = discovery.get("poolMemory", {}) if isinstance(discovery.get("poolMemory"), dict) else {}
+    pool = candidate.get("candidatePool", {}) if isinstance(candidate.get("candidatePool"), dict) else {}
+    state_key = str(pool.get("stateKey") or memory.get("stateKey") or "")
+    if state_key in {"excluded", "expired"}:
+        return -10
+    pool_score = bounded_int(memory.get("score", discovery.get("poolScore", pool.get("retainScore", 0))), 0, 100)
+    observations = bounded_int(pool.get("observations", memory.get("observations", 0)), 0, 100_000)
+    selected_count = bounded_int(pool.get("selectedCount", memory.get("selectedCount", 0)), 0, 100_000)
+    score_delta = bounded_int(pool.get("scoreDelta", 0), -100, 100)
+    state_bonus = {
+        "entry_candidate": 8,
+        "pullback_wait": 6,
+        "portfolio": 5,
+        "validating": 5,
+        "watching": 3,
+        "collected": 0,
+    }.get(state_key, 0)
+    momentum_bonus = 2 if score_delta >= 5 else (-3 if score_delta <= -5 else 0)
+    return bounded_int(
+        state_bonus
+        + min(7, pool_score // 14)
+        + min(3, observations // 3)
+        + min(3, selected_count)
+        + momentum_bonus,
+        -10,
+        18,
+    )
 
 
 def candidate_pool_rank(state_key: str) -> int:
@@ -5018,6 +5054,7 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     soft_demotion_count = 0
     improving_count = 0
     weakening_count = 0
+    top_records: list[dict] = []
     for record in items.values():
         if not isinstance(record, dict):
             continue
@@ -5033,6 +5070,36 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
             improving_count += 1
         elif momentum == "약화":
             weakening_count += 1
+        if key not in {"excluded", "expired"}:
+            top_records.append({
+                "symbol": record.get("symbol", ""),
+                "name": record.get("name", record.get("symbol", "")),
+                "stateKey": key,
+                "stateLabel": record.get("stateLabel") or CANDIDATE_POOL_STATES.get(key, {}).get("label", key),
+                "score": bounded_int(record.get("totalScore", 0), 0, 100),
+                "peakScore": bounded_int(record.get("peakScore", record.get("totalScore", 0)), 0, 100),
+                "readiness": bounded_int(record.get("triggerReadiness", 0), 0, 100),
+                "evidenceScore": bounded_int(record.get("evidenceScore", 0), 0, 100),
+                "reactionScore": bounded_int(record.get("reactionScore", 0), 0, 100),
+                "observations": bounded_int(record.get("observations", 0), 0, 100_000),
+                "selectedCount": bounded_int(record.get("selectedCount", 0), 0, 100_000),
+                "momentumLabel": momentum,
+                "scoreDelta": bounded_int(record.get("scoreDelta", 0), -100, 100),
+                "lastSeenAt": record.get("lastSeenAt", ""),
+                "reason": record.get("stateReason", ""),
+            })
+    top_records.sort(
+        key=lambda record: (
+            candidate_pool_rank(str(record.get("stateKey", ""))),
+            bounded_int(record.get("peakScore", 0), 0, 100),
+            bounded_int(record.get("score", 0), 0, 100),
+            bounded_int(record.get("evidenceScore", 0), 0, 100),
+            bounded_int(record.get("reactionScore", 0), 0, 100),
+            bounded_int(record.get("observations", 0), 0, 100_000),
+            str(record.get("lastSeenAt", "")),
+        ),
+        reverse=True,
+    )
     return {
         "enabled": SIGNAL_CANDIDATE_POOL_ENABLED,
         "file": display_local_path(CANDIDATE_POOL_FILE),
@@ -5048,6 +5115,8 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
         "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
         "demotionConfirmations": max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS),
+        "topCandidates": top_records[: max(0, SIGNAL_CANDIDATE_POOL_TOP_LIMIT)],
+        "topLimit": SIGNAL_CANDIDATE_POOL_TOP_LIMIT,
     }
 
 
@@ -7327,11 +7396,11 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
 
     if mode == "preopen":
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
     elif mode == "intraday":
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
     else:
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item), candidate_pool_decision_bonus(item)), reverse=True)
     return candidates
 
 
@@ -7436,6 +7505,7 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolMemoryAppliedCount": discovery_status.get("candidatePoolMemoryAppliedCount"),
             "candidatePoolSelectedCount": discovery_status.get("candidatePoolSelectedCount"),
             "candidatePoolSelectedSymbols": discovery_status.get("candidatePoolSelectedSymbols", []),
+            "candidatePoolTopCandidates": pool_status.get("topCandidates", []),
             "confirmedSignalCount": selection_status.get("confirmedSignalCount"),
             "evidenceWaitSignalCount": selection_status.get("evidenceWaitSignalCount"),
             "reactionOnlySignalCount": selection_status.get("reactionOnlySignalCount"),
@@ -7680,6 +7750,7 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolMemoryAppliedCount": summary.get("candidatePoolMemoryAppliedCount"),
         "candidatePoolSelectedCount": summary.get("candidatePoolSelectedCount"),
         "candidatePoolSelectedSymbols": summary.get("candidatePoolSelectedSymbols", []),
+        "candidatePoolTopCandidates": summary.get("candidatePoolTopCandidates", []),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),

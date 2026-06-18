@@ -359,6 +359,15 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 .\test-render-deploy.ps1 -RunDatabaseMigration
 ```
 
+후보 풀은 단순 저장 기록이 아니라 상시 감시 대상입니다. 봇이 발견한 종목은 풀에 누적되고, 상태가 `진입 후보`, `검증중`, `눌림 대기`, `관찰중`으로 관리됩니다. 최종 후보 압축과 정렬에는 후보 풀 누적 점수, 관측 횟수, 최근 개선/약화 흐름이 제한 가중치로 반영됩니다. 리스크, 데이터 신뢰도, 가격 반응 기준은 후보 풀 가중치보다 우선합니다.
+
+```powershell
+$env:SIGNAL_CANDIDATE_POOL_ENABLED="1"
+$env:SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT="8"
+$env:SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE="58"
+$env:SIGNAL_CANDIDATE_POOL_TOP_LIMIT="5"
+```
+
 ## 상시 발굴 봇 설정
 
 상시 발굴 봇은 장마감/장전 스냅샷과 별도로 최신 후보를 주기적으로 갱신하고 마지막 발굴 결과를 저장합니다. DB가 연결되어 있으면 `signal_kv`에, 없으면 `data/discovery-latest.json`에 저장합니다. 이 봇은 투자 판단 보조용이며 주문이나 자동매매와 연결되지 않습니다.

@@ -85,6 +85,7 @@ const els = {
   marketStatus: document.querySelector("#marketStatus"),
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
+  candidatePoolStatus: document.querySelector("#candidatePoolStatus"),
   schedulerStatus: document.querySelector("#schedulerStatus"),
   discoveryBotStatus: document.querySelector("#discoveryBotStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
@@ -436,6 +437,14 @@ function renderLoadError(error) {
   els.metricHighScore.textContent = 0;
   els.metricReady.textContent = 0;
   els.metricWatched.textContent = 0;
+  if (els.candidatePoolStatus) {
+    els.candidatePoolStatus.innerHTML = `
+      <div>
+        <span>후보 풀</span>
+        <strong class="warn">연결 실패</strong>
+      </div>
+    `;
+  }
   els.principles.innerHTML = "";
   els.candidateFeed.innerHTML = `
     <div class="empty-state">
@@ -884,11 +893,55 @@ function renderTradeDecisionStatus() {
     .join("");
 }
 
+function renderCandidatePoolStatus() {
+  if (!els.candidatePoolStatus) return;
+  const summary = state.dashboard?.summary ?? {};
+  const pool = state.dashboard?.integrations?.candidatePool ?? {};
+  const counts = summary.candidatePoolStatusCounts ?? pool.statusCounts ?? {};
+  const top = Array.isArray(summary.candidatePoolTopCandidates)
+    ? summary.candidatePoolTopCandidates
+    : Array.isArray(pool.topCandidates)
+      ? pool.topCandidates
+      : [];
+  const active = Number(summary.candidatePoolActiveCount ?? pool.activeCount ?? 0);
+  const total = Number(summary.candidatePoolCount ?? pool.totalCount ?? 0);
+  const selected = Number(summary.candidatePoolSelectedCount ?? 0);
+  const retained = Number(summary.candidatePoolRetainedScanCount ?? 0);
+  const improving = Number(summary.candidatePoolImprovingCount ?? pool.improvingCount ?? 0);
+  const weakening = Number(summary.candidatePoolWeakeningCount ?? pool.weakeningCount ?? 0);
+  const topText = top.length
+    ? top
+        .slice(0, 2)
+        .map((item) => `${item.name || item.symbol} ${item.stateLabel || ""} ${item.peakScore ?? item.score ?? "-"}점`)
+        .join(" · ")
+    : "상위 관찰 후보 없음";
+  const rows = [
+    ["활성 후보", active > 0, `${active}/${total}`],
+    ["진입/검증", (counts.entry_candidate ?? 0) + (counts.validating ?? 0) > 0, `진입 ${counts.entry_candidate ?? 0} · 검증 ${counts.validating ?? 0}`],
+    ["눌림/관찰", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `눌림 ${counts.pullback_wait ?? 0} · 관찰 ${counts.watching ?? 0}`],
+    ["재점검", retained > 0 || selected > 0, `스캔 ${retained} · 선정 ${selected}`],
+    ["흐름", improving >= weakening, `개선 ${improving} · 약화 ${weakening}`],
+    ["상위", top.length > 0, topText]
+  ];
+  els.candidatePoolStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function render() {
   updateShellView();
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
+  renderCandidatePoolStatus();
   renderAuthStatus();
   renderSchedulerStatus();
   renderDiscoveryBotStatus();

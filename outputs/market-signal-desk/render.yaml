@@ -23,6 +23,14 @@ services:
         value: "600"
       - key: SIGNAL_DISCOVERY_BOT_MODE
         value: "intraday"
+      - key: SIGNAL_CANDIDATE_POOL_ENABLED
+        value: "1"
+      - key: SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT
+        value: "8"
+      - key: SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE
+        value: "58"
+      - key: SIGNAL_CANDIDATE_POOL_TOP_LIMIT
+        value: "5"
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT
