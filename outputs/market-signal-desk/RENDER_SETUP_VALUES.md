@@ -188,3 +188,37 @@ OpenDART dashboard source source=opendart
 OpenDART corp code        symbol=005930
 OpenDART disclosures API  source=opendart
 ```
+
+## OpenAI 분석 활성화
+
+OpenDART 공시까지 확인되면 Render Environment에 아래 값을 추가합니다.
+
+```text
+OPENAI_API_KEY=OpenAI_API_Key
+OPENAI_ANALYSIS_ENABLED=1
+OPENAI_MODEL=gpt-5.4
+```
+
+선택값은 처음에는 보수적으로 둡니다.
+
+```text
+OPENAI_ANALYSIS_MAX_CANDIDATES=1
+OPENAI_ANALYSIS_CACHE_SECONDS=900
+OPENAI_REQUEST_TIMEOUT_SECONDS=30
+```
+
+저장 후 재배포가 끝나면 아래 스크립트를 실행합니다.
+
+```powershell
+.\test-render-deploy.ps1
+```
+
+정상 기준:
+
+```text
+OpenAI status           ready=True
+OpenAI dashboard source source=openai
+OpenAI analyze API      source=openai
+```
+
+모델 권한이나 모델명이 맞지 않으면 화면은 자동으로 로컬 분석을 사용하고, 테스트 결과에 OpenAI 오류 사유가 표시됩니다. 이 경우 `OPENAI_MODEL`을 계정에서 사용 가능한 모델명으로 바꾼 뒤 다시 배포합니다.

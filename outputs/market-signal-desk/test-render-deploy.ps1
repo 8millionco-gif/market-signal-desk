@@ -73,6 +73,10 @@ $naverReady = [bool]$news.naver.readyForNews
 Write-Check "GDELT status" $gdeltReady "ready=$gdeltReady"
 Write-Check "Naver news status" $naverReady "ready=$naverReady"
 
+$openai = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/openai/status") -Headers $headers -Method Get -TimeoutSec 30
+$openaiReady = [bool]$openai.readyForAnalysis
+Write-Check "OpenAI status" $openaiReady "ready=$openaiReady, model=$($openai.model)"
+
 $gdeltDashboardStatus = $dashboard.integrations.news.gdelt.items
 if ($gdeltDashboardStatus) {
   $detail = "source=$($gdeltDashboardStatus.source), news=$($gdeltDashboardStatus.newsCount)"
@@ -114,6 +118,26 @@ if ($dartReady) {
   Write-Check "OpenDART disclosures API" ($disclosures.source -eq "opendart") "items=$(($disclosures.items | Measure-Object).Count)"
 } else {
   Write-Check "OpenDART disclosures API" $false "waiting for DART_API_KEY and DART_LIVE_DISCLOSURES=1"
+}
+
+$openaiAnalysisStatus = $dashboard.integrations.openai.analysis
+if ($openaiAnalysisStatus) {
+  $detail = "source=$($openaiAnalysisStatus.source), openai=$($openaiAnalysisStatus.openaiCount), fallback=$($openaiAnalysisStatus.fallbackCount)"
+  if ($openaiAnalysisStatus.lastError) {
+    $detail = "$detail, error=$($openaiAnalysisStatus.lastError)"
+  }
+  Write-Check "OpenAI dashboard source" ($openaiAnalysisStatus.source -eq "openai") $detail
+}
+
+if ($openaiReady) {
+  $analysis = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/openai/analyze?symbol=005930") -Headers $headers -Method Get -TimeoutSec 60
+  $detail = "source=$($analysis.source), sentiment=$($analysis.sentiment), impact=$($analysis.impactScore)"
+  if ($analysis.error) {
+    $detail = "$detail, error=$($analysis.error)"
+  }
+  Write-Check "OpenAI analyze API" ($analysis.source -eq "openai") $detail
+} else {
+  Write-Check "OpenAI analyze API" $false "waiting for OPENAI_API_KEY and OPENAI_ANALYSIS_ENABLED=1"
 }
 
 Write-Host ""
