@@ -548,6 +548,34 @@ h3 {
   font-weight: 900;
 }
 
+.feed-title .group-action {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.35);
+  background: rgba(123, 216, 143, 0.12);
+}
+
+.feed-title .group-hidden {
+  color: var(--cyan);
+}
+
+.feed-title .group-momentum {
+  color: #d7ecff;
+  border-color: rgba(108, 166, 255, 0.34);
+  background: rgba(108, 166, 255, 0.12);
+}
+
+.feed-title .group-holding {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.36);
+  background: rgba(244, 201, 93, 0.12);
+}
+
+.feed-title .group-exclude {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.35);
+  background: rgba(255, 100, 115, 0.1);
+}
+
 .feed-subtitle {
   margin-top: 4px;
   color: var(--soft);

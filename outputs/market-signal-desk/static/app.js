@@ -469,7 +469,9 @@ function applyStrategyFilter(candidates = []) {
 }
 
 function isHiddenOpportunity(item) {
+  const group = decisionGroupForDisplay(item);
   return (
+    group.key === "hidden" ||
     item?.discoveryTier === "hidden" ||
     item?.opportunityType === "hidden" ||
     Number(item?.hiddenOpportunity?.score ?? 0) >= 8
@@ -477,10 +479,12 @@ function isHiddenOpportunity(item) {
 }
 
 function hasMomentumSignal(item) {
+  const group = decisionGroupForDisplay(item);
   const score = item?.score ?? {};
   const discoveryNews = Number(item?.discovery?.newsItems ?? item?.liveNews?.items?.length ?? 0);
   const change = parseDisplayPercent(item?.change);
   return (
+    group.key === "momentum" ||
     discoveryNews > 0 ||
     Number(score.news ?? 0) >= 12 ||
     Number(score.price ?? 0) >= 12 ||
@@ -491,17 +495,22 @@ function hasMomentumSignal(item) {
 }
 
 function isActionCandidate(item) {
+  const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
   const score = Number(item?.totalScore ?? 0);
   const readiness = Number(item?.triggerReadiness ?? 0);
   if (plan.tone === "risk") return false;
+  if (group.key === "action") return true;
   return plan.tone === "buy" || score >= 75 || readiness >= 72;
 }
 
 function actionPriority(item) {
+  const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
   if (plan.tone === "buy") return 0;
   if (plan.tone === "sell") return 1;
+  if (group.key === "holding") return 1;
+  if (Number.isFinite(Number(group.priority))) return Number(group.priority) + 1;
   if (plan.action.includes("보유") || plan.action.includes("반등")) return 2;
   if (plan.tone === "wait") return 3;
   if (plan.tone === "risk") return 4;
@@ -528,6 +537,8 @@ function compareCandidatesForAction(a, b) {
   if (priorityDiff !== 0) return priorityDiff;
   const readyDiff = Number(b.triggerReadiness ?? 0) - Number(a.triggerReadiness ?? 0);
   if (readyDiff !== 0) return readyDiff;
+  const decisionDiff = Number(decisionGroupForDisplay(b).score ?? 0) - Number(decisionGroupForDisplay(a).score ?? 0);
+  if (decisionDiff !== 0) return decisionDiff;
   return Number(b.totalScore ?? 0) - Number(a.totalScore ?? 0);
 }
 
@@ -1050,8 +1061,13 @@ function renderMetrics() {
     const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
     const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
     const opportunityText = hiddenOpportunityCount ? ` · 기회 ${hiddenOpportunityCount} · 평균 ${averageOpportunityScore}/18` : "";
+    const groups = summary.decisionGroups ?? {};
+    const groupText =
+      groups.action || groups.hidden || groups.momentum
+        ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
+        : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${groupText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1411,6 +1427,31 @@ function selectedHoldingFor(item) {
     holdings.find((holding) => String(holding.name ?? "").replace(/\s+/g, "").toLowerCase() === name) ||
     null
   );
+}
+
+function decisionGroupForDisplay(item) {
+  const holding = selectedHoldingFor(item);
+  if (holding) {
+    return {
+      key: "holding",
+      label: "보유 대응",
+      priority: 1,
+      score: Number(item?.decisionGroup?.score ?? item?.totalScore ?? 0),
+      reason: `${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}`
+    };
+  }
+  const group = item?.decisionGroup ?? {};
+  return {
+    key: group.key || "wait",
+    label: group.label || "가격대 대기",
+    priority: Number(group.priority ?? 3),
+    score: Number(group.score ?? item?.totalScore ?? 0),
+    reason: group.reason || "가격, 뉴스, 수급 조건을 추가 확인합니다."
+  };
+}
+
+function decisionGroupClass(value) {
+  return `group-${String(value || "wait").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "wait"}`;
 }
 
 function tradePlan(item) {
@@ -1967,6 +2008,7 @@ function renderFeed() {
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
       const plan = tradePlan(item);
+      const group = decisionGroupForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
@@ -1975,6 +2017,7 @@ function renderFeed() {
             <span class="feed-title">
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
+              <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
@@ -2224,6 +2267,7 @@ function renderDetail() {
 
     <div class="detail-grid">
       ${tradePlanSection(item)}
+      ${decisionGroupSection(item)}
       ${hiddenOpportunitySection(item)}
 
       <section class="detail-section">
@@ -2535,6 +2579,31 @@ function tradePlanSection(item) {
       </div>
       <ul class="trade-reasons">
         ${plan.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
+      </ul>
+    </section>
+  `;
+}
+
+function decisionGroupSection(item) {
+  const group = decisionGroupForDisplay(item);
+  const serverGroup = item.decisionGroup ?? {};
+  return `
+    <section class="detail-section">
+      <div class="section-title">
+        <p class="eyebrow">후보 분류</p>
+        <h2>${escapeHtml(group.label)}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("판단 점수", `${Math.round(Number(group.score ?? 0))}/100`)}
+        ${statCard("분류", group.label)}
+      </div>
+      <ul class="bullet-list">
+        <li>${escapeHtml(group.reason)}</li>
+        ${
+          serverGroup.reason && serverGroup.reason !== group.reason
+            ? `<li>${escapeHtml(serverGroup.reason)}</li>`
+            : ""
+        }
       </ul>
     </section>
   `;

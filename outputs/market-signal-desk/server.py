@@ -3018,6 +3018,67 @@ def verdict_from_scores(total: int, readiness: int, risk: int, heat: int, opport
     return "조건부 관찰"
 
 
+def candidate_decision_group(
+    candidate: dict,
+    score_detail: dict,
+    total: int,
+    readiness: int,
+    preopen_priority: int,
+) -> dict:
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    opportunity = bounded_int(score_detail.get("opportunity", 0), 0, 18)
+    news = bounded_int(score_detail.get("news", 0), 0, 22)
+    volume = bounded_int(score_detail.get("volume", 0), 0, 18)
+    price = bounded_int(score_detail.get("price", 0), 0, 16)
+    action_score = bounded_int(
+        (readiness * 0.35)
+        + (preopen_priority * 0.2)
+        + (total * 0.25)
+        + (price * 0.8)
+        + (volume * 0.45)
+        + (opportunity * 0.5)
+        - (risk * 0.55)
+        - (heat * 0.3)
+    )
+
+    if risk >= 24 or total < 45:
+        key, label, priority = "exclude", "오늘 제외", 4
+        reason = "리스크나 종합 점수가 후보 기준에 부족합니다."
+    elif total >= 75 and readiness >= 70 and risk < 18 and heat < 8:
+        key, label, priority = "action", "진입 후보", 0
+        reason = "점수, 준비도, 리스크 조건이 동시에 충족됩니다."
+    elif opportunity >= 10 and total >= 62 and risk < 22:
+        key, label, priority = "hidden", "숨은 기회", 1
+        reason = "뉴스와 가격 반응 대비 아직 덜 반영된 기회 신호가 있습니다."
+    elif total >= 62 and risk < 24 and (news >= 15 or volume >= 14 or price >= 14):
+        key, label, priority = "momentum", "모멘텀", 2
+        reason = "뉴스, 가격, 수급 중 하나 이상의 모멘텀이 확인됩니다."
+    else:
+        key, label, priority = "wait", "가격대 대기", 3
+        reason = "후보 신호는 있으나 진입 가격이나 추가 확인이 필요합니다."
+
+    if candidate.get("isWatched") and key in {"wait", "momentum"}:
+        reason = f"관심 종목입니다. {reason}"
+
+    return {
+        "key": key,
+        "label": label,
+        "priority": priority,
+        "score": action_score,
+        "reason": reason,
+    }
+
+
+def decision_group_counts(candidates: list[dict]) -> dict:
+    counts = {"action": 0, "hidden": 0, "momentum": 0, "wait": 0, "exclude": 0}
+    for item in candidates:
+        group = item.get("decisionGroup", {}) if isinstance(item, dict) else {}
+        key = str(group.get("key", "wait")) if isinstance(group, dict) else "wait"
+        counts[key if key in counts else "wait"] += 1
+    return counts
+
+
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
@@ -3076,6 +3137,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["triggerReadiness"] = readiness
         item["preopenPriority"] = preopen_priority
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
+        item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
         item["hiddenOpportunity"] = {
             "score": opportunity,
             "maxScore": 18,
@@ -3097,6 +3159,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
     average_opportunity = sum(opportunity_scores) / len(opportunity_scores) if opportunity_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
+    groups = decision_group_counts(enriched)
     return enriched, {
         "source": "live-rules",
         "enabled": True,
@@ -3105,6 +3168,11 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "averageScoreShift": round(average_shift, 1),
         "averageOpportunityScore": round(average_opportunity, 1),
         "hiddenOpportunityCount": hidden_opportunity_count,
+        "decisionGroups": groups,
+        "actionCandidateCount": groups.get("action", 0),
+        "momentumCandidateCount": groups.get("momentum", 0),
+        "waitCandidateCount": groups.get("wait", 0),
+        "excludeCandidateCount": groups.get("exclude", 0),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -4299,12 +4367,21 @@ def score_signal_context(context: dict) -> dict:
 
 
 def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
+    def group_rank(item: dict) -> int:
+        group = item.get("decisionGroup", {}) if isinstance(item, dict) else {}
+        priority = bounded_int(group.get("priority", 9), 0, 9) if isinstance(group, dict) else 9
+        return 100 - priority
+
+    def decision_score(item: dict) -> int:
+        group = item.get("decisionGroup", {}) if isinstance(item, dict) else {}
+        return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
+
     if mode == "preopen":
-        candidates.sort(key=lambda item: (item["preopenPriority"], item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
     elif mode == "intraday":
-        candidates.sort(key=lambda item: (item["triggerReadiness"], item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
     else:
-        candidates.sort(key=lambda item: item["totalScore"], reverse=True)
+        candidates.sort(key=lambda item: (group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
     return candidates
 
 
@@ -4359,6 +4436,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "averageScoreShift": selection_status.get("averageScoreShift"),
             "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
             "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
+            "decisionGroups": selection_status.get("decisionGroups", {}),
+            "actionCandidateCount": selection_status.get("actionCandidateCount"),
+            "momentumCandidateCount": selection_status.get("momentumCandidateCount"),
+            "waitCandidateCount": selection_status.get("waitCandidateCount"),
+            "excludeCandidateCount": selection_status.get("excludeCandidateCount"),
         },
         "integrations": {
             "pipeline": context["pipeline"],
