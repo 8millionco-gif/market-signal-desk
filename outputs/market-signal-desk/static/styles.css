@@ -673,6 +673,24 @@ h3 {
   background: rgba(123, 216, 143, 0.1);
 }
 
+.feed-title .official-badge {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.32);
+  background: rgba(105, 210, 231, 0.1);
+}
+
+.feed-title .official-high {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
+}
+
+.feed-title .official-medium {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.32);
+  background: rgba(244, 201, 93, 0.1);
+}
+
 .feed-subtitle {
   display: block;
   margin-top: 4px;
@@ -1207,6 +1225,27 @@ h3 {
   margin-top: 5px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.official-section {
+  display: grid;
+  gap: 14px;
+}
+
+.official-event-list {
+  gap: 8px;
+}
+
+.official-tone-positive strong {
+  color: var(--green);
+}
+
+.official-tone-risk strong {
+  color: var(--red);
+}
+
+.official-tone-caution strong {
+  color: var(--amber);
 }
 
 .performance-board {

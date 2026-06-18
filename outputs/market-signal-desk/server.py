@@ -1951,20 +1951,124 @@ def dart_corp_code_for_symbol(symbol: str) -> dict | None:
     return mapping.get(symbol)
 
 
+def clean_disclosure_text(value: object) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def dart_disclosure_freshness_days(value: object) -> int | None:
+    text = re.sub(r"\D", "", str(value or ""))
+    if len(text) != 8:
+        return None
+    try:
+        received = datetime.strptime(text, "%Y%m%d").date()
+    except ValueError:
+        return None
+    return max(0, (datetime.now(KST).date() - received).days)
+
+
+def classify_dart_disclosure(report_name: object, received_date: object = "") -> dict:
+    title = clean_disclosure_text(report_name)
+    compact = re.sub(r"\s+", "", title).lower()
+    warnings: list[str] = []
+
+    def has_any(keywords: list[str]) -> bool:
+        return any(keyword.lower() in compact for keyword in keywords)
+
+    correction = has_any(["정정", "기재정정"])
+    if correction:
+        warnings.append("정정 공시이므로 원공시와 변경 내용을 함께 확인")
+
+    key = "general"
+    label = "일반 공시"
+    tone = "neutral"
+    importance = 45
+    score_impact = 0
+    risk_impact = 1
+    reason = "공식 공시로 확인됐지만 방향성 영향은 별도 검증이 필요"
+
+    if has_any(["거래정지", "상장폐지", "관리종목", "횡령", "배임", "회생", "파산", "감사의견거절", "의견거절", "불성실공시", "소송"]):
+        key, label, tone = "critical_risk", "중대 리스크 공시", "risk"
+        importance, score_impact, risk_impact = 94, -6, 12
+        reason = "거래 지속성 또는 기업 신뢰도에 직접 영향을 줄 수 있는 공식 리스크"
+    elif has_any(["유상증자", "전환사채", "신주인수권부사채", "교환사채", "cb", "bw", "감자"]):
+        key, label, tone = "financing_risk", "자금조달/희석 공시", "risk"
+        importance, score_impact, risk_impact = 84, -3, 8
+        reason = "주식 희석 또는 단기 수급 부담으로 이어질 수 있는 공시"
+    elif has_any(["최대주주변경", "주식등의대량보유", "임원ㆍ주요주주", "임원·주요주주", "자기주식처분"]):
+        key, label, tone = "ownership_caution", "지분/수급 확인 공시", "caution"
+        importance, score_impact, risk_impact = 68, 0, 4
+        reason = "지분 변화와 수급 영향을 확인해야 하는 공식 공시"
+    elif has_any(["단일판매", "공급계약", "수주", "계약체결"]):
+        key, label, tone = "contract", "수주/계약 공시", "positive"
+        importance, score_impact, risk_impact = 84, 5, 0
+        reason = "매출 가시성이나 업황 기대를 높일 수 있는 공식 계약 공시"
+    elif has_any(["자기주식취득", "자사주취득", "현금ㆍ현물배당", "현금·현물배당", "배당결정", "주주환원"]):
+        key, label, tone = "shareholder_return", "주주환원 공시", "positive"
+        importance, score_impact, risk_impact = 78, 4, 0
+        reason = "주주환원 정책이 수급과 투자심리에 긍정적으로 작용할 수 있는 공시"
+    elif has_any(["영업(잠정)실적", "잠정실적", "매출액또는손익구조", "실적", "매출액 또는 손익구조"]):
+        key, label, tone = "earnings", "실적 공시", "positive"
+        importance, score_impact, risk_impact = 72, 3, 1
+        reason = "실적 변화가 밸류에이션 재평가로 연결될 수 있는 공식 공시"
+    elif has_any(["신규시설투자", "투자판단관련주요경영사항", "타법인주식및출자증권취득"]):
+        key, label, tone = "investment", "투자/전략 공시", "positive"
+        importance, score_impact, risk_impact = 64, 2, 1
+        reason = "중장기 성장 기대를 만들 수 있으나 투자 부담도 함께 확인해야 하는 공시"
+    elif has_any(["사업보고서", "분기보고서", "반기보고서"]):
+        key, label, tone = "periodic_report", "정기보고서", "neutral"
+        importance, score_impact, risk_impact = 58, 1, 1
+        reason = "재무와 사업 현황을 검증할 수 있는 정기 공식 자료"
+    elif has_any(["조회공시", "풍문", "보도"]):
+        key, label, tone = "rumor_check", "풍문/조회공시", "caution"
+        importance, score_impact, risk_impact = 62, 0, 4
+        reason = "뉴스성 재료의 사실 여부를 공식 답변으로 확인해야 하는 공시"
+
+    freshness_days = dart_disclosure_freshness_days(received_date)
+    if freshness_days is not None:
+        if freshness_days <= 1:
+            importance += 5
+        elif freshness_days <= 3:
+            importance += 2
+        elif freshness_days > 7:
+            importance -= 4
+
+    if correction:
+        risk_impact += 2
+        importance += 2
+
+    return {
+        "eventKey": key,
+        "eventLabel": label,
+        "eventTone": tone,
+        "eventImportance": bounded_int(importance, 0, 100),
+        "scoreImpact": bounded_int(score_impact, -10, 10),
+        "riskImpact": bounded_int(risk_impact, 0, 15),
+        "freshnessDays": freshness_days,
+        "officialReliability": 90 if not correction else 82,
+        "reason": reason,
+        "warnings": unique_texts(warnings, limit=3),
+    }
+
+
 def normalize_dart_disclosure(item: dict) -> dict:
     receipt_no = str(item.get("rcept_no", ""))
     report_name = str(item.get("report_nm", ""))
+    received_date = item.get("rcept_dt")
+    classification = classify_dart_disclosure(report_name, received_date)
     return {
         "corpName": item.get("corp_name"),
         "corpCode": item.get("corp_code"),
         "stockCode": item.get("stock_code"),
         "reportName": report_name,
         "receiptNo": receipt_no,
-        "receivedDate": item.get("rcept_dt"),
+        "receivedDate": received_date,
         "filerName": item.get("flr_nm"),
         "corpClass": item.get("corp_cls"),
         "remark": item.get("rm"),
         "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}" if receipt_no else "",
+        **classification,
     }
 
 
@@ -2519,9 +2623,109 @@ def compact_live_disclosures(candidate: dict) -> list[dict]:
                 "reportName": clean_news_text(str(item.get("reportName", ""))),
                 "receivedDate": clean_news_text(str(item.get("receivedDate", ""))),
                 "corpName": clean_news_text(str(item.get("corpName", ""))),
+                "eventLabel": clean_news_text(str(item.get("eventLabel", ""))),
+                "eventTone": clean_news_text(str(item.get("eventTone", ""))),
+                "eventImportance": item.get("eventImportance"),
             }
         )
     return compacted
+
+
+def disclosure_item_with_classification(item: dict) -> dict:
+    if item.get("eventKey"):
+        return item
+    classified = classify_dart_disclosure(item.get("reportName", ""), item.get("receivedDate", ""))
+    return {**item, **classified}
+
+
+def official_event_signal(candidate: dict) -> dict:
+    live_disclosures = candidate.get("liveDisclosures", {})
+    if not isinstance(live_disclosures, dict):
+        return {"source": "none", "count": 0, "summary": "공식 공시 미확인"}
+
+    raw_items = live_disclosures.get("items", [])
+    items = [disclosure_item_with_classification(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+    if not items:
+        return {
+            "source": live_disclosures.get("source", "none"),
+            "count": 0,
+            "summary": "최근 공식 공시는 발견되지 않았습니다.",
+            "items": [],
+            "scoreBoost": 0,
+            "riskBoost": 0,
+            "confidenceBoost": 0,
+            "riskLevel": "none",
+        }
+
+    positive_items = [item for item in items if item.get("eventTone") == "positive"]
+    risk_items = [item for item in items if item.get("eventTone") == "risk"]
+    caution_items = [item for item in items if item.get("eventTone") == "caution"]
+    score_boost = bounded_int(sum(int(item.get("scoreImpact", 0) or 0) for item in items), -10, 12)
+    risk_boost = bounded_int(sum(int(item.get("riskImpact", 0) or 0) for item in items), 0, 18)
+    confidence_boost = bounded_int(5 + len(items) * 2 + len(positive_items) * 2, 0, 16)
+    primary = sorted(items, key=lambda item: bounded_int(item.get("eventImportance", 0), 0, 100), reverse=True)[0]
+
+    if risk_items and (risk_boost >= 8 or bounded_int(primary.get("eventImportance", 0), 0, 100) >= 80):
+        risk_level = "high"
+        summary = f"공식 공시 리스크: {primary.get('eventLabel', '확인 필요')} 확인"
+    elif risk_boost >= 4 or caution_items:
+        risk_level = "medium"
+        summary = f"공식 공시 확인 필요: {primary.get('eventLabel', '확인 필요')}"
+    elif positive_items:
+        risk_level = "low"
+        summary = f"공식 이벤트 확인: {primary.get('eventLabel', '긍정 공시')}"
+    else:
+        risk_level = "low"
+        summary = f"공식 자료 확인: {primary.get('eventLabel', '일반 공시')}"
+
+    reasons = []
+    warnings = []
+    for item in items[:5]:
+        label = item.get("eventLabel") or "공시"
+        report = item.get("reportName") or ""
+        reason = item.get("reason") or ""
+        if item.get("eventTone") == "risk":
+            warnings.append(f"{label}: {report}")
+        elif item.get("eventTone") == "caution":
+            warnings.append(f"{label}: 확인 필요")
+        else:
+            reasons.append(f"{label}: {reason}")
+        warnings.extend(text_list(item.get("warnings", []), limit=2))
+
+    return {
+        "source": live_disclosures.get("source", "opendart"),
+        "count": len(items),
+        "positiveCount": len(positive_items),
+        "riskCount": len(risk_items),
+        "cautionCount": len(caution_items),
+        "neutralCount": len(items) - len(positive_items) - len(risk_items) - len(caution_items),
+        "scoreBoost": score_boost,
+        "riskBoost": risk_boost,
+        "confidenceBoost": confidence_boost,
+        "riskLevel": risk_level,
+        "summary": summary,
+        "primary": {
+            "reportName": primary.get("reportName", ""),
+            "eventLabel": primary.get("eventLabel", ""),
+            "eventTone": primary.get("eventTone", ""),
+            "eventImportance": primary.get("eventImportance", 0),
+            "receivedDate": primary.get("receivedDate", ""),
+            "url": primary.get("url", ""),
+        },
+        "reasons": unique_texts(reasons, limit=4),
+        "warnings": unique_texts(warnings, limit=4),
+        "items": [
+            {
+                "reportName": item.get("reportName", ""),
+                "eventLabel": item.get("eventLabel", ""),
+                "eventTone": item.get("eventTone", ""),
+                "eventImportance": item.get("eventImportance", 0),
+                "receivedDate": item.get("receivedDate", ""),
+                "url": item.get("url", ""),
+            }
+            for item in items[:5]
+        ],
+    }
 
 
 def analysis_input_for_candidate(candidate: dict) -> dict:
@@ -2547,6 +2751,7 @@ def analysis_input_for_candidate(candidate: dict) -> dict:
         "liveNews": compact_live_news(candidate),
         "disclosures": text_list(candidate.get("disclosures", []), limit=6),
         "liveDisclosures": compact_live_disclosures(candidate),
+        "officialSignal": candidate.get("officialSignal", {}),
     }
 
 
@@ -2705,8 +2910,16 @@ def local_candidate_analysis(candidate: dict) -> dict:
     else:
         action_bias = "watch"
 
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or not official_signal.get("count"):
+        official_signal = official_event_signal(candidate)
     tags = text_list(candidate.get("tags", []), limit=3)
-    event_type = tags[0] if tags else "뉴스·가격 반응"
+    primary_official = official_signal.get("primary", {}) if isinstance(official_signal.get("primary"), dict) else {}
+    event_type = primary_official.get("eventLabel") or (tags[0] if tags else "뉴스·가격 반응")
+    if official_signal.get("riskLevel") == "high":
+        sentiment = "negative"
+        action_bias = "avoid"
+        risk_score = max(risk_score, 78)
     payload = {
         "summary": candidate.get("thesis") or candidate.get("headline") or "후보 종목의 재료와 가격 반응을 확인합니다.",
         "eventType": event_type,
@@ -2717,6 +2930,7 @@ def local_candidate_analysis(candidate: dict) -> dict:
         "actionBias": action_bias,
         "catalystBullets": text_list(candidate.get("why", []), limit=5),
         "riskFlags": [
+            *text_list(official_signal.get("warnings", []), limit=2),
             *text_list(candidate.get("noEntry", []), limit=3),
             *text_list(candidate.get("disclosures", []), limit=2),
         ],
@@ -2725,6 +2939,7 @@ def local_candidate_analysis(candidate: dict) -> dict:
         "stopRules": text_list(candidate.get("stopRules", []), limit=5),
         "evidenceNotes": [
             f"후보 점수 {score}/100, 트리거 준비도 {readiness}/100",
+            f"공식 이벤트 {official_signal.get('count', 0)}건, 위험 {official_signal.get('riskCount', 0)}건",
             f"뉴스 근거 {len(candidate.get('sources', []))}건, 공시/리스크 메모 {len(candidate.get('disclosures', []))}건",
         ],
         "disclaimer": "투자 판단 보조 정보이며 매수·매도 추천이 아닙니다.",
@@ -3154,12 +3369,23 @@ def dynamic_attention_score(candidate: dict, base_score: dict, watched: set[str]
 
 def dynamic_risk_score(candidate: dict, market: dict, base_score: dict, notes: list[str]) -> int:
     risk = bounded_int(base_score.get("riskPenalty", 0), 0, 30)
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
+    if official_signal.get("count"):
+        risk += bounded_int(official_signal.get("riskBoost", 0), 0, 18)
+        if official_signal.get("riskLevel") == "high":
+            notes.append("중대 공시 리스크가 발견되어 진입 기준 강화")
+        elif official_signal.get("riskLevel") == "medium":
+            notes.append("공식 공시 확인 필요 신호 반영")
+        elif official_signal.get("positiveCount", 0):
+            notes.append(f"공식 긍정 이벤트 {official_signal.get('positiveCount')}건 확인")
     live_disclosures = candidate.get("liveDisclosures", {})
     if isinstance(live_disclosures, dict):
         disclosure_items = live_disclosures.get("items", [])
         disclosure_count = len(disclosure_items) if isinstance(disclosure_items, list) else 0
         if disclosure_count:
-            risk += min(disclosure_count * 3, 9)
+            risk += min(disclosure_count, 3)
             notes.append(f"최근 공시 {disclosure_count}건으로 확인 필요")
     index_change = display_percent_to_decimal(market.get(market_index_key_for_candidate(candidate)))
     if index_change is not None and index_change <= Decimal("-1"):
@@ -3242,6 +3468,10 @@ def event_score_from_candidate(candidate: dict, base_score: dict) -> int:
     for group in keyword_groups:
         if any(keyword in text for keyword in group):
             score += 1
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
+    score += int(official_signal.get("scoreBoost", 0) or 0)
     return bounded_int(score, 0, 25)
 
 
@@ -3376,7 +3606,18 @@ def candidate_data_confidence(candidate: dict) -> dict:
         score += 8
         reasons.append("OpenDART 확인")
         if isinstance(live_disclosures.get("items"), list) and live_disclosures.get("items"):
-            warnings.append("최근 공시 리스크 확인 필요")
+            reasons.append(f"OpenDART 공시 {len(live_disclosures.get('items', []))}건")
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
+    if official_signal.get("count"):
+        score += bounded_int(official_signal.get("confidenceBoost", 0), 0, 16)
+        reasons.append(f"공식 이벤트 {official_signal.get('count')}건 분류")
+        if official_signal.get("riskLevel") == "high":
+            score -= 8
+            warnings.append("중대 공시 리스크 우선 확인")
+        elif official_signal.get("riskLevel") == "medium":
+            warnings.append("공시 영향 확인 필요")
 
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     quality_tier = discovery.get("qualityTier")
@@ -3417,9 +3658,18 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction_key = str(reaction.get("key", "missing"))
     live_price = candidate.get("livePrice", {})
     has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
     reasons = []
 
-    if risk >= 24 or total < 45 or group_key == "exclude":
+    if official_signal.get("riskLevel") == "high":
+        key, label, priority = "exclude", "공시 리스크", 4
+        reasons.append("중대 공식 공시가 있어 신규 진입 제외")
+    elif official_signal.get("riskLevel") == "medium" and group_key == "action":
+        key, label, priority = "defer", "공시 확인 대기", 3
+        reasons.append("공식 공시 영향 확인 전까지 진입 보류")
+    elif risk >= 24 or total < 45 or group_key == "exclude":
         key, label, priority = "exclude", "오늘 제외", 4
         reasons.append("리스크 또는 종합 점수가 기준 미달")
     elif group_key == "action" and has_live_price and confidence_score >= 68 and reaction_score >= 56 and risk < 18 and heat < 10 and readiness >= 70:
@@ -3448,7 +3698,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         "confidenceScore": confidence_score,
         "reactionScore": reaction_score,
         "tradeAllowed": key == "actionable",
-        "reasons": unique_texts([*reasons, *reaction.get("warnings", []), *confidence.get("warnings", [])], limit=5),
+        "reasons": unique_texts([*reasons, *official_signal.get("warnings", []), *reaction.get("warnings", []), *confidence.get("warnings", [])], limit=5),
     }
 
 
@@ -3562,12 +3812,18 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
     profit_percent = display_number_to_decimal(holding.get("profitLossPercent") or holding.get("profitLossRate"))
     allocation_percent = display_number_to_decimal(holding.get("allocationPercent") or holding.get("allocation"))
     holding_judgement = str(holding.get("judgement", "보유 유지"))
 
     if is_held:
-        if risk >= 24 or (profit_percent is not None and profit_percent <= Decimal("-7")) or "손절" in holding_judgement:
+        if official_signal.get("riskLevel") == "high":
+            action_key, action, tone = "stop", "손절 점검", "risk"
+            summary = "보유 종목에 중대 공식 공시 리스크가 있어 손절 기준과 비중 축소 여부를 먼저 확인합니다."
+        elif risk >= 24 or (profit_percent is not None and profit_percent <= Decimal("-7")) or "손절" in holding_judgement:
             action_key, action, tone = "stop", "손절 점검", "risk"
             summary = "보유 손실 또는 리스크가 커져 추가매수보다 손절 기준 이탈 여부를 먼저 확인합니다."
         elif (allocation_percent is not None and allocation_percent >= Decimal("35")) or (profit_percent is not None and profit_percent >= Decimal("12")) or "분할매도" in holding_judgement or "비중" in holding_judgement:
@@ -3589,6 +3845,12 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif not has_price:
         action_key, action, tone = "verify", "확인 대기", "wait"
         summary = "현재가가 확인되지 않아 매수·대기·손절 기준을 확정하지 않습니다."
+    elif official_signal.get("riskLevel") == "high":
+        action_key, action, tone = "exclude", "공시 리스크 제외", "risk"
+        summary = "중대 공식 공시 리스크가 있어 가격 반응보다 공시 내용 확인을 우선합니다."
+    elif official_signal.get("riskLevel") == "medium" and reaction_key not in {"strong", "confirmed"}:
+        action_key, action, tone = "verify", "공시 확인 대기", "wait"
+        summary = "공식 공시 영향이 아직 가격과 거래량으로 검증되지 않아 진입을 보류합니다."
     elif gate_key == "exclude" or risk >= 24 or total < 45:
         action_key, action, tone = "exclude", "오늘 제외", "risk"
         summary = "리스크 또는 점수 기준이 부족해 신규 진입 대상에서 제외합니다."
@@ -3655,6 +3917,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         reasons.append(f"현재 등락률: {candidate.get('change')}")
     if group.get("reason"):
         reasons.append(str(group.get("reason")))
+    if official_signal.get("count"):
+        reasons.append(f"공식 이벤트: {official_signal.get('summary')}")
 
     return {
         "actionKey": action_key,
@@ -3666,6 +3930,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         "confidenceScore": confidence_score,
         "reactionScore": reaction_score,
         "reactionLabel": reaction.get("label", ""),
+        "officialSignal": official_signal,
         "portfolioAware": is_held,
         "holdingJudgement": holding_judgement if is_held else "",
         "priceLevels": band or {},
@@ -3682,6 +3947,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     opportunity_scores = []
     confidence_scores = []
     reaction_scores = []
+    official_scores = []
+    official_counts = {"positive": 0, "risk": 0, "caution": 0, "neutral": 0, "highRisk": 0}
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     reaction_counts = {"strong": 0, "confirmed": 0, "weak": 0, "missing": 0}
     final_decision_counts = {
@@ -3702,6 +3969,16 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
             base_score = {}
         notes: list[str] = []
         original_total = bounded_int(item.get("totalScore", score_candidate(item)))
+        official_signal = official_event_signal(item)
+        item["officialSignal"] = official_signal
+        if official_signal.get("count"):
+            official_scores.append(bounded_int(official_signal.get("scoreBoost", 0), -10, 12))
+            official_counts["positive"] += bounded_int(official_signal.get("positiveCount", 0), 0, 100)
+            official_counts["risk"] += bounded_int(official_signal.get("riskCount", 0), 0, 100)
+            official_counts["caution"] += bounded_int(official_signal.get("cautionCount", 0), 0, 100)
+            official_counts["neutral"] += bounded_int(official_signal.get("neutralCount", 0), 0, 100)
+            if official_signal.get("riskLevel") == "high":
+                official_counts["highRisk"] += 1
 
         event = event_score_from_candidate(item, base_score)
         news = dynamic_news_score(item, base_score, notes)
@@ -3793,6 +4070,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     average_opportunity = sum(opportunity_scores) / len(opportunity_scores) if opportunity_scores else 0
     average_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
     average_reaction = sum(reaction_scores) / len(reaction_scores) if reaction_scores else 0
+    average_official = sum(official_scores) / len(official_scores) if official_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
     groups = decision_group_counts(enriched)
     return enriched, {
@@ -3804,6 +4082,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "averageOpportunityScore": round(average_opportunity, 1),
         "averageDataConfidence": round(average_confidence, 1),
         "averagePriceReaction": round(average_reaction, 1),
+        "averageOfficialEventScore": round(average_official, 1),
+        "officialEventCounts": official_counts,
+        "officialEventCandidateCount": len(official_scores),
+        "officialRiskCandidateCount": official_counts.get("highRisk", 0),
         "hiddenOpportunityCount": hidden_opportunity_count,
         "decisionGroups": groups,
         "actionCandidateCount": groups.get("action", 0),
@@ -5301,6 +5583,10 @@ def build_dashboard_payload(context: dict) -> dict:
             "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
             "averageDataConfidence": selection_status.get("averageDataConfidence"),
             "averagePriceReaction": selection_status.get("averagePriceReaction"),
+            "averageOfficialEventScore": selection_status.get("averageOfficialEventScore"),
+            "officialEventCounts": selection_status.get("officialEventCounts", {}),
+            "officialEventCandidateCount": selection_status.get("officialEventCandidateCount"),
+            "officialRiskCandidateCount": selection_status.get("officialRiskCandidateCount"),
             "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
             "decisionGroups": selection_status.get("decisionGroups", {}),
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),

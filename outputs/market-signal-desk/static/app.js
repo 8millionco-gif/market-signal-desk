@@ -1260,6 +1260,9 @@ function renderMetrics() {
     const decisions = summary.finalDecisionCounts ?? {};
     const confidence = summary.averageDataConfidence;
     const averageReaction = summary.averagePriceReaction;
+    const officialCounts = summary.officialEventCounts ?? {};
+    const officialCandidates = Number(summary.officialEventCandidateCount ?? 0);
+    const officialRisk = Number(summary.officialRiskCandidateCount ?? officialCounts.highRisk ?? 0);
     const gateText =
       gates.actionable || gates.watch || gates.defer || gates.exclude
         ? ` · 실전 ${gates.actionable ?? 0} · 관찰 ${gates.watch ?? 0} · 대기 ${gates.defer ?? 0} · 제외 ${gates.exclude ?? 0}`
@@ -1274,6 +1277,9 @@ function renderMetrics() {
     const portfolioText = portfolioLinked
       ? ` · 보유연결 ${portfolioLinked} · 추가 ${decisions.add ?? 0} · 보유 ${decisions.hold ?? 0} · 매도 ${decisions.trim ?? 0} · 손절 ${decisions.stop ?? 0}`
       : "";
+    const officialText = officialCandidates
+      ? ` · 공식 ${officialCandidates} · 긍정 ${officialCounts.positive ?? 0} · 리스크 ${officialRisk}`
+      : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
@@ -1287,7 +1293,7 @@ function renderMetrics() {
         ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2450,6 +2456,14 @@ function renderFeed() {
       const gate = item.qualityGate ?? {};
       const confidence = item.dataConfidence ?? {};
       const reaction = item.priceReaction ?? {};
+      const official = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
+      const officialBadge = official.count
+        ? official.riskLevel === "high"
+          ? "공시위험"
+          : official.positiveCount
+            ? `공식+${official.positiveCount}`
+            : `공식 ${official.count}`
+        : "";
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -2460,6 +2474,7 @@ function renderFeed() {
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
+              ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
               ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
               ${reaction.score != null ? `<span class="feed-badge reaction-badge">반응 ${escapeHtml(reaction.score)}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
@@ -2693,6 +2708,50 @@ async function loadStockSearch() {
   renderStockSearchResults();
 }
 
+function officialToneText(tone) {
+  if (tone === "positive") return "긍정";
+  if (tone === "risk") return "리스크";
+  if (tone === "caution") return "확인";
+  return "중립";
+}
+
+function officialSignalSection(item) {
+  const signal = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
+  if (!signal.count) return "";
+  const primary = signal.primary ?? {};
+  const items = Array.isArray(signal.items) ? signal.items : [];
+  return `
+    <section class="detail-section official-section">
+      <div class="section-title">
+        <p class="eyebrow">공식 이벤트</p>
+        <h2>${escapeHtml(signal.summary || "OpenDART 공시 확인")}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("공시 수", `${signal.count ?? 0}건`)}
+        ${statCard("긍정", `${signal.positiveCount ?? 0}건`)}
+        ${statCard("리스크", `${signal.riskCount ?? 0}건`)}
+        ${statCard("중요도", `${primary.eventImportance ?? 0}/100`)}
+      </div>
+      <ul class="source-list official-event-list">
+        ${items
+          .map(
+            (event) => `
+              <li class="official-tone-${escapeHtml(event.eventTone || "neutral")}">
+                <strong>${escapeHtml(event.eventLabel || officialToneText(event.eventTone))} · ${escapeHtml(event.reportName || "-")}</strong>
+                <span>${escapeHtml(event.receivedDate || "-")} · 중요도 ${escapeHtml(event.eventImportance ?? 0)}/100${event.url ? " · OpenDART" : ""}</span>
+              </li>
+            `
+          )
+          .join("")}
+      </ul>
+      <ul class="bullet-list ${signal.riskLevel === "high" ? "avoid-list" : "entry-list"}">
+        ${(signal.reasons ?? []).slice(0, 3).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+        ${(signal.warnings ?? []).slice(0, 3).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+      </ul>
+    </section>
+  `;
+}
+
 function renderDetail() {
   const item = selectedCandidate();
   if (!item) {
@@ -2742,6 +2801,7 @@ function renderDetail() {
       ${tradePlanSection(item)}
       ${decisionGroupSection(item)}
       ${hiddenOpportunitySection(item)}
+      ${officialSignalSection(item)}
 
       <section class="detail-section">
         <div class="section-title">
@@ -2783,6 +2843,7 @@ function renderDetail() {
           <div class="stat-grid">
             ${statCard("뉴스", `${item.trend?.newsCount ?? 0}건`)}
             ${statCard("해외 뉴스", item.trend?.globalNewsCount != null ? `${item.trend.globalNewsCount}건` : "-")}
+            ${statCard("공식 이벤트", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
             ${statCard("뉴스 증가", item.trend?.newsSpike ?? "-")}
             ${statCard("거래량", item.trend?.volumeSpike ?? "-")}
             ${statCard("일 거래량", item.trend?.dailyVolume ?? "-")}
