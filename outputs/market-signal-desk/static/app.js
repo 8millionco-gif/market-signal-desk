@@ -1256,12 +1256,19 @@ function renderMetrics() {
     const opportunityText = hiddenOpportunityCount ? ` · 기회 ${hiddenOpportunityCount} · 평균 ${averageOpportunityScore}/18` : "";
     const groups = summary.decisionGroups ?? {};
     const gates = summary.qualityGateCounts ?? {};
+    const reactions = summary.priceReactionCounts ?? {};
     const confidence = summary.averageDataConfidence;
+    const averageReaction = summary.averagePriceReaction;
     const gateText =
       gates.actionable || gates.watch || gates.defer || gates.exclude
         ? ` · 실전 ${gates.actionable ?? 0} · 관찰 ${gates.watch ?? 0} · 대기 ${gates.defer ?? 0} · 제외 ${gates.exclude ?? 0}`
         : "";
     const confidenceText = confidence != null ? ` · 평균 신뢰 ${confidence}/100` : "";
+    const reactionText =
+      reactions.strong || reactions.confirmed || reactions.weak || reactions.missing
+        ? ` · 가격반응 강 ${reactions.strong ?? 0} · 확인 ${reactions.confirmed ?? 0} · 약 ${reactions.weak ?? 0} · 부족 ${reactions.missing ?? 0}`
+        : "";
+    const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
@@ -1275,7 +1282,7 @@ function renderMetrics() {
         ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2433,6 +2440,7 @@ function renderFeed() {
       const priceGuide = primaryPriceGuide(plan);
       const gate = item.qualityGate ?? {};
       const confidence = item.dataConfidence ?? {};
+      const reaction = item.priceReaction ?? {};
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -2444,6 +2452,7 @@ function renderFeed() {
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
               ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
+              ${reaction.score != null ? `<span class="feed-badge reaction-badge">반응 ${escapeHtml(reaction.score)}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
@@ -2869,6 +2878,7 @@ function renderPerformance() {
   const bySymbol = Array.isArray(payload.bySymbol) ? payload.bySymbol : [];
   const byGate = Array.isArray(payload.byGate) ? payload.byGate : [];
   const byFinalAction = Array.isArray(payload.byFinalAction) ? payload.byFinalAction : [];
+  const byReaction = Array.isArray(payload.byReaction) ? payload.byReaction : [];
   const byHorizon = Array.isArray(payload.byHorizon) ? payload.byHorizon : [];
   const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : "샘플 가격";
   const threshold = payload.config?.successThreshold ?? "+1.0%";
@@ -2942,6 +2952,20 @@ function renderPerformance() {
               byFinalAction.length
                 ? byFinalAction.map(renderPerformanceGroup).join("")
                 : `<div class="history-empty">최종 판단별 관측값이 아직 없습니다</div>`
+            }
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">
+            <p class="eyebrow">반응</p>
+            <h2>가격 반응별 성과</h2>
+          </div>
+          <div class="performance-list">
+            ${
+              byReaction.length
+                ? byReaction.map(renderPerformanceGroup).join("")
+                : `<div class="history-empty">가격 반응별 관측값이 아직 없습니다</div>`
             }
           </div>
         </section>
@@ -3051,13 +3075,14 @@ function renderPerformanceObservation(item) {
   const tone = item.measured ? changeClass(item.change) : "";
   const gate = item.gateLabel || item.verdict || "미분류";
   const confidence = item.confidenceScore === null || item.confidenceScore === undefined ? "-" : item.confidenceScore;
+  const reaction = item.reactionScore === null || item.reactionScore === undefined ? "-" : item.reactionScore;
   const horizon = item.horizonLabel || "기간 미확인";
   const priceNote = item.sanityMessage || `${horizon} · ${item.snapshotPrice} → ${item.currentPrice} · ${item.outcome}`;
   return `
     <div class="performance-observation">
       <span>
         <strong>${escapeHtml(item.name)}</strong>
-        <em>${escapeHtml(modeLabel(item.mode))} · ${escapeHtml(timeLabel(item.createdAt))} · ${escapeHtml(gate)} · 신뢰 ${escapeHtml(confidence)}</em>
+        <em>${escapeHtml(modeLabel(item.mode))} · ${escapeHtml(timeLabel(item.createdAt))} · ${escapeHtml(gate)} · 신뢰 ${escapeHtml(confidence)} · 반응 ${escapeHtml(reaction)}</em>
       </span>
       <span>
         <strong class="${tone}">${escapeHtml(item.change)}</strong>
@@ -3125,6 +3150,7 @@ function decisionGroupSection(item) {
   const qualityReason = item.discovery?.qualityReason;
   const qualityLabel = discoveryQualityLabel(item);
   const confidence = item.dataConfidence ?? {};
+  const reaction = item.priceReaction ?? {};
   const gate = item.qualityGate ?? {};
   const finalDecision = item.finalDecision ?? {};
   return `
@@ -3139,6 +3165,7 @@ function decisionGroupSection(item) {
         ${statCard("분류", group.label)}
         ${qualityLabel ? statCard("품질", qualityLabel) : ""}
         ${confidence.score != null ? statCard("신뢰도", `${confidence.score}/100`) : ""}
+        ${reaction.score != null ? statCard("가격 반응", `${reaction.label ?? "-"} · ${reaction.score}/100`) : ""}
         ${gate.label ? statCard("게이트", gate.label) : ""}
       </div>
       <ul class="bullet-list">
@@ -3146,6 +3173,8 @@ function decisionGroupSection(item) {
         <li>${escapeHtml(group.reason)}</li>
         ${qualityReason ? `<li>${escapeHtml(`후보 품질: ${qualityReason}`)}</li>` : ""}
         ${(confidence.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`신뢰 근거: ${text}`)}</li>`).join("")}
+        ${(reaction.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`가격 반응: ${text}`)}</li>`).join("")}
+        ${(reaction.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 경고: ${text}`)}</li>`).join("")}
         ${(gate.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`게이트: ${text}`)}</li>`).join("")}
         ${
           serverGroup.reason && serverGroup.reason !== group.reason

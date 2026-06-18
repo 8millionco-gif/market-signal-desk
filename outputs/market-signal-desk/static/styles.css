@@ -667,6 +667,12 @@ h3 {
   background: rgba(244, 201, 93, 0.1);
 }
 
+.feed-title .reaction-badge {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.32);
+  background: rgba(123, 216, 143, 0.1);
+}
+
 .feed-subtitle {
   display: block;
   margin-top: 4px;
