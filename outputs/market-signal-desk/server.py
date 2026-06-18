@@ -4800,6 +4800,18 @@ def candidate_pool_decision_bonus(candidate: dict) -> int:
     observations = bounded_int(pool.get("observations", memory.get("observations", 0)), 0, 100_000)
     selected_count = bounded_int(pool.get("selectedCount", memory.get("selectedCount", 0)), 0, 100_000)
     score_delta = bounded_int(pool.get("scoreDelta", 0), -100, 100)
+    performance_measured = bounded_int(pool.get("performanceMeasuredCount", memory.get("performanceMeasuredCount", 0)), 0, 100_000)
+    performance_hit_rate = (
+        decimal_or_none(pool.get("performanceHitRateValue", memory.get("performanceHitRateValue")))
+        or display_percent_to_decimal(pool.get("performanceHitRate", memory.get("performanceHitRate")))
+        or Decimal("0")
+    )
+    performance_average = (
+        decimal_or_none(pool.get("performanceAverageChangeRate", memory.get("performanceAverageChangeRate")))
+        or display_percent_to_decimal(pool.get("performanceAverageChange", memory.get("performanceAverageChange")))
+        or Decimal("0")
+    )
+    performance_latest = str(pool.get("performanceLatestOutcome", memory.get("performanceLatestOutcome", "")))
     state_bonus = {
         "entry_candidate": 8,
         "pullback_wait": 6,
@@ -4809,12 +4821,27 @@ def candidate_pool_decision_bonus(candidate: dict) -> int:
         "collected": 0,
     }.get(state_key, 0)
     momentum_bonus = 2 if score_delta >= 5 else (-3 if score_delta <= -5 else 0)
+    performance_bonus = 0
+    if performance_measured:
+        if performance_measured >= 3 and performance_hit_rate >= Decimal("60"):
+            performance_bonus += 3
+        elif performance_measured >= 3 and performance_hit_rate < Decimal("35"):
+            performance_bonus -= 4
+        if performance_average >= Decimal("1"):
+            performance_bonus += 3
+        elif performance_average <= Decimal("-1"):
+            performance_bonus -= 4
+        if performance_latest == "상승":
+            performance_bonus += 2
+        elif performance_latest == "하락":
+            performance_bonus -= 2
     return bounded_int(
         state_bonus
         + min(7, pool_score // 14)
         + min(3, observations // 3)
         + min(3, selected_count)
-        + momentum_bonus,
+        + momentum_bonus
+        + performance_bonus,
         -10,
         18,
     )
@@ -5044,6 +5071,83 @@ def trim_candidate_pool_items(items: dict) -> int:
     return removed
 
 
+def candidate_pool_performance_metrics(history: list[dict]) -> dict:
+    measured = [
+        item
+        for item in history
+        if isinstance(item, dict) and item.get("measured", True) and decimal_or_none(item.get("changeRate")) is not None
+    ]
+    measured.sort(key=lambda item: str(item.get("observedAt") or item.get("createdAt") or ""), reverse=True)
+    changes = [decimal_or_none(item.get("changeRate")) for item in measured]
+    changes = [change for change in changes if change is not None]
+    positive = [item for item in measured if item.get("outcome") == "상승"]
+    negative = [item for item in measured if item.get("outcome") == "하락"]
+    neutral = [item for item in measured if item.get("outcome") == "중립"]
+    average = decimal_average(changes) if changes else Decimal("0")
+    hit_rate = (Decimal(len(positive)) / Decimal(len(measured)) * Decimal(100)) if measured else Decimal("0")
+    latest = measured[0] if measured else {}
+    latest_change = decimal_or_none(latest.get("changeRate"))
+    return {
+        "performanceMeasuredCount": len(measured),
+        "performancePositiveCount": len(positive),
+        "performanceNegativeCount": len(negative),
+        "performanceNeutralCount": len(neutral),
+        "performanceHitRate": display_percent_abs(hit_rate) if measured else "-",
+        "performanceHitRateValue": str(hit_rate.quantize(Decimal("0.01"))) if measured else "0",
+        "performanceAverageChange": display_decimal_percent(average) if measured else "-",
+        "performanceAverageChangeRate": str(average.quantize(Decimal("0.01"))) if measured else "0",
+        "performanceLatestChange": display_decimal_percent(latest_change) if latest_change is not None else "-",
+        "performanceLatestChangeRate": str(latest_change.quantize(Decimal("0.01"))) if latest_change is not None else "0",
+        "performanceLatestOutcome": latest.get("outcome", "-") if latest else "-",
+        "performanceLatestAt": latest.get("observedAt") or latest.get("createdAt") or "",
+    }
+
+
+def candidate_pool_performance_bonus(record: dict) -> int:
+    measured_count = bounded_int(record.get("performanceMeasuredCount", 0), 0, 100_000)
+    if not measured_count:
+        return 0
+    hit_rate = (
+        decimal_or_none(record.get("performanceHitRateValue"))
+        or display_percent_to_decimal(record.get("performanceHitRate"))
+        or Decimal("0")
+    )
+    average = (
+        decimal_or_none(record.get("performanceAverageChangeRate"))
+        or display_percent_to_decimal(record.get("performanceAverageChange"))
+        or Decimal("0")
+    )
+    latest_outcome = str(record.get("performanceLatestOutcome", ""))
+    bonus = bounded_int(average * Decimal("1.5"), -6, 6)
+    if measured_count >= 3 and hit_rate >= Decimal("60"):
+        bonus += 5
+    elif measured_count >= 3 and hit_rate < Decimal("35"):
+        bonus -= 8
+    if latest_outcome == "상승":
+        bonus += 3
+    elif latest_outcome == "하락":
+        bonus -= 4
+    return bounded_int(bonus, -12, 10)
+
+
+def candidate_pool_performance_fields(record: dict) -> dict:
+    keys = [
+        "performanceMeasuredCount",
+        "performancePositiveCount",
+        "performanceNegativeCount",
+        "performanceNeutralCount",
+        "performanceHitRate",
+        "performanceHitRateValue",
+        "performanceAverageChange",
+        "performanceAverageChangeRate",
+        "performanceLatestChange",
+        "performanceLatestChangeRate",
+        "performanceLatestOutcome",
+        "performanceLatestAt",
+    ]
+    return {key: record.get(key) for key in keys if key in record}
+
+
 def candidate_pool_summary(data: dict | None = None) -> dict:
     payload = data if isinstance(data, dict) else candidate_pool_data()
     items = payload.get("items", {}) if isinstance(payload.get("items"), dict) else {}
@@ -5054,6 +5158,13 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     soft_demotion_count = 0
     improving_count = 0
     weakening_count = 0
+    performance_symbol_count = 0
+    performance_measured_count = 0
+    performance_positive_count = 0
+    performance_negative_count = 0
+    performance_neutral_count = 0
+    performance_change_weighted_total = Decimal("0")
+    performance_latest_at = ""
     top_records: list[dict] = []
     for record in items.values():
         if not isinstance(record, dict):
@@ -5070,8 +5181,21 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
             improving_count += 1
         elif momentum == "약화":
             weakening_count += 1
+        performance_count = bounded_int(record.get("performanceMeasuredCount", 0), 0, 100_000)
+        if performance_count:
+            performance_symbol_count += 1
+            performance_measured_count += performance_count
+            performance_positive_count += bounded_int(record.get("performancePositiveCount", 0), 0, 100_000)
+            performance_negative_count += bounded_int(record.get("performanceNegativeCount", 0), 0, 100_000)
+            performance_neutral_count += bounded_int(record.get("performanceNeutralCount", 0), 0, 100_000)
+            average_change = decimal_or_none(record.get("performanceAverageChangeRate"))
+            if average_change is not None:
+                performance_change_weighted_total += average_change * Decimal(performance_count)
+            latest_at = str(record.get("performanceLatestAt", ""))
+            if latest_at > performance_latest_at:
+                performance_latest_at = latest_at
         if key not in {"excluded", "expired"}:
-            top_records.append({
+            top_record = {
                 "symbol": record.get("symbol", ""),
                 "name": record.get("name", record.get("symbol", "")),
                 "stateKey": key,
@@ -5087,7 +5211,9 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
                 "scoreDelta": bounded_int(record.get("scoreDelta", 0), -100, 100),
                 "lastSeenAt": record.get("lastSeenAt", ""),
                 "reason": record.get("stateReason", ""),
-            })
+            }
+            top_record.update(candidate_pool_performance_fields(record))
+            top_records.append(top_record)
     top_records.sort(
         key=lambda record: (
             candidate_pool_rank(str(record.get("stateKey", ""))),
@@ -5100,6 +5226,16 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         ),
         reverse=True,
     )
+    performance_hit_rate = (
+        Decimal(performance_positive_count) / Decimal(performance_measured_count) * Decimal(100)
+        if performance_measured_count
+        else Decimal("0")
+    )
+    performance_average_change = (
+        performance_change_weighted_total / Decimal(performance_measured_count)
+        if performance_measured_count
+        else Decimal("0")
+    )
     return {
         "enabled": SIGNAL_CANDIDATE_POOL_ENABLED,
         "file": display_local_path(CANDIDATE_POOL_FILE),
@@ -5111,6 +5247,14 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         "softDemotionCount": soft_demotion_count,
         "improvingCount": improving_count,
         "weakeningCount": weakening_count,
+        "performanceSymbolCount": performance_symbol_count,
+        "performanceMeasuredCount": performance_measured_count,
+        "performancePositiveCount": performance_positive_count,
+        "performanceNegativeCount": performance_negative_count,
+        "performanceNeutralCount": performance_neutral_count,
+        "performanceHitRate": display_percent_abs(performance_hit_rate) if performance_measured_count else "-",
+        "performanceAverageChange": display_decimal_percent(performance_average_change) if performance_measured_count else "-",
+        "performanceLatestAt": performance_latest_at,
         "updatedAt": payload.get("updatedAt", ""),
         "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
         "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
@@ -5140,6 +5284,7 @@ def candidate_pool_selection_score(record: dict) -> int:
     selected = min(10, bounded_int(record.get("selectedCount", 0), 0, 100_000))
     observations = min(12, bounded_int(record.get("observations", 0), 0, 100_000))
     momentum_penalty = 8 if str(record.get("momentumLabel", "")) == "약화" else 0
+    performance_bonus = candidate_pool_performance_bonus(record)
     return bounded_int(
         state_bonus
         + peak_score * 0.24
@@ -5149,6 +5294,7 @@ def candidate_pool_selection_score(record: dict) -> int:
         + reaction * 0.14
         + selected
         + observations // 2
+        + performance_bonus
         - momentum_penalty,
         0,
         100,
@@ -5158,7 +5304,7 @@ def candidate_pool_selection_score(record: dict) -> int:
 def candidate_pool_memory_payload(record: dict) -> dict:
     score = bounded_int(record.get("retainScore", candidate_pool_selection_score(record)), 0, 100)
     state_key = str(record.get("stateKey", "collected"))
-    return {
+    payload = {
         "retained": True,
         "score": score,
         "stateKey": state_key,
@@ -5171,6 +5317,8 @@ def candidate_pool_memory_payload(record: dict) -> dict:
         "lastSeenAt": record.get("lastSeenAt", ""),
         "reason": "후보 풀에서 의미 있는 상태가 유지되어 재점검 대상",
     }
+    payload.update(candidate_pool_performance_fields(record))
+    return payload
 
 
 def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
@@ -5351,6 +5499,18 @@ def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "
                     "peakEvidenceScore",
                     "scoreDelta",
                     "momentumLabel",
+                    "performanceMeasuredCount",
+                    "performancePositiveCount",
+                    "performanceNegativeCount",
+                    "performanceNeutralCount",
+                    "performanceHitRate",
+                    "performanceHitRateValue",
+                    "performanceAverageChange",
+                    "performanceAverageChangeRate",
+                    "performanceLatestChange",
+                    "performanceLatestChangeRate",
+                    "performanceLatestOutcome",
+                    "performanceLatestAt",
                     "transitionHistory",
                 ]
                 if key in items[symbol]
@@ -7498,6 +7658,13 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolSoftDemotionCount": pool_status.get("softDemotionCount"),
             "candidatePoolImprovingCount": pool_status.get("improvingCount"),
             "candidatePoolWeakeningCount": pool_status.get("weakeningCount"),
+            "candidatePoolPerformanceSymbolCount": pool_status.get("performanceSymbolCount"),
+            "candidatePoolPerformanceMeasuredCount": pool_status.get("performanceMeasuredCount"),
+            "candidatePoolPerformancePositiveCount": pool_status.get("performancePositiveCount"),
+            "candidatePoolPerformanceNegativeCount": pool_status.get("performanceNegativeCount"),
+            "candidatePoolPerformanceHitRate": pool_status.get("performanceHitRate"),
+            "candidatePoolPerformanceAverageChange": pool_status.get("performanceAverageChange"),
+            "candidatePoolPerformanceLatestAt": pool_status.get("performanceLatestAt"),
             "candidatePoolRetainLimit": discovery_status.get("candidatePoolRetainLimit"),
             "candidatePoolRetainMinScore": discovery_status.get("candidatePoolRetainMinScore"),
             "candidatePoolRetainedInputCount": discovery_status.get("candidatePoolRetainedInputCount"),
@@ -7743,6 +7910,12 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolSoftDemotionCount": summary.get("candidatePoolSoftDemotionCount"),
         "candidatePoolImprovingCount": summary.get("candidatePoolImprovingCount"),
         "candidatePoolWeakeningCount": summary.get("candidatePoolWeakeningCount"),
+        "candidatePoolPerformanceSymbolCount": summary.get("candidatePoolPerformanceSymbolCount"),
+        "candidatePoolPerformanceMeasuredCount": summary.get("candidatePoolPerformanceMeasuredCount"),
+        "candidatePoolPerformancePositiveCount": summary.get("candidatePoolPerformancePositiveCount"),
+        "candidatePoolPerformanceNegativeCount": summary.get("candidatePoolPerformanceNegativeCount"),
+        "candidatePoolPerformanceHitRate": summary.get("candidatePoolPerformanceHitRate"),
+        "candidatePoolPerformanceAverageChange": summary.get("candidatePoolPerformanceAverageChange"),
         "candidatePoolRetainLimit": summary.get("candidatePoolRetainLimit"),
         "candidatePoolRetainMinScore": summary.get("candidatePoolRetainMinScore"),
         "candidatePoolRetainedInputCount": summary.get("candidatePoolRetainedInputCount"),
@@ -8231,6 +8404,130 @@ def performance_by_reaction(observations: list[dict]) -> list[dict]:
     )
 
 
+def update_candidate_pool_performance(observations: list[dict], observed_at: str) -> dict:
+    if not SIGNAL_CANDIDATE_POOL_ENABLED:
+        return {
+            "enabled": False,
+            "updatedCount": 0,
+            "message": "후보 풀 저장이 꺼져 있어 성과를 반영하지 않았습니다.",
+        }
+    measured = [
+        item
+        for item in observations
+        if isinstance(item, dict)
+        and item.get("measured")
+        and item.get("priceSanity", True)
+        and str(item.get("symbol", "")).strip()
+    ]
+    if not measured:
+        return {
+            "enabled": True,
+            "updatedCount": 0,
+            "measuredCount": 0,
+            "message": "후보 풀에 반영할 측정 성과가 아직 없습니다.",
+        }
+
+    grouped: dict[str, list[dict]] = {}
+    for item in measured:
+        grouped.setdefault(str(item.get("symbol", "")).strip().upper(), []).append(item)
+
+    updated_count = 0
+    updated_symbols: list[str] = []
+    total_measured = 0
+    total_positive = 0
+    total_negative = 0
+    total_change = Decimal("0")
+
+    with CANDIDATE_POOL_LOCK:
+        data = candidate_pool_data()
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        for symbol, symbol_observations in grouped.items():
+            record = items.get(symbol)
+            if not isinstance(record, dict):
+                continue
+            history = record.get("performanceHistory", [])
+            if not isinstance(history, list):
+                history = []
+            by_key = {
+                str(entry.get("key")): dict(entry)
+                for entry in history
+                if isinstance(entry, dict) and entry.get("key")
+            }
+            for item in symbol_observations:
+                key = f"{item.get('runId') or item.get('createdAt') or observed_at}:{symbol}"
+                entry = {
+                    "key": key,
+                    "runId": item.get("runId"),
+                    "mode": item.get("mode"),
+                    "trigger": item.get("trigger"),
+                    "createdAt": item.get("createdAt"),
+                    "observedAt": observed_at,
+                    "horizonKey": item.get("horizonKey"),
+                    "horizonLabel": item.get("horizonLabel"),
+                    "snapshotPrice": item.get("snapshotPrice"),
+                    "currentPrice": item.get("currentPrice"),
+                    "change": item.get("change"),
+                    "changeRate": item.get("changeRate"),
+                    "outcome": item.get("outcome"),
+                    "score": item.get("score"),
+                    "readiness": item.get("readiness"),
+                    "gateKey": item.get("gateKey"),
+                    "gateLabel": item.get("gateLabel"),
+                    "finalActionKey": item.get("finalActionKey"),
+                    "finalAction": item.get("finalAction"),
+                    "reactionKey": item.get("reactionKey"),
+                    "reactionLabel": item.get("reactionLabel"),
+                    "reactionScore": item.get("reactionScore"),
+                    "measured": True,
+                }
+                by_key[key] = entry
+            performance_history = sorted(
+                by_key.values(),
+                key=lambda entry: str(entry.get("observedAt") or entry.get("createdAt") or ""),
+                reverse=True,
+            )[:20]
+            metrics = candidate_pool_performance_metrics(performance_history)
+            record["performanceHistory"] = performance_history
+            record.update(metrics)
+            record["updatedAt"] = observed_at
+            items[symbol] = record
+            updated_count += 1
+            updated_symbols.append(symbol)
+
+        data["items"] = items
+        if updated_count:
+            data["updatedAt"] = observed_at
+            if not db_write_kv("candidate_pool", data):
+                write_json(CANDIDATE_POOL_FILE, data)
+        summary = candidate_pool_summary(data)
+
+    for item in measured:
+        change_rate = decimal_or_none(item.get("changeRate"))
+        if change_rate is None:
+            continue
+        total_measured += 1
+        total_change += change_rate
+        if item.get("outcome") == "상승":
+            total_positive += 1
+        elif item.get("outcome") == "하락":
+            total_negative += 1
+
+    hit_rate = Decimal(total_positive) / Decimal(total_measured) * Decimal(100) if total_measured else Decimal("0")
+    average_change = total_change / Decimal(total_measured) if total_measured else Decimal("0")
+    return {
+        "enabled": True,
+        "updatedCount": updated_count,
+        "updatedSymbols": updated_symbols[:12],
+        "measuredCount": total_measured,
+        "positiveCount": total_positive,
+        "negativeCount": total_negative,
+        "hitRate": display_percent_abs(hit_rate) if total_measured else "-",
+        "averageChange": display_decimal_percent(average_change) if total_measured else "-",
+        "summary": summary,
+        "message": f"후보 풀 {updated_count}개에 사후 성과를 반영했습니다." if updated_count else "후보 풀에 연결된 성과 항목이 없습니다.",
+    }
+
+
 def performance_report(limit: int | None = None, top_n: int | None = None) -> dict:
     limit = SIGNAL_PERFORMANCE_RUN_LIMIT if limit is None else max(1, min(int(limit), 50))
     top_n = SIGNAL_PERFORMANCE_TOP_CANDIDATES if top_n is None else max(1, min(int(top_n), 10))
@@ -8330,8 +8627,10 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "sanityMessage": sanity_message,
         })
 
+    generated_at = datetime.now(KST).isoformat(timespec="seconds")
+    candidate_pool_performance = update_candidate_pool_performance(observations, generated_at)
     return {
-        "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "generatedAt": generated_at,
         "config": {
             "runLimit": limit,
             "topCandidates": top_n,
@@ -8339,6 +8638,7 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "outlierThreshold": display_percent_abs(SIGNAL_PERFORMANCE_OUTLIER_PERCENT),
         },
         "priceStatus": price_status,
+        "candidatePoolPerformance": candidate_pool_performance,
         "summary": performance_summary(observations, len(runs), price_status),
         "bySymbol": performance_by_symbol(observations),
         "byGate": performance_by_gate(observations),

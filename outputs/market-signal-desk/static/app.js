@@ -606,6 +606,14 @@ function candidatePoolStateForDisplay(item) {
     peakEvidenceScore: Number(pool.peakEvidenceScore ?? 0),
     scoreDelta: Number(pool.scoreDelta ?? 0),
     momentumLabel: pool.momentumLabel || "",
+    performanceMeasuredCount: Number(pool.performanceMeasuredCount ?? memory.performanceMeasuredCount ?? 0),
+    performancePositiveCount: Number(pool.performancePositiveCount ?? memory.performancePositiveCount ?? 0),
+    performanceNegativeCount: Number(pool.performanceNegativeCount ?? memory.performanceNegativeCount ?? 0),
+    performanceHitRate: pool.performanceHitRate || memory.performanceHitRate || "",
+    performanceAverageChange: pool.performanceAverageChange || memory.performanceAverageChange || "",
+    performanceLatestChange: pool.performanceLatestChange || memory.performanceLatestChange || "",
+    performanceLatestOutcome: pool.performanceLatestOutcome || memory.performanceLatestOutcome || "",
+    performanceLatestAt: pool.performanceLatestAt || memory.performanceLatestAt || "",
     retained: Boolean(item?.discovery?.poolRetained || memory.retained),
     retainScore: Number(memory.score ?? item?.discovery?.poolScore ?? 0),
     retainReason: memory.reason || "",
@@ -909,6 +917,9 @@ function renderCandidatePoolStatus() {
   const retained = Number(summary.candidatePoolRetainedScanCount ?? 0);
   const improving = Number(summary.candidatePoolImprovingCount ?? pool.improvingCount ?? 0);
   const weakening = Number(summary.candidatePoolWeakeningCount ?? pool.weakeningCount ?? 0);
+  const performanceMeasured = Number(summary.candidatePoolPerformanceMeasuredCount ?? pool.performanceMeasuredCount ?? 0);
+  const performanceHitRate = summary.candidatePoolPerformanceHitRate ?? pool.performanceHitRate ?? "-";
+  const performanceAverage = summary.candidatePoolPerformanceAverageChange ?? pool.performanceAverageChange ?? "-";
   const topText = top.length
     ? top
         .slice(0, 2)
@@ -921,6 +932,7 @@ function renderCandidatePoolStatus() {
     ["눌림/관찰", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `눌림 ${counts.pullback_wait ?? 0} · 관찰 ${counts.watching ?? 0}`],
     ["재점검", retained > 0 || selected > 0, `스캔 ${retained} · 선정 ${selected}`],
     ["흐름", improving >= weakening, `개선 ${improving} · 약화 ${weakening}`],
+    ["성과", performanceMeasured > 0, `${performanceMeasured}건 · 승률 ${performanceHitRate} · 평균 ${performanceAverage}`],
     ["상위", top.length > 0, topText]
   ];
   els.candidatePoolStatus.innerHTML = rows
@@ -1469,9 +1481,10 @@ function renderMetrics() {
     const poolCounts = summary.candidatePoolStatusCounts ?? {};
     const poolTotal = Number(summary.candidatePoolCount ?? 0);
     const poolActive = Number(summary.candidatePoolActiveCount ?? 0);
+    const poolPerformance = Number(summary.candidatePoolPerformanceMeasuredCount ?? 0);
     const poolText =
       poolTotal || poolActive
-        ? ` · 후보풀 ${poolActive}/${poolTotal} · 풀재점검 ${summary.candidatePoolRetainedScanCount ?? 0} · 풀선정 ${summary.candidatePoolSelectedCount ?? 0} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
+        ? ` · 후보풀 ${poolActive}/${poolTotal} · 풀성과 ${poolPerformance}건 · 승률 ${summary.candidatePoolPerformanceHitRate ?? "-"} · 풀재점검 ${summary.candidatePoolRetainedScanCount ?? 0} · 풀선정 ${summary.candidatePoolSelectedCount ?? 0} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
         : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
@@ -3269,6 +3282,8 @@ function renderPerformance() {
   const byFinalAction = Array.isArray(payload.byFinalAction) ? payload.byFinalAction : [];
   const byReaction = Array.isArray(payload.byReaction) ? payload.byReaction : [];
   const byHorizon = Array.isArray(payload.byHorizon) ? payload.byHorizon : [];
+  const poolPerformance = payload.candidatePoolPerformance ?? {};
+  const poolUpdatedSymbols = Array.isArray(poolPerformance.updatedSymbols) ? poolPerformance.updatedSymbols : [];
   const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : "샘플 가격";
   const threshold = payload.config?.successThreshold ?? "+1.0%";
   const best = summary.best;
@@ -3300,6 +3315,9 @@ function renderPerformance() {
         ${performanceMetric("매수 승률", summary.buyDecisionHitRate ?? "-")}
         ${performanceMetric("추가 판단", summary.addDecisionMeasuredCount ?? 0)}
         ${performanceMetric("추가 승률", summary.addDecisionHitRate ?? "-")}
+        ${performanceMetric("풀 반영", poolPerformance.updatedCount ?? 0)}
+        ${performanceMetric("풀 승률", poolPerformance.hitRate ?? "-")}
+        ${performanceMetric("풀 평균", poolPerformance.averageChange ?? "-", changeClass(poolPerformance.averageChange ?? ""))}
         ${performanceMetric("상승", summary.positiveCount ?? 0)}
         ${performanceMetric("하락", summary.negativeCount ?? 0)}
       </div>
@@ -3383,6 +3401,39 @@ function renderPerformance() {
           <div class="performance-extremes">
             ${performanceExtreme("최고", best)}
             ${performanceExtreme("최저", worst)}
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">
+            <p class="eyebrow">후보 풀</p>
+            <h2>성과 반영</h2>
+          </div>
+          <div class="performance-list">
+            <div class="performance-row">
+              <span>
+                <strong>${escapeHtml(poolPerformance.updatedCount ?? 0)}개 후보 갱신</strong>
+                <em>${escapeHtml(poolPerformance.message ?? "성과 검증 결과를 후보 풀에 반영합니다.")}</em>
+              </span>
+              <span>
+                <strong class="${changeClass(poolPerformance.averageChange ?? "")}">${escapeHtml(poolPerformance.averageChange ?? "-")}</strong>
+                <em>승률 ${escapeHtml(poolPerformance.hitRate ?? "-")} · 측정 ${escapeHtml(poolPerformance.measuredCount ?? 0)}건</em>
+              </span>
+            </div>
+            ${
+              poolUpdatedSymbols.length
+                ? `<div class="performance-row">
+                    <span>
+                      <strong>반영 종목</strong>
+                      <em>${escapeHtml(poolUpdatedSymbols.join(", "))}</em>
+                    </span>
+                    <span>
+                      <strong>${escapeHtml(poolPerformance.positiveCount ?? 0)} 상승</strong>
+                      <em>${escapeHtml(poolPerformance.negativeCount ?? 0)} 하락</em>
+                    </span>
+                  </div>`
+                : `<div class="history-empty">아직 후보 풀에 연결된 성과가 없습니다</div>`
+            }
           </div>
         </section>
 
@@ -3597,6 +3648,10 @@ function candidatePoolSection(item) {
     ["최고 준비도", pool.peakReadiness ? `${pool.peakReadiness}/100` : "-"],
     ["상태 변화", `${pool.promotionCount}회 승격 · ${pool.demotionCount}회 강등`],
     ["최근 변화", pool.momentumLabel ? `${pool.momentumLabel} ${deltaText}` : "-"],
+    ["성과 관측", pool.performanceMeasuredCount ? `${pool.performanceMeasuredCount}건` : "-"],
+    ["성과 승률", pool.performanceMeasuredCount ? pool.performanceHitRate || "-" : "-"],
+    ["평균 성과", pool.performanceMeasuredCount ? pool.performanceAverageChange || "-" : "-"],
+    ["최근 성과", pool.performanceMeasuredCount ? `${pool.performanceLatestOutcome || "-"} ${pool.performanceLatestChange || ""}`.trim() : "-"],
     ["강등 보류", pool.softDemotionCount ? `${pool.softDemotionCount}회` : "-"],
     ["최근 관측", timeLabel(pool.lastSeenAt)],
     ["최근 선정", pool.lastSelectedAt ? timeLabel(pool.lastSelectedAt) : "-"]
@@ -3613,6 +3668,11 @@ function candidatePoolSection(item) {
       <ul class="bullet-list">
         <li>${escapeHtml(pool.reason)}</li>
         ${pool.retained ? `<li>${escapeHtml(pool.retainReason || `${pool.retainStateLabel || "후보 풀"} 상태로 재점검 대상입니다.`)}</li>` : ""}
+        ${
+          pool.performanceMeasuredCount
+            ? `<li>${escapeHtml(`사후 성과: ${pool.performanceMeasuredCount}건 관측 · 승률 ${pool.performanceHitRate || "-"} · 평균 ${pool.performanceAverageChange || "-"}`)}</li>`
+            : ""
+        }
         ${pool.stateChangedAt ? `<li>${escapeHtml(`최근 상태 변경: ${timeLabel(pool.stateChangedAt)}`)}</li>` : ""}
       </ul>
       ${
