@@ -467,6 +467,13 @@ h3 {
   font-size: 13px;
 }
 
+.stock-result small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
 .stock-result em {
   margin-top: 2px;
   color: var(--muted);

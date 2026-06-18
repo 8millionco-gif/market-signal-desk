@@ -567,8 +567,10 @@ function selectedCandidate() {
 function candidateFromSearchResult(item, options = {}) {
   const analysisLoading = Boolean(options.analysisLoading);
   const analysisError = options.analysisError || "";
+  const matchText = stockSearchMatchText(item);
   const tags = uniqueTexts([
     "종목 검색",
+    matchText,
     item.market,
     item.securityType,
     item.currency,
@@ -595,9 +597,10 @@ function candidateFromSearchResult(item, options = {}) {
       : analysisError || "오늘 후보로 점수화되기 전의 직접 조회 결과입니다. 뉴스, 공시, 가격 반응을 확인한 뒤 후보 편입 여부를 먼저 판단해야 합니다.",
     why: [
       `${item.name || item.symbol} 기본정보를 조회했습니다.`,
+      matchText ? `검색 자동완성 근거: ${matchText}` : "",
       item.price && item.price !== "-" ? `현재가 ${item.price} 기준으로 추가 분석을 시작할 수 있습니다.` : "현재가는 아직 연결되지 않았습니다.",
       "후보 점수화 전에는 신규 매수 판단보다 관찰 목록 편입 여부를 먼저 봅니다."
-    ],
+    ].filter(Boolean),
     entryConditions: [
       "뉴스와 공시 재료가 최근 가격 반응과 같은 방향인지 확인",
       "거래대금과 섹터 흐름이 후보 기준을 충족하는지 확인",
@@ -2007,10 +2010,18 @@ function strategyLabel(value) {
   return "진입";
 }
 
+function stockSearchMatchText(item) {
+  const match = item?.match ?? {};
+  if (!match.text || !match.field) return "";
+  return `${match.field}: ${match.text}`;
+}
+
 function stockSearchSubtitle(item) {
+  const matchText = stockSearchMatchText(item);
   const parts = [
+    matchText,
     item.sourceLabel,
-    item.aliases?.length ? `별칭 ${item.aliases.slice(0, 2).join(", ")}` : "",
+    !matchText && item.aliases?.length ? `별칭 ${item.aliases.slice(0, 2).join(", ")}` : "",
     item.market,
     item.securityType,
     item.status,
@@ -2092,7 +2103,7 @@ function renderStockSearchResults() {
   els.stockSearchResults.hidden = false;
   els.stockSearchResults.innerHTML = `
     <div class="stock-search-head">
-      <strong>종목 검색</strong>
+      <strong>종목 자동완성</strong>
       <span>${loading ? "조회 중" : items.length ? `${items.length}건` : "결과 없음"}</span>
     </div>
     ${
@@ -2105,7 +2116,7 @@ function renderStockSearchResults() {
                   <button class="stock-result" type="button" data-search-symbol="${escapeHtml(item.symbol)}">
                     <span class="logo-mark">${escapeHtml(initials(item.name || item.symbol))}</span>
                     <span>
-                      <strong>${escapeHtml(item.name || item.symbol)}</strong>
+                      <strong>${escapeHtml(item.name || item.symbol)} <small>${escapeHtml(item.symbol)}</small></strong>
                       <em>${escapeHtml(stockSearchSubtitle(item))}</em>
                     </span>
                     <span>${escapeHtml(
