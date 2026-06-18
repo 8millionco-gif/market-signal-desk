@@ -426,10 +426,12 @@ Render 배포에서는 자동 실행을 켜기 전에 아래처럼 수동 스냅
 ```powershell
 $env:SIGNAL_PERFORMANCE_RUN_LIMIT="12"
 $env:SIGNAL_PERFORMANCE_TOP_CANDIDATES="3"
+$env:SIGNAL_PERFORMANCE_AUTO_UPDATE="1"
+$env:SIGNAL_PERFORMANCE_MIN_AGE_MINUTES="60"
 $env:SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT="1"
 ```
 
-기본값은 최근 12개 스냅샷의 상위 3개 후보를 비교하고, 현재가가 스냅샷 당시 가격보다 1% 이상 높으면 상승 관측으로 분류합니다.
+기본값은 최근 12개 스냅샷의 상위 3개 후보를 비교하고, 저장 후 60분 이상 지난 스냅샷만 성과 관측 대상으로 삼습니다. 현재가가 스냅샷 당시 가격보다 1% 이상 높으면 상승 관측으로 분류합니다. 스냅샷이 저장되면 오래된 스냅샷의 성과 검증을 자동 실행해 후보 풀 성과를 갱신합니다.
 
 ## 알림 설정
 

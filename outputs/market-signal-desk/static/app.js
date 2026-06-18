@@ -273,8 +273,8 @@ function statusFallbacks() {
       enabled: false
     },
     scheduler: {
-      config: { enabled: false, jobs: [] },
-      state: { started: false, running: false, lastError: "" },
+      config: { enabled: false, jobs: [], performanceAutoUpdate: false, performanceMinAgeMinutes: 60 },
+      state: { started: false, running: false, lastError: "", lastPerformanceUpdate: {}, lastPerformanceError: "" },
       recentRuns: []
     },
     discoveryBot: {
@@ -1562,6 +1562,8 @@ function renderSchedulerStatus() {
   const nextRun = status.nextRun ?? {};
   const jobs = Array.isArray(config.jobs) ? config.jobs : [];
   const recentRuns = Array.isArray(status.recentRuns) ? status.recentRuns : [];
+  const performanceUpdate = schedulerState.lastPerformanceUpdate ?? {};
+  const performanceMinAge = Number(config.performanceMinAgeMinutes ?? 60);
   const latest = recentRuns[0];
   const runText = latest
     ? `${modeLabel(latest.mode)} · ${triggerLabel(latest.trigger)} · ${String(latest.createdAt ?? "").replace("T", " ").slice(5, 16)}`
@@ -1574,15 +1576,23 @@ function renderSchedulerStatus() {
   const jobText = jobs.length
     ? jobs.map((job) => `${modeLabel(job.mode)} ${job.time}`).join(" · ")
     : "-";
+  const performanceText = performanceUpdate.updatedAt
+    ? `${performanceUpdate.updatedCount ?? 0}개 반영 · 승률 ${performanceUpdate.hitRate ?? "-"} · ${timeLabel(performanceUpdate.updatedAt)}`
+    : "대기";
   const rows = [
     ["자동 실행", config.enabled, config.enabled ? "켜짐" : "꺼짐"],
     ["실행 상태", !schedulerState.running && !schedulerState.lastError, schedulerState.running ? "실행 중" : schedulerState.lastError ? "확인 필요" : "대기"],
     ["예약", true, jobText],
     ["다음 실행", Boolean(config.enabled && nextRun?.runAt), nextRunText],
-    ["최근 실행", Boolean(latest), runText]
+    ["최근 실행", Boolean(latest), runText],
+    ["성과 자동", config.performanceAutoUpdate, config.performanceAutoUpdate ? `${performanceMinAge}분 후 반영` : "꺼짐"],
+    ["최근 성과", Boolean(performanceUpdate.updatedAt), performanceText]
   ];
   const lastError = schedulerState.lastError
     ? `<div><span>최근 오류</span><strong class="warn">${escapeHtml(schedulerState.lastError)}</strong></div>`
+    : "";
+  const performanceError = schedulerState.lastPerformanceError
+    ? `<div><span>성과 오류</span><strong class="warn">${escapeHtml(schedulerState.lastPerformanceError)}</strong></div>`
     : "";
   els.schedulerStatus.innerHTML = `
     ${rows
@@ -1597,6 +1607,7 @@ function renderSchedulerStatus() {
       })
       .join("")}
     ${lastError}
+    ${performanceError}
     <div class="schedule-actions">
       <button type="button" data-scheduler-mode="close">장마감 실행</button>
       <button type="button" data-scheduler-mode="preopen">장전 실행</button>
@@ -3306,6 +3317,8 @@ function renderPerformance() {
 
       <div class="performance-metrics">
         ${performanceMetric("스냅샷", summary.runCount ?? 0)}
+        ${performanceMetric("검증 대상", summary.eligibleRunCount ?? 0)}
+        ${performanceMetric("관측 대기", summary.freshRunSkippedCount ?? 0)}
         ${performanceMetric("관측", summary.measuredCount ?? 0)}
         ${performanceMetric("상승 비율", summary.hitRate ?? "-")}
         ${performanceMetric("평균 변화", summary.averageChange ?? "-", changeClass(summary.averageChange ?? ""))}

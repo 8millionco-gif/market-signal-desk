@@ -18,6 +18,10 @@ services:
         value: "1"
       - key: SIGNAL_DB_MIGRATE_RUN_LIMIT
         value: "200"
+      - key: SIGNAL_PERFORMANCE_AUTO_UPDATE
+        value: "1"
+      - key: SIGNAL_PERFORMANCE_MIN_AGE_MINUTES
+        value: "60"
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT

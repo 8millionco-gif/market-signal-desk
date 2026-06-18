@@ -144,6 +144,8 @@ SIGNAL_PREOPEN_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_PREOPEN_RUN_WINDOW_MIN
 SIGNAL_RUN_HISTORY_LIMIT = int(os.getenv("SIGNAL_RUN_HISTORY_LIMIT", "12"))
 SIGNAL_PERFORMANCE_RUN_LIMIT = int(os.getenv("SIGNAL_PERFORMANCE_RUN_LIMIT", "12"))
 SIGNAL_PERFORMANCE_TOP_CANDIDATES = int(os.getenv("SIGNAL_PERFORMANCE_TOP_CANDIDATES", "3"))
+SIGNAL_PERFORMANCE_AUTO_UPDATE = os.getenv("SIGNAL_PERFORMANCE_AUTO_UPDATE", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_PERFORMANCE_MIN_AGE_MINUTES = int(os.getenv("SIGNAL_PERFORMANCE_MIN_AGE_MINUTES", "60"))
 SIGNAL_AUTO_CANDIDATES_ENABLED = os.getenv("SIGNAL_AUTO_CANDIDATES_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DOMESTIC_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_DOMESTIC_CANDIDATE_LIMIT", "10"))
 SIGNAL_OVERSEAS_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_OVERSEAS_CANDIDATE_LIMIT", "10"))
@@ -225,6 +227,8 @@ SCHEDULER_STATE: dict[str, object] = {
     "lastError": "",
     "lastCheckedAt": "",
     "lastRuns": {},
+    "lastPerformanceUpdate": {},
+    "lastPerformanceError": "",
 }
 DISCOVERY_BOT_STATE: dict[str, object] = {
     "started": False,
@@ -7789,6 +7793,10 @@ def scheduler_config_status() -> dict:
         "enabled": SIGNAL_SCHEDULER_ENABLED,
         "intervalSeconds": SIGNAL_SCHEDULER_INTERVAL_SECONDS,
         "historyLimit": SIGNAL_RUN_HISTORY_LIMIT,
+        "performanceAutoUpdate": SIGNAL_PERFORMANCE_AUTO_UPDATE,
+        "performanceMinAgeMinutes": max(0, SIGNAL_PERFORMANCE_MIN_AGE_MINUTES),
+        "performanceRunLimit": SIGNAL_PERFORMANCE_RUN_LIMIT,
+        "performanceTopCandidates": SIGNAL_PERFORMANCE_TOP_CANDIDATES,
         "jobs": scheduler_jobs(),
         "runsDir": display_local_path(RUNS_DIR),
     }
@@ -8528,13 +8536,24 @@ def update_candidate_pool_performance(observations: list[dict], observed_at: str
     }
 
 
-def performance_report(limit: int | None = None, top_n: int | None = None) -> dict:
+def performance_report(limit: int | None = None, top_n: int | None = None, min_age_minutes: int | None = None) -> dict:
     limit = SIGNAL_PERFORMANCE_RUN_LIMIT if limit is None else max(1, min(int(limit), 50))
     top_n = SIGNAL_PERFORMANCE_TOP_CANDIDATES if top_n is None else max(1, min(int(top_n), 10))
+    min_age = max(0, SIGNAL_PERFORMANCE_MIN_AGE_MINUTES if min_age_minutes is None else int(min_age_minutes))
+    generated_at_dt = datetime.now(KST)
     runs = recent_scheduler_runs(limit)
     snapshot_candidates: list[tuple[dict, dict]] = []
     symbols: list[str] = []
+    eligible_run_count = 0
+    fresh_run_skipped_count = 0
     for run in runs:
+        created_at = parse_iso_datetime(str(run.get("createdAt", "")))
+        if created_at and min_age > 0:
+            elapsed_minutes = int((generated_at_dt - created_at.astimezone(KST)).total_seconds() // 60)
+            if elapsed_minutes < min_age:
+                fresh_run_skipped_count += 1
+                continue
+        eligible_run_count += 1
         detail = scheduler_snapshot_detail(str(run.get("id", "")))
         dashboard_payload = detail.get("dashboard", {}) if detail else {}
         candidates = dashboard_payload.get("candidates", [])
@@ -8627,19 +8646,26 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "sanityMessage": sanity_message,
         })
 
-    generated_at = datetime.now(KST).isoformat(timespec="seconds")
+    generated_at = generated_at_dt.isoformat(timespec="seconds")
     candidate_pool_performance = update_candidate_pool_performance(observations, generated_at)
+    summary = performance_summary(observations, len(runs), price_status)
+    summary.update({
+        "eligibleRunCount": eligible_run_count,
+        "freshRunSkippedCount": fresh_run_skipped_count,
+        "minAgeMinutes": min_age,
+    })
     return {
         "generatedAt": generated_at,
         "config": {
             "runLimit": limit,
             "topCandidates": top_n,
+            "minAgeMinutes": min_age,
             "successThreshold": display_percent_abs(threshold),
             "outlierThreshold": display_percent_abs(SIGNAL_PERFORMANCE_OUTLIER_PERCENT),
         },
         "priceStatus": price_status,
         "candidatePoolPerformance": candidate_pool_performance,
-        "summary": performance_summary(observations, len(runs), price_status),
+        "summary": summary,
         "bySymbol": performance_by_symbol(observations),
         "byGate": performance_by_gate(observations),
         "byFinalAction": performance_by_final_action(observations),
@@ -8647,6 +8673,64 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
         "byHorizon": performance_by_horizon(observations),
         "observations": observations,
     }
+
+
+def performance_auto_update_summary(report: dict, trigger: str) -> dict:
+    pool_update = report.get("candidatePoolPerformance", {}) if isinstance(report.get("candidatePoolPerformance"), dict) else {}
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    return {
+        "enabled": SIGNAL_PERFORMANCE_AUTO_UPDATE,
+        "trigger": trigger,
+        "updatedAt": report.get("generatedAt", datetime.now(KST).isoformat(timespec="seconds")),
+        "updatedCount": pool_update.get("updatedCount", 0),
+        "updatedSymbols": pool_update.get("updatedSymbols", []),
+        "measuredCount": pool_update.get("measuredCount", summary.get("measuredCount", 0)),
+        "positiveCount": pool_update.get("positiveCount", summary.get("positiveCount", 0)),
+        "negativeCount": pool_update.get("negativeCount", summary.get("negativeCount", 0)),
+        "hitRate": pool_update.get("hitRate", summary.get("hitRate", "-")),
+        "averageChange": pool_update.get("averageChange", summary.get("averageChange", "-")),
+        "eligibleRunCount": summary.get("eligibleRunCount", 0),
+        "freshRunSkippedCount": summary.get("freshRunSkippedCount", 0),
+        "minAgeMinutes": summary.get("minAgeMinutes", SIGNAL_PERFORMANCE_MIN_AGE_MINUTES),
+        "message": pool_update.get("message", "성과 검증을 자동 실행했습니다."),
+    }
+
+
+def run_performance_auto_update(trigger: str = "snapshot") -> dict:
+    if not SIGNAL_PERFORMANCE_AUTO_UPDATE:
+        status = {
+            "enabled": False,
+            "trigger": trigger,
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+            "message": "성과 자동 반영이 꺼져 있습니다.",
+        }
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastPerformanceUpdate"] = status
+            SCHEDULER_STATE["lastPerformanceError"] = ""
+        return status
+    try:
+        report = performance_report(
+            limit=SIGNAL_PERFORMANCE_RUN_LIMIT,
+            top_n=SIGNAL_PERFORMANCE_TOP_CANDIDATES,
+            min_age_minutes=SIGNAL_PERFORMANCE_MIN_AGE_MINUTES,
+        )
+        status = performance_auto_update_summary(report, trigger)
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastPerformanceUpdate"] = status
+            SCHEDULER_STATE["lastPerformanceError"] = ""
+        return status
+    except Exception as error:
+        status = {
+            "enabled": SIGNAL_PERFORMANCE_AUTO_UPDATE,
+            "trigger": trigger,
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+            "error": str(error)[:240],
+            "message": "성과 자동 반영 중 오류가 발생했습니다.",
+        }
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastPerformanceUpdate"] = status
+            SCHEDULER_STATE["lastPerformanceError"] = status["error"]
+        return status
 
 
 def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
@@ -8677,6 +8761,8 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
     else:
         write_json(path, snapshot)
         record = scheduler_record_from_snapshot(path, snapshot)
+    performance_update = run_performance_auto_update(trigger=f"{mode}:{trigger}")
+    record["performanceUpdate"] = performance_update
     with SCHEDULER_LOCK:
         last_runs = dict(SCHEDULER_STATE.get("lastRuns", {}))
         last_runs[mode] = record
@@ -8693,6 +8779,8 @@ def scheduler_status() -> dict:
             "lastError": SCHEDULER_STATE.get("lastError", ""),
             "lastCheckedAt": SCHEDULER_STATE.get("lastCheckedAt", ""),
             "lastRuns": SCHEDULER_STATE.get("lastRuns", {}),
+            "lastPerformanceUpdate": SCHEDULER_STATE.get("lastPerformanceUpdate", {}),
+            "lastPerformanceError": SCHEDULER_STATE.get("lastPerformanceError", ""),
         }
     return {
         "config": scheduler_config_status(),
@@ -8971,7 +9059,8 @@ class AppHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             limit = int(query.get("limit", [str(SIGNAL_PERFORMANCE_RUN_LIMIT)])[0])
             top_n = int(query.get("top", [str(SIGNAL_PERFORMANCE_TOP_CANDIDATES)])[0])
-            self.send_json(performance_report(limit=limit, top_n=top_n))
+            min_age = int(query.get("minAge", [str(SIGNAL_PERFORMANCE_MIN_AGE_MINUTES)])[0])
+            self.send_json(performance_report(limit=limit, top_n=top_n, min_age_minutes=min_age))
             return
 
         if parsed.path == "/api/scheduler/runs":
