@@ -12,6 +12,14 @@ services:
         value: 0.0.0.0
       - key: SIGNAL_SCHEDULER_ENABLED
         value: "0"
+      - key: SIGNAL_AUTO_CANDIDATES_ENABLED
+        value: "1"
+      - key: SIGNAL_AUTO_CANDIDATE_LIMIT
+        value: "6"
+      - key: SIGNAL_DISCOVERY_MAX_SYMBOLS
+        value: "12"
+      - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
+        value: "3"
       - key: TOSS_LIVE_PRICES
         value: "0"
       - key: TOSS_LIVE_CANDLES

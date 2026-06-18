@@ -90,6 +90,13 @@ catch {
 
 $dashboard = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/dashboard?mode=close") -Headers $headers -Method Get -TimeoutSec 45
 Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "candidates=$($dashboard.summary.candidateCount)"
+$candidateSource = $dashboard.summary.candidateSource
+$discovery = $dashboard.integrations.discovery
+$candidateDetail = "source=$candidateSource, scanned=$($dashboard.summary.scannedCount), news=$($dashboard.summary.discoveryNewsCount)"
+Write-Check "candidate discovery" ($candidateSource -eq "auto-news" -or $candidateSource -eq "auto-universe") $candidateDetail
+if ($discovery -and $discovery.errorCount -gt 0) {
+  Write-Check "candidate discovery errors" $false "errors=$($discovery.errorCount)"
+}
 
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler config" $true "enabled=$($scheduler.config.enabled)"

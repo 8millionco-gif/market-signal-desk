@@ -1,0 +1,112 @@
+{
+  "symbols": [
+    {
+      "symbol": "005930",
+      "name": "삼성전자",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["반도체", "HBM", "AI 인프라"],
+      "query": "삼성전자 반도체 HBM",
+      "focusWeight": 10
+    },
+    {
+      "symbol": "000660",
+      "name": "SK하이닉스",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["반도체", "HBM", "AI 서버"],
+      "query": "SK하이닉스 HBM AI",
+      "focusWeight": 10
+    },
+    {
+      "symbol": "316140",
+      "name": "우리금융지주",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["은행", "주주환원", "배당"],
+      "query": "우리금융지주 주주환원 배당",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "035720",
+      "name": "카카오",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["플랫폼", "AI 서비스", "규제"],
+      "query": "카카오 AI 서비스 주가",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "035420",
+      "name": "NAVER",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["플랫폼", "AI", "커머스"],
+      "query": "NAVER AI 커머스 주가",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "005380",
+      "name": "현대차",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["자동차", "전기차", "수출"],
+      "query": "현대차 전기차 수출 주가",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "012450",
+      "name": "한화에어로스페이스",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["방산", "수주", "항공우주"],
+      "query": "한화에어로스페이스 방산 수주",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "207940",
+      "name": "삼성바이오로직스",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["바이오", "CDMO", "수주"],
+      "query": "삼성바이오로직스 CDMO 수주",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "068270",
+      "name": "셀트리온",
+      "market": "KR",
+      "category": "domestic",
+      "themes": ["바이오", "신약", "수출"],
+      "query": "셀트리온 신약 수출",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "market": "US",
+      "category": "overseas",
+      "themes": ["온디바이스 AI", "제품 사이클", "서비스"],
+      "query": "Apple AI iPhone stock",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "market": "US",
+      "category": "overseas",
+      "themes": ["AI 반도체", "GPU", "데이터센터"],
+      "query": "NVIDIA AI GPU data center stock",
+      "focusWeight": 9
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "market": "US",
+      "category": "overseas",
+      "themes": ["AI 클라우드", "Azure", "소프트웨어"],
+      "query": "Microsoft AI Azure stock",
+      "focusWeight": 7
+    }
+  ]
+}

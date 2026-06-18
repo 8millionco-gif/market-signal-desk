@@ -308,6 +308,26 @@ Render에서는 OpenAI 키를 넣은 뒤 `test-render-deploy.ps1`로 상태, 대
 
 첫 화면이 외부 API 때문에 오래 멈추지 않도록, 기본값은 후보 일부만 라이브 조회하고 나머지는 샘플/로컬 분석으로 대체합니다. 더 많은 후보를 실시간 분석하려면 `*_MAX_CANDIDATES` 값을 단계적으로 늘리면 됩니다.
 
+## 후보 자동 생성 설정
+
+대시보드는 `data/candidate-universe.json`의 감시 유니버스를 기준으로 오늘 후보를 자동 구성합니다. 네이버 뉴스가 준비되어 있으면 유니버스 종목별 최신 뉴스를 먼저 스캔하고, 뉴스 건수·관심 가중치·관심 등록 여부를 반영해 상위 후보를 고릅니다. 네이버 뉴스가 꺼져 있으면 유니버스 기본 점수와 기존 샘플 후보 정보를 이용해 후보를 구성합니다.
+
+```powershell
+$env:SIGNAL_AUTO_CANDIDATES_ENABLED="1"
+$env:SIGNAL_AUTO_CANDIDATE_LIMIT="6"
+$env:SIGNAL_DISCOVERY_MAX_SYMBOLS="12"
+$env:SIGNAL_DISCOVERY_NEWS_DISPLAY="3"
+$env:SIGNAL_DISCOVERY_CACHE_SECONDS="600"
+```
+
+임시로 유니버스에 종목을 더 넣고 싶으면 쉼표로 구분해 추가합니다.
+
+```powershell
+$env:SIGNAL_DISCOVERY_SYMBOLS="TSLA,AMD,064350"
+```
+
+화면의 `오늘의 후보` 아래에는 `자동 뉴스 선정`, `자동 유니버스 선정`, `샘플 후보` 중 어떤 기준으로 후보가 만들어졌는지 표시됩니다. 후보 자동 생성은 주문이나 자동매매와 연결되지 않고, 이후 기존 시세·뉴스·공시·AI 분석 단계로 넘겨지는 시작 목록만 바꿉니다.
+
 ## 스케줄러 설정
 
 서버가 켜져 있으면 장전과 장마감에 후보 분석을 자동 실행하고 `data/runs` 폴더에 JSON 스냅샷을 저장합니다. 이 기능은 분석 저장용이며 주문이나 매매 실행과 연결되지 않습니다.

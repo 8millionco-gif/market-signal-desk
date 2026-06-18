@@ -6,6 +6,7 @@ import os
 import html
 import hashlib
 import hmac
+import copy
 import re
 import threading
 import time
@@ -26,6 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 SEED_FILE = DATA_DIR / "seed.json"
+UNIVERSE_FILE = DATA_DIR / "candidate-universe.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
@@ -132,6 +134,12 @@ SIGNAL_PREOPEN_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_PREOPEN_RUN_WINDOW_MIN
 SIGNAL_RUN_HISTORY_LIMIT = int(os.getenv("SIGNAL_RUN_HISTORY_LIMIT", "12"))
 SIGNAL_PERFORMANCE_RUN_LIMIT = int(os.getenv("SIGNAL_PERFORMANCE_RUN_LIMIT", "12"))
 SIGNAL_PERFORMANCE_TOP_CANDIDATES = int(os.getenv("SIGNAL_PERFORMANCE_TOP_CANDIDATES", "3"))
+SIGNAL_AUTO_CANDIDATES_ENABLED = os.getenv("SIGNAL_AUTO_CANDIDATES_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_AUTO_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_AUTO_CANDIDATE_LIMIT", "6"))
+SIGNAL_DISCOVERY_MAX_SYMBOLS = int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "12"))
+SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
+SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
+SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -155,6 +163,7 @@ GDELT_NEWS_CACHE: dict[tuple[str, int, str, str], dict[str, object]] = {}
 ANALYSIS_CACHE: dict[str, dict[str, object]] = {}
 FX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
+DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
@@ -192,6 +201,10 @@ def write_json(path: Path, payload) -> None:
 
 def seed_data() -> dict:
     return read_json(SEED_FILE, {"candidates": [], "market": {}, "principles": []})
+
+
+def universe_data() -> dict:
+    return read_json(UNIVERSE_FILE, {"symbols": []})
 
 
 def watchlist() -> list[str]:
@@ -2229,7 +2242,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index >= NAVER_NEWS_MAX_CANDIDATES:
-            item["liveNews"] = {"source": "skipped", "message": "뉴스 조회 후보 수 제한으로 건너뜀"}
+            if item.get("liveNews", {}).get("source") != "naver":
+                item["liveNews"] = {"source": "skipped", "message": "뉴스 조회 후보 수 제한으로 건너뜀"}
             enriched.append(item)
             continue
 
@@ -3149,12 +3163,306 @@ def stock_search(query: str, limit: int = 8) -> dict:
     }
 
 
+def seed_candidate_by_symbol() -> dict[str, dict]:
+    return {
+        str(candidate.get("symbol", "")).strip().upper(): candidate
+        for candidate in seed_data().get("candidates", [])
+        if candidate.get("symbol")
+    }
+
+
+def candidate_universe_entries() -> list[dict]:
+    entries = []
+    seen = set()
+    seed_lookup = seed_candidate_by_symbol()
+
+    for entry in universe_data().get("symbols", []):
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        item = dict(entry)
+        item["symbol"] = symbol
+        entries.append(item)
+        seen.add(symbol)
+
+    for symbol in [value.strip().upper() for value in SIGNAL_DISCOVERY_SYMBOLS.split(",") if value.strip()]:
+        if symbol in seen:
+            continue
+        seed = seed_lookup.get(symbol, {})
+        entries.append({
+            "symbol": symbol,
+            "name": seed.get("name", symbol),
+            "market": seed.get("market", "US" if re.fullmatch(r"[A-Z.\-]+", symbol) else "KR"),
+            "category": seed.get("category", "overseas" if re.fullmatch(r"[A-Z.\-]+", symbol) else "domestic"),
+            "themes": seed.get("tags", []),
+            "query": seed.get("name", symbol),
+            "focusWeight": 5,
+        })
+        seen.add(symbol)
+
+    for symbol, seed in seed_lookup.items():
+        if symbol in seen:
+            continue
+        entries.append({
+            "symbol": symbol,
+            "name": seed.get("name", symbol),
+            "market": seed.get("market", ""),
+            "category": seed.get("category", ""),
+            "themes": seed.get("tags", []),
+            "query": seed.get("name", symbol),
+            "focusWeight": 5,
+        })
+        seen.add(symbol)
+
+    return entries
+
+
+def universe_query(entry: dict) -> str:
+    query = str(entry.get("query", "")).strip()
+    if query:
+        return query
+    name = str(entry.get("name", "")).strip()
+    symbol = str(entry.get("symbol", "")).strip()
+    themes = " ".join(str(theme) for theme in entry.get("themes", []) if theme)
+    return " ".join(value for value in [name or symbol, themes] if value).strip()
+
+
+def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
+    if not (NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"]):
+        return [], {
+            "source": "disabled",
+            "message": "네이버 뉴스 설정 전이라 유니버스 기본 점수로 후보를 구성합니다.",
+        }
+
+    query = universe_query(entry)
+    payload = fetch_naver_news(query, display=SIGNAL_DISCOVERY_NEWS_DISPLAY, sort="date")
+    normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
+    normalized = [news_item for news_item in normalized if news_item.get("title")]
+    return normalized, {
+        "source": "naver",
+        "query": query,
+        "total": payload.get("total", 0),
+        "display": payload.get("display", len(normalized)),
+    }
+
+
+def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status: dict) -> dict:
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    name = str(entry.get("name", "") or symbol).strip()
+    themes = text_list(entry.get("themes", []), limit=6)
+    headline = news_items[0].get("title") if news_items else f"{name} 관련 신호 점검"
+    source_items = [source_from_news_item(item) for item in news_items[:3]]
+    news_total = bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000)
+    focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
+    return {
+        "symbol": symbol,
+        "name": name,
+        "market": entry.get("market", "KR"),
+        "category": entry.get("category", "domestic"),
+        "price": "-",
+        "change": "",
+        "updated": "자동 선정",
+        "headline": headline,
+        "verdict": "자동 후보",
+        "stage": "auto",
+        "preopenPriority": 0,
+        "triggerReadiness": 0,
+        "score": {
+            "event": bounded_int(9 + focus + min(len(news_items), 3) * 2, 0, 25),
+            "news": bounded_int(6 + min(len(news_items), 5) * 3 + min(news_total, 30) // 10, 0, 22),
+            "volume": 8,
+            "price": 8,
+            "market": 6,
+            "attention": bounded_int(4 + focus // 2, 0, 12),
+            "riskPenalty": 5,
+            "heatPenalty": 2,
+        },
+        "tags": themes[:6] or ["자동 후보"],
+        "thesis": "유니버스 종목 중 최신 뉴스와 관심 테마가 감지되어 후보로 올렸습니다. 실제 진입은 가격, 거래량, 공시 리스크 확인 후 판단합니다.",
+        "why": unique_texts(
+            [
+                *(item.get("summary") or item.get("title") for item in news_items[:3]),
+                f"{name} 관련 최신 뉴스 {len(news_items)}건을 확인했습니다." if news_items else "",
+                "후보 편입 후 시세와 거래대금 반응을 추가 확인합니다.",
+            ],
+            limit=5,
+        ),
+        "entryConditions": [
+            "현재가와 전일 대비 방향이 뉴스 재료와 같은지 확인",
+            "5분 거래대금이 최근 평균보다 증가하는지 확인",
+            "돌파 또는 눌림 기준가가 손절 3% 안쪽인지 확인",
+        ],
+        "noEntry": [
+            "뉴스는 있으나 가격과 거래량 반응이 없는 경우",
+            "지수와 섹터가 동시에 약세로 전환되는 경우",
+            "공시 리스크가 가격 반응보다 큰 경우",
+        ],
+        "stopRules": [
+            "기준가 재이탈",
+            "VWAP 회복 실패",
+            "거래량 실린 음봉 발생",
+        ],
+        "trend": {
+            "newsCount": news_total or len(news_items),
+            "newsSpike": "-",
+            "volumeSpike": "-",
+            "sentiment": "뉴스 확인 필요",
+        },
+        "sources": source_items,
+        "disclosures": [],
+        "related": [],
+        "chart": [50, 50, 50, 50, 50, 50],
+    }
+
+
+def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], watched: set[str]) -> dict:
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    news_items, news_status = discovery_news_for_entry(entry)
+    base = copy.deepcopy(seed_lookup.get(symbol)) if symbol in seed_lookup else default_candidate_for_entry(entry, news_items, news_status)
+    if symbol in seed_lookup and news_items:
+        live_sources = [source_from_news_item(item) for item in news_items[:3]]
+        base["sources"] = [*live_sources, *base.get("sources", [])][:6]
+        base["headline"] = news_items[0].get("title") or base.get("headline", "")
+        base["why"] = unique_texts(
+            [
+                *(item.get("summary") or item.get("title") for item in news_items[:3]),
+                *text_list(base.get("why", []), limit=5),
+            ],
+            limit=5,
+        )
+        trend = dict(base.get("trend", {}))
+        trend["newsCount"] = max(
+            bounded_int(trend.get("newsCount", 0), 0, 10_000_000),
+            bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000),
+        )
+        base["trend"] = trend
+    if news_status.get("source") == "naver":
+        base["liveNews"] = {
+            "source": "naver",
+            "query": news_status.get("query", universe_query(entry)),
+            "total": news_status.get("total", len(news_items)),
+            "display": news_status.get("display", len(news_items)),
+            "items": news_items,
+            "discovery": True,
+        }
+
+    focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
+    news_total = bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000)
+    seed_score = score_candidate(base)
+    discovery_score = bounded_int(
+        focus * 3
+        + len(news_items) * 12
+        + min(news_total, 50) * 0.25
+        + min(seed_score, 90) * 0.18
+        + (10 if symbol in watched else 0),
+        0,
+        100,
+    )
+    base["candidateSource"] = "auto-discovery"
+    base["discovery"] = {
+        "source": news_status.get("source", "universe"),
+        "query": news_status.get("query", universe_query(entry)),
+        "score": discovery_score,
+        "newsItems": len(news_items),
+        "newsTotal": news_total,
+        "focusWeight": focus,
+    }
+    return base
+
+
+def auto_candidate_cache_key(watched: set[str]) -> str:
+    return json.dumps(
+        {
+            "enabled": SIGNAL_AUTO_CANDIDATES_ENABLED,
+            "limit": SIGNAL_AUTO_CANDIDATE_LIMIT,
+            "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+            "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
+            "symbols": SIGNAL_DISCOVERY_SYMBOLS,
+            "watch": sorted(watched),
+            "naverReady": NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"],
+            "date": datetime.now(KST).date().isoformat(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]:
+    seed_candidates = data.get("candidates", [])
+    if not SIGNAL_AUTO_CANDIDATES_ENABLED:
+        return seed_candidates, {
+            "source": "seed",
+            "enabled": False,
+            "message": "자동 후보 생성이 꺼져 있어 샘플 후보를 사용합니다.",
+            "candidateCount": len(seed_candidates),
+        }
+
+    cache_key = auto_candidate_cache_key(watched)
+    expires_at = DISCOVERY_CACHE.get("expires_at")
+    if (
+        DISCOVERY_CACHE.get("key") == cache_key
+        and DISCOVERY_CACHE.get("payload") is not None
+        and isinstance(expires_at, datetime)
+        and expires_at > datetime.now(timezone.utc)
+    ):
+        cached = copy.deepcopy(DISCOVERY_CACHE["payload"])  # type: ignore[index]
+        return cached["candidates"], cached["status"]
+
+    entries = candidate_universe_entries()[: max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)]
+    if not entries:
+        return seed_candidates, {
+            "source": "seed",
+            "enabled": True,
+            "message": "후보 유니버스가 없어 샘플 후보를 사용합니다.",
+            "candidateCount": len(seed_candidates),
+        }
+
+    seed_lookup = seed_candidate_by_symbol()
+    discovered = []
+    errors = []
+    for entry in entries:
+        try:
+            discovered.append(candidate_from_universe_entry(entry, seed_lookup, watched))
+        except Exception as error:
+            errors.append(str(error)[:160])
+
+    discovered.sort(
+        key=lambda item: (
+            bounded_int(item.get("discovery", {}).get("score", 0)),
+            score_candidate(item),
+        ),
+        reverse=True,
+    )
+    limit = max(1, min(SIGNAL_AUTO_CANDIDATE_LIMIT, len(discovered) or len(seed_candidates)))
+    selected = discovered[:limit] if discovered else seed_candidates[:limit]
+    source = "auto-news" if any(item.get("discovery", {}).get("source") == "naver" for item in selected) else "auto-universe"
+    status = {
+        "source": source,
+        "enabled": True,
+        "message": "뉴스와 유니버스 점수로 오늘 후보를 자동 생성했습니다." if source == "auto-news" else "유니버스 기본 점수로 오늘 후보를 구성했습니다.",
+        "universeCount": len(entries),
+        "scannedCount": len(discovered),
+        "candidateCount": len(selected),
+        "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
+        "errorCount": len(errors),
+        "errors": errors[:3],
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    DISCOVERY_CACHE["key"] = cache_key
+    DISCOVERY_CACHE["payload"] = copy.deepcopy({"candidates": selected, "status": status})
+    DISCOVERY_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=SIGNAL_DISCOVERY_CACHE_SECONDS)
+    return selected, status
+
+
 def dashboard(mode: str) -> dict:
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
     watched = set(watchlist())
-    candidates = [decorate_candidate(item, watched) for item in data.get("candidates", [])]
+    raw_candidates, discovery_status = initial_candidates(data, watched)
+    candidates = [decorate_candidate(item, watched) for item in raw_candidates]
     toss_price_status = {
         "source": "sample",
         "enabled": TOSS_LIVE_PRICES,
@@ -3315,9 +3623,14 @@ def dashboard(mode: str) -> dict:
             "highScoreCount": len([item for item in candidates if item["totalScore"] >= 75]),
             "readyCount": len([item for item in candidates if item["triggerReadiness"] >= 70]),
             "selectionSource": selection_status.get("source"),
+            "candidateSource": discovery_status.get("source"),
+            "universeCount": discovery_status.get("universeCount"),
+            "scannedCount": discovery_status.get("scannedCount"),
+            "discoveryNewsCount": discovery_status.get("newsItemCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
         },
         "integrations": {
+            "discovery": discovery_status,
             "selection": selection_status,
             "toss": {
                 "config": toss_config_status(),

@@ -59,6 +59,7 @@ const els = {
   workspaceView: document.querySelector("#workspaceView"),
   settingsView: document.querySelector("#settingsView"),
   candidateCount: document.querySelector("#candidateCount"),
+  candidateSource: document.querySelector("#candidateSource"),
   searchInput: document.querySelector("#searchInput"),
   stockSearchResults: document.querySelector("#stockSearchResults"),
   principles: document.querySelector("#principles"),
@@ -363,6 +364,7 @@ async function loadPerformance() {
 function renderLoadError(error) {
   const message = error?.name === "AbortError" ? "외부 API 응답이 지연되고 있습니다." : "백엔드 서버 응답을 받지 못했습니다.";
   els.candidateCount.textContent = "0개";
+  if (els.candidateSource) els.candidateSource.textContent = "연결 실패";
   els.metricCandidates.textContent = 0;
   els.metricHighScore.textContent = 0;
   els.metricReady.textContent = 0;
@@ -602,6 +604,7 @@ function renderAuthGate() {
   state.authRequired = true;
   renderAuthStatus();
   els.candidateCount.textContent = "보호됨";
+  if (els.candidateSource) els.candidateSource.textContent = "관리자 토큰 필요";
   els.metricCandidates.textContent = 0;
   els.metricHighScore.textContent = 0;
   els.metricReady.textContent = 0;
@@ -864,7 +867,20 @@ function renderMarket() {
 
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
+  const discovery = state.dashboard?.integrations?.discovery ?? {};
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
+  if (els.candidateSource) {
+    const sourceLabel =
+      summary.candidateSource === "auto-news"
+        ? "자동 뉴스 선정"
+        : summary.candidateSource === "auto-universe"
+          ? "자동 유니버스 선정"
+          : "샘플 후보";
+    const scanned = summary.scannedCount ?? discovery.scannedCount;
+    const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
+    const detail = scanned ? ` · ${scanned}종목 점검${newsCount ? ` · 뉴스 ${newsCount}건` : ""}` : "";
+    els.candidateSource.textContent = `${sourceLabel}${detail}`;
+  }
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
   els.metricHighScore.textContent = summary.highScoreCount ?? 0;
   els.metricReady.textContent = summary.readyCount ?? 0;
