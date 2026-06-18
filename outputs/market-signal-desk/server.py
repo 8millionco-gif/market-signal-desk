@@ -3081,10 +3081,137 @@ def decision_group_counts(candidates: list[dict]) -> dict:
     return counts
 
 
+def candidate_data_confidence(candidate: dict) -> dict:
+    score = 0
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    live_price = candidate.get("livePrice", {})
+    if isinstance(live_price, dict) and live_price.get("source") == "toss":
+        score += 28
+        reasons.append("토스 현재가 확인")
+        if live_price.get("changeSource") == "toss-candles":
+            score += 8
+            reasons.append("일봉 기준 등락률 확인")
+        elif display_percent_to_decimal(candidate.get("change")) is not None:
+            score += 4
+        if live_price.get("baselineWarning"):
+            score -= 10
+            warnings.append("샘플 기준가와 현재가 차이 큼")
+    elif display_number_to_decimal(candidate.get("price")) is not None:
+        score += 10
+        warnings.append("현재가는 샘플 또는 비실시간 값")
+    else:
+        warnings.append("현재가 미확인")
+
+    live_candles = candidate.get("liveCandles", {})
+    if isinstance(live_candles, dict) and live_candles.get("source") == "toss":
+        score += 18
+        reasons.append("토스 일봉 확인")
+    elif isinstance(live_candles, dict) and live_candles.get("source") == "stale":
+        score += 4
+        warnings.append("일봉 데이터 최신성 확인 필요")
+
+    for key, label in [("liveOrderbook", "호가"), ("liveTrades", "체결")]:
+        payload = candidate.get(key, {})
+        if isinstance(payload, dict) and payload.get("source") == "toss":
+            score += 7
+            reasons.append(f"토스 {label} 확인")
+
+    live_news = candidate.get("liveNews", {})
+    news_items = len(live_news.get("items", [])) if isinstance(live_news, dict) and isinstance(live_news.get("items"), list) else 0
+    if news_items:
+        score += min(18, 8 + news_items * 3)
+        reasons.append(f"관련 뉴스 {news_items}건")
+    elif isinstance(live_news, dict) and live_news.get("filteredOut"):
+        warnings.append("뉴스 검색 결과의 종목 관련성 낮음")
+
+    global_news = candidate.get("globalNews", {})
+    global_items = len(global_news.get("items", [])) if isinstance(global_news, dict) and isinstance(global_news.get("items"), list) else 0
+    if global_items:
+        score += min(10, 5 + global_items * 2)
+        reasons.append(f"글로벌 뉴스 {global_items}건")
+
+    live_disclosures = candidate.get("liveDisclosures", {})
+    if isinstance(live_disclosures, dict) and live_disclosures.get("source") == "dart":
+        score += 8
+        reasons.append("OpenDART 확인")
+        if isinstance(live_disclosures.get("items"), list) and live_disclosures.get("items"):
+            warnings.append("최근 공시 리스크 확인 필요")
+
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    quality_tier = discovery.get("qualityTier")
+    if quality_tier == "primary":
+        score += 8
+    elif quality_tier == "reserve":
+        score += 4
+    elif quality_tier == "rejected":
+        score -= 12
+        warnings.append("발굴 품질 기준 미달")
+
+    score = bounded_int(score, 0, 100)
+    if score >= 75:
+        label = "높음"
+    elif score >= 60:
+        label = "보통"
+    elif score >= 45:
+        label = "낮음"
+    else:
+        label = "부족"
+
+    return {
+        "score": score,
+        "label": label,
+        "reasons": unique_texts(reasons, limit=5),
+        "warnings": unique_texts(warnings, limit=4),
+    }
+
+
+def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, readiness: int, confidence: dict) -> dict:
+    group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
+    group_key = str(group.get("key", "wait"))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    live_price = candidate.get("livePrice", {})
+    has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
+    reasons = []
+
+    if risk >= 24 or total < 45 or group_key == "exclude":
+        key, label, priority = "exclude", "오늘 제외", 4
+        reasons.append("리스크 또는 종합 점수가 기준 미달")
+    elif group_key == "action" and has_live_price and confidence_score >= 68 and risk < 18 and heat < 10 and readiness >= 70:
+        key, label, priority = "actionable", "실전 후보", 0
+        reasons.append("가격·준비도·신뢰도 기준 통과")
+    elif group_key in {"hidden", "momentum"} and confidence_score >= 55 and risk < 22:
+        key, label, priority = "watch", "관찰 후보", 1
+        reasons.append("재료는 있으나 진입 조건 추가 확인")
+    elif confidence_score < 45 or not has_live_price:
+        key, label, priority = "defer", "확인 대기", 3
+        reasons.append("실시간 가격 또는 근거 데이터 부족")
+    elif total >= 62 and risk < 22:
+        key, label, priority = "watch", "관찰 후보", 2
+        reasons.append("후보 점수는 있으나 가격 조건 확인 필요")
+    else:
+        key, label, priority = "defer", "확인 대기", 3
+        reasons.append("신규 진입보다 조건 확인 우선")
+
+    return {
+        "key": key,
+        "label": label,
+        "priority": priority,
+        "confidenceScore": confidence_score,
+        "tradeAllowed": key == "actionable",
+        "reasons": unique_texts([*reasons, *confidence.get("warnings", [])], limit=5),
+    }
+
+
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
     opportunity_scores = []
+    confidence_scores = []
+    gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     for candidate in candidates:
         item = dict(candidate)
         base_score = item.get("score", {})
@@ -3140,6 +3267,18 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["preopenPriority"] = preopen_priority
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
+        confidence = candidate_data_confidence(item)
+        gate = candidate_quality_gate(item, score_detail, total, readiness, confidence)
+        confidence_scores.append(bounded_int(confidence.get("score", 0), 0, 100))
+        gate_counts[gate["key"]] = gate_counts.get(gate["key"], 0) + 1
+        if gate["key"] in {"defer", "exclude"} and item["decisionGroup"].get("key") == "action":
+            item["decisionGroup"] = {
+                **item["decisionGroup"],
+                "key": "wait" if gate["key"] == "defer" else "exclude",
+                "label": "확인 대기" if gate["key"] == "defer" else "오늘 제외",
+                "priority": 3 if gate["key"] == "defer" else 4,
+                "reason": "신뢰도 게이트에서 실전 진입 후보로 인정하지 않았습니다.",
+            }
         item["hiddenOpportunity"] = {
             "score": opportunity,
             "maxScore": 18,
@@ -3156,10 +3295,13 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
             "notes": unique_texts(notes, limit=5),
             "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         }
+        item["dataConfidence"] = confidence
+        item["qualityGate"] = gate
         enriched.append(item)
 
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
     average_opportunity = sum(opportunity_scores) / len(opportunity_scores) if opportunity_scores else 0
+    average_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
     groups = decision_group_counts(enriched)
     return enriched, {
@@ -3169,9 +3311,14 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "candidateCount": len(enriched),
         "averageScoreShift": round(average_shift, 1),
         "averageOpportunityScore": round(average_opportunity, 1),
+        "averageDataConfidence": round(average_confidence, 1),
         "hiddenOpportunityCount": hidden_opportunity_count,
         "decisionGroups": groups,
         "actionCandidateCount": groups.get("action", 0),
+        "qualityGateCounts": gate_counts,
+        "investableCandidateCount": gate_counts.get("actionable", 0),
+        "watchCandidateCount": gate_counts.get("watch", 0),
+        "deferCandidateCount": gate_counts.get("defer", 0),
         "momentumCandidateCount": groups.get("momentum", 0),
         "waitCandidateCount": groups.get("wait", 0),
         "excludeCandidateCount": groups.get("exclude", 0),
@@ -4594,8 +4741,13 @@ def build_dashboard_payload(context: dict) -> dict:
             "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
             "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
+            "averageDataConfidence": selection_status.get("averageDataConfidence"),
             "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
             "decisionGroups": selection_status.get("decisionGroups", {}),
+            "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
+            "investableCandidateCount": selection_status.get("investableCandidateCount"),
+            "watchCandidateCount": selection_status.get("watchCandidateCount"),
+            "deferCandidateCount": selection_status.get("deferCandidateCount"),
             "actionCandidateCount": selection_status.get("actionCandidateCount"),
             "momentumCandidateCount": selection_status.get("momentumCandidateCount"),
             "waitCandidateCount": selection_status.get("waitCandidateCount"),
@@ -4757,6 +4909,8 @@ def dashboard_summary(payload: dict) -> dict:
             "score": item.get("totalScore", 0),
             "verdict": item.get("verdict", ""),
             "change": item.get("change", ""),
+            "gate": item.get("qualityGate", {}).get("label", "") if isinstance(item.get("qualityGate"), dict) else "",
+            "confidence": item.get("dataConfidence", {}).get("score") if isinstance(item.get("dataConfidence"), dict) else None,
         })
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
@@ -4774,6 +4928,11 @@ def dashboard_summary(payload: dict) -> dict:
         "highScoreCount": summary.get("highScoreCount", 0),
         "readyCount": summary.get("readyCount", 0),
         "averageScoreShift": summary.get("averageScoreShift"),
+        "averageDataConfidence": summary.get("averageDataConfidence"),
+        "qualityGateCounts": summary.get("qualityGateCounts", {}),
+        "investableCandidateCount": summary.get("investableCandidateCount"),
+        "watchCandidateCount": summary.get("watchCandidateCount"),
+        "deferCandidateCount": summary.get("deferCandidateCount"),
         "topCandidates": top_candidates,
         "pipeline": [
             {
