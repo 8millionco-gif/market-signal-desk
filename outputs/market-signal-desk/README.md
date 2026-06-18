@@ -324,6 +324,7 @@ $env:SIGNAL_SCHEDULER_ENABLED="0"
 
 화면의 `스케줄러 상태` 카드에서 장마감/장전 분석을 수동으로 실행할 수도 있습니다.
 Render 배포에서는 자동 실행을 켜기 전에 아래처럼 수동 스냅샷 저장, 히스토리 조회, 성과 리포트 연결을 먼저 확인합니다.
+화면에서는 `자동 실행 준비도` 카드의 `장마감 수동 실행` 버튼으로 같은 검증을 시작할 수 있습니다.
 
 ```powershell
 .\test-render-deploy.ps1 -RunSchedulerMode close

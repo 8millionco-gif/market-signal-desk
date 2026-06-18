@@ -870,17 +870,43 @@ function renderReadinessStatus() {
       readiness.fullReady ? "운영 중" : readiness.allBeforeAuto ? "활성화 가능" : "준비 중"
     ]
   ];
-  els.readinessStatus.innerHTML = rows
-    .map(([label, ok, value]) => {
-      const tone = ok ? "ok" : "warn";
-      return `
-        <div>
-          <span>${escapeHtml(label)}</span>
-          <strong class="${tone}">${escapeHtml(value)}</strong>
-        </div>
-      `;
-    })
-    .join("");
+  const actionLabel = !readiness.manualRunReady
+    ? "장마감 수동 실행"
+    : readiness.allBeforeAuto && !readiness.autoEnabled
+      ? "성과 보기"
+      : "스냅샷 확인";
+  const actionMarkup = `
+    <div class="readiness-actions">
+      <button type="button" data-readiness-action="${readiness.manualRunReady ? "performance" : "run-close"}">
+        ${escapeHtml(actionLabel)}
+      </button>
+    </div>
+  `;
+  els.readinessStatus.innerHTML = `
+    ${rows
+      .map(([label, ok, value]) => {
+        const tone = ok ? "ok" : "warn";
+        return `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <strong class="${tone}">${escapeHtml(value)}</strong>
+          </div>
+        `;
+      })
+      .join("")}
+    ${actionMarkup}
+  `;
+  const actionButton = els.readinessStatus.querySelector("[data-readiness-action]");
+  if (actionButton) {
+    actionButton.addEventListener("click", async () => {
+      const action = actionButton.dataset.readinessAction;
+      if (action === "run-close") {
+        await runSchedulerMode("close");
+      } else {
+        await showPerformanceView();
+      }
+    });
+  }
 }
 
 function renderSnapshotHistory() {

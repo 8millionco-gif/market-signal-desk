@@ -887,7 +887,8 @@ h3 {
 
 .connection-list .schedule-actions,
 .connection-list .auth-actions,
-.connection-list .notification-actions {
+.connection-list .notification-actions,
+.connection-list .readiness-actions {
   display: grid;
   gap: 8px;
   min-height: 0;
@@ -910,7 +911,8 @@ h3 {
 
 .schedule-actions button,
 .auth-actions button,
-.notification-actions button {
+.notification-actions button,
+.readiness-actions button {
   min-height: 36px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -922,7 +924,8 @@ h3 {
 
 .schedule-actions button:disabled,
 .auth-actions button:disabled,
-.notification-actions button:disabled {
+.notification-actions button:disabled,
+.readiness-actions button:disabled {
   cursor: wait;
   opacity: 0.6;
 }
