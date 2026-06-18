@@ -1469,18 +1469,104 @@ function decisionGroupClass(value) {
   return `group-${String(value || "wait").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "wait"}`;
 }
 
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
+}
+
+function priceBandFor(item, current, group, change, score) {
+  const readiness = Number(item?.triggerReadiness ?? 0);
+  const opportunity = Number(item?.hiddenOpportunity?.score ?? 0);
+  const strength = clampNumber((score * 0.45) + (readiness * 0.35) + (opportunity * 1.2), 0, 100);
+  const hot = change != null && change >= 3;
+  const weak = change != null && change <= -2;
+  const groupKey = group.key || "wait";
+
+  let entryLowPct = 0.012;
+  let entryHighPct = 0.004;
+  let pullbackPct = 0.025;
+  let chasePct = 0.025;
+  let stopPct = 0.036;
+  let trimPct = 0.052;
+
+  if (groupKey === "action") {
+    entryLowPct = strength >= 78 ? 0.006 : 0.01;
+    entryHighPct = strength >= 78 ? 0.006 : 0.003;
+    pullbackPct = 0.018;
+    stopPct = 0.032;
+    trimPct = 0.058;
+  } else if (groupKey === "hidden") {
+    entryLowPct = 0.014;
+    entryHighPct = 0.002;
+    pullbackPct = 0.03;
+    stopPct = 0.04;
+    trimPct = 0.05;
+  } else if (groupKey === "momentum") {
+    entryLowPct = 0.01;
+    entryHighPct = 0.004;
+    pullbackPct = 0.024;
+    stopPct = 0.038;
+    trimPct = 0.055;
+  } else if (groupKey === "holding") {
+    entryLowPct = 0.018;
+    entryHighPct = 0;
+    pullbackPct = 0.028;
+    stopPct = 0.045;
+    trimPct = 0.035;
+  } else if (groupKey === "exclude") {
+    entryLowPct = 0.035;
+    entryHighPct = 0.02;
+    pullbackPct = 0.05;
+    stopPct = 0.03;
+    trimPct = 0.025;
+  }
+
+  if (hot) {
+    const heatOffset = clampNumber((change - 2) / 100, 0.01, 0.05);
+    entryLowPct = Math.max(entryLowPct, 0.02 + heatOffset * 0.4);
+    entryHighPct = -0.004;
+    pullbackPct = Math.max(pullbackPct, 0.032 + heatOffset * 0.25);
+    chasePct = 0.012;
+    stopPct = Math.max(stopPct, 0.04);
+  } else if (weak) {
+    entryLowPct = Math.max(entryLowPct, 0.018);
+    entryHighPct = -0.002;
+    pullbackPct = Math.max(pullbackPct, 0.035);
+    chasePct = 0.015;
+    stopPct = 0.03;
+  }
+
+  const entryLow = current * (1 - entryLowPct);
+  const entryHigh = current * (1 + entryHighPct);
+  return {
+    strength: Math.round(strength),
+    entryLow,
+    entryHigh,
+    pullback: current * (1 - pullbackPct),
+    chaseLimit: current * (1 + chasePct),
+    stopLine: entryLow * (1 - stopPct),
+    trimLine: current * (1 + trimPct),
+    reboundLine: weak ? current * 1.012 : null,
+    entryRangeText: formatPriceRange(Math.min(entryLow, entryHigh), Math.max(entryLow, entryHigh), item?.price ?? ""),
+    template: item?.price ?? ""
+  };
+}
+
 function tradePlan(item) {
   const score = Number(item?.totalScore ?? 0);
   const current = parseDisplayNumber(item?.price);
   const change = parseDisplayPercent(item?.change);
+  const group = decisionGroupForDisplay(item);
   const holding = selectedHoldingFor(item);
   const holdingRate = parseDisplayPercent(holding?.profitLossRate);
   const holdingJudgement = String(holding?.judgement ?? "");
   const hasPrice = Number.isFinite(current);
   const isHeld = Boolean(holding);
-  const isAvoid = String(item?.verdict ?? "").includes("회피") || score < 55;
+  const isAvoid = group.key === "exclude" || String(item?.verdict ?? "").includes("회피") || score < 55;
   const overheated = change != null && change >= 3;
   const weak = change != null && change <= -2;
+  const band = hasPrice ? priceBandFor(item, current, group, change, score) : null;
 
   let action = "가격 확인 대기";
   let tone = "wait";
@@ -1506,10 +1592,18 @@ function tradePlan(item) {
       action = "반등 확인 대기";
       tone = "wait";
       summary = "가격이 약한 구간이라 거래량이 동반된 반등 확인 후 판단합니다.";
-    } else if (score >= 75) {
+    } else if (group.key === "action" || score >= 75) {
       action = isHeld ? "보유 유지" : "관찰 매수 후보";
       tone = "buy";
       summary = "점수와 가격대가 무리하지 않아 조건 충족 시 관찰 후보입니다.";
+    } else if (group.key === "hidden") {
+      action = "숨은 기회 관찰";
+      tone = "wait";
+      summary = "재료는 포착됐지만 즉시 매수보다 가격 반영 여부를 확인합니다.";
+    } else if (group.key === "momentum") {
+      action = "모멘텀 확인";
+      tone = "wait";
+      summary = "뉴스와 수급 반응은 있으나 돌파 유지와 거래대금을 함께 확인합니다.";
     } else {
       action = "가격대 대기";
       tone = "wait";
@@ -1517,13 +1611,21 @@ function tradePlan(item) {
     }
   }
 
-  const entryLow = hasPrice ? current * 0.985 : null;
-  const entryHigh = hasPrice ? current * 1.005 : null;
-  const pullback = hasPrice ? current * 0.97 : null;
-  const chaseLimit = hasPrice ? current * 1.03 : null;
-  const stopLine = hasPrice ? current * 0.96 : null;
-  const trimLine = hasPrice ? current * 1.05 : null;
   const template = item?.price ?? "";
+  const immediateText =
+    !hasPrice
+      ? "현재가 확인 후 판단"
+      : tone === "buy"
+        ? `구간 안착 시 관찰`
+        : tone === "sell"
+          ? `일부 이익 실현 점검`
+          : tone === "risk"
+            ? `신규 진입 금지`
+            : weak
+              ? `반등선 회복 대기`
+              : overheated
+                ? `눌림 확인 전 대기`
+                : `가격대 확인`;
 
   return {
     action,
@@ -1531,17 +1633,25 @@ function tradePlan(item) {
     summary,
     holding,
     hasPrice,
+    signalCards: [
+      ["현재 판단", immediateText],
+      ["매수 구간", band ? band.entryRangeText : "현재가 확인 후 계산"],
+      ["위험 기준", band ? `${formatPriceFromTemplate(band.stopLine, template)} 이탈` : "-"]
+    ],
     rows: [
-      ["관찰 매수", hasPrice ? formatPriceRange(entryLow, entryHigh, template) : "현재가 확인 후 계산"],
-      ["대기", hasPrice ? `${formatPriceFromTemplate(pullback, template)} 부근 눌림 확인` : "-"],
-      ["추격 금지", hasPrice ? `${formatPriceFromTemplate(chaseLimit, template)} 이상` : "-"],
-      ["손절 점검", hasPrice ? `${formatPriceFromTemplate(stopLine, template)} 이탈` : "-"],
-      ["분할매도", hasPrice ? `${formatPriceFromTemplate(trimLine, template)} 이상 또는 과열 신호` : "-"],
+      ["관찰 매수", band ? band.entryRangeText : "현재가 확인 후 계산"],
+      ["눌림 대기", band ? `${formatPriceFromTemplate(band.pullback, template)} 부근 확인` : "-"],
+      ["반등 확인", band?.reboundLine ? `${formatPriceFromTemplate(band.reboundLine, template)} 회복` : "약세 전환 시 확인"],
+      ["추격 금지", band ? `${formatPriceFromTemplate(band.chaseLimit, template)} 이상` : "-"],
+      ["손절 점검", band ? `${formatPriceFromTemplate(band.stopLine, template)} 이탈` : "-"],
+      ["분할매도", band ? `${formatPriceFromTemplate(band.trimLine, template)} 이상 또는 과열 신호` : "-"],
       ["보유 상태", holding ? `${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}` : "미보유"]
     ],
     reasons: uniqueTexts(
       [
         `후보 점수 ${score}/100`,
+        band ? `가격 판단 강도 ${band.strength}/100` : "",
+        `후보 분류 ${group.label}`,
         change != null ? `현재 등락률 ${item.change}` : "",
         item.hiddenOpportunity?.score ? `숨은 기회 ${item.hiddenOpportunity.score}/18` : "",
         holding ? `내 보유 상태 ${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}` : "내 보유 없음",
@@ -2581,6 +2691,18 @@ function tradePlanSection(item) {
           <p>${escapeHtml(plan.summary)}</p>
         </div>
         <span class="action-pill ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
+      </div>
+      <div class="trade-signal-cards">
+        ${plan.signalCards
+          .map(
+            ([label, value]) => `
+              <div>
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+              </div>
+            `
+          )
+          .join("")}
       </div>
       <div class="trade-plan-grid">
         ${plan.rows
