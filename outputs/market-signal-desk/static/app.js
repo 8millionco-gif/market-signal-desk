@@ -1758,12 +1758,20 @@ function renderFeed() {
 function stockSearchSubtitle(item) {
   const parts = [
     item.sourceLabel,
+    item.aliases?.length ? `별칭 ${item.aliases.slice(0, 2).join(", ")}` : "",
     item.market,
     item.securityType,
     item.status,
     item.price && item.price !== "-" ? item.price : ""
   ].filter(Boolean);
   return parts.join(" · ") || "종목 검색 결과";
+}
+
+function shouldSearchStocks(query) {
+  const text = String(query ?? "").trim();
+  if (!text) return false;
+  if (/[가-힣]/.test(text)) return text.length >= 1;
+  return text.length >= 2;
 }
 
 async function openSearchResult(symbol) {
@@ -1813,7 +1821,7 @@ function renderStockSearchResults() {
   if (!els.stockSearchResults) return;
   const query = state.query.trim();
   const payload = state.stockSearch;
-  if (query.length < 2) {
+  if (!shouldSearchStocks(query)) {
     els.stockSearchResults.hidden = true;
     els.stockSearchResults.innerHTML = "";
     return;
@@ -1833,7 +1841,7 @@ function renderStockSearchResults() {
       items.length
         ? `<div class="stock-search-list">
             ${items
-              .slice(0, 5)
+              .slice(0, 8)
               .map(
                 (item) => `
                   <button class="stock-result" type="button" data-search-symbol="${escapeHtml(item.symbol)}">
@@ -1850,7 +1858,7 @@ function renderStockSearchResults() {
               )
               .join("")}
           </div>`
-        : `<p>${escapeHtml(message || "후보 밖 종목은 005930, AAPL처럼 코드로 입력하세요.")}</p>`
+        : `<p>${escapeHtml(message || "삼성, 하이닉스, 엔비, AAPL처럼 입력하세요.")}</p>`
     }
     ${message && items.length ? `<p>${escapeHtml(message)}</p>` : ""}
   `;
@@ -1862,7 +1870,7 @@ function renderStockSearchResults() {
 
 async function loadStockSearch() {
   const query = state.query.trim();
-  if (query.length < 2) {
+  if (!shouldSearchStocks(query)) {
     state.stockSearch = {
       query,
       loading: false,

@@ -3027,12 +3027,32 @@ def search_query_looks_symbol(query: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9.\-]{2,20}", query.strip()))
 
 
+def universe_aliases_for_symbol(symbol: str) -> list[str]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return []
+    for entry in universe_data().get("symbols", []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("symbol", "")).strip().upper() == normalized_symbol:
+            return text_list(entry.get("aliases", []), limit=8)
+    return []
+
+
 def candidate_search_result(candidate: dict) -> dict:
+    aliases = unique_texts(
+        [
+            *text_list(candidate.get("aliases", []), limit=8),
+            *universe_aliases_for_symbol(str(candidate.get("symbol", ""))),
+        ],
+        limit=8,
+    )
     return {
         "symbol": candidate.get("symbol", ""),
         "name": candidate.get("name", candidate.get("symbol", "")),
         "market": candidate.get("market", ""),
         "category": candidate.get("category", ""),
+        "aliases": aliases,
         "price": candidate.get("price", "-"),
         "change": candidate.get("change", ""),
         "headline": candidate.get("headline", ""),
@@ -3043,6 +3063,33 @@ def candidate_search_result(candidate: dict) -> dict:
         "source": "candidate",
         "sourceLabel": "오늘 후보",
     }
+
+
+def search_haystack(values: list[object]) -> str:
+    flattened = []
+    for value in values:
+        if isinstance(value, list):
+            flattened.extend(str(item) for item in value if item)
+        elif value:
+            flattened.append(str(value))
+    return normalized_search_text(" ".join(flattened))
+
+
+def search_relevance_rank(query: str, item: dict) -> tuple[int, int, int]:
+    normalized_query = normalized_search_text(query)
+    symbol = normalized_search_text(item.get("symbol", ""))
+    name = normalized_search_text(item.get("name", ""))
+    aliases = [normalized_search_text(alias) for alias in text_list(item.get("aliases", []), limit=12)]
+    if normalized_query == symbol or normalized_query == name:
+        bucket = 0
+    elif symbol.startswith(normalized_query) or name.startswith(normalized_query):
+        bucket = 1
+    elif any(alias.startswith(normalized_query) for alias in aliases):
+        bucket = 2
+    else:
+        bucket = 3
+    score = bounded_int(item.get("score", item.get("totalScore", 0)), 0, 100)
+    return bucket, -score, len(name or symbol)
 
 
 def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list[dict]:
@@ -3057,6 +3104,7 @@ def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list
                     str(candidate.get("name", "")),
                     str(candidate.get("symbol", "")),
                     str(candidate.get("headline", "")),
+                    " ".join(str(alias) for alias in candidate.get("aliases", []) if alias),
                     " ".join(str(tag) for tag in candidate.get("tags", []) if tag),
                 ]
             )
@@ -3065,7 +3113,57 @@ def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list
             continue
         decorated = decorate_candidate(candidate, watched)
         matches.append(candidate_search_result(decorated))
-    matches.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+    matches.sort(key=lambda item: search_relevance_rank(query, item))
+    return matches[:limit]
+
+
+def universe_search_result(entry: dict, watched: set[str]) -> dict:
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    name = str(entry.get("name") or symbol).strip()
+    focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
+    themes = text_list(entry.get("themes", []), limit=4)
+    return {
+        "symbol": symbol,
+        "name": name,
+        "market": entry.get("market", ""),
+        "category": entry.get("category", ""),
+        "aliases": text_list(entry.get("aliases", []), limit=8),
+        "price": "-",
+        "change": "",
+        "headline": " · ".join(themes) if themes else f"{name} 감시 유니버스",
+        "score": bounded_int(42 + focus * 3, 0, 100),
+        "updated": "자동완성",
+        "isWatched": symbol in watched,
+        "inCandidates": False,
+        "source": "universe",
+        "sourceLabel": "감시 유니버스",
+    }
+
+
+def universe_candidate_search(query: str, watched: set[str], limit: int = 8, existing_symbols: set[str] | None = None) -> list[dict]:
+    normalized_query = normalized_search_text(query)
+    if not normalized_query:
+        return []
+    existing_symbols = existing_symbols or set()
+    matches = []
+    for entry in candidate_universe_entries():
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if not symbol or symbol in existing_symbols:
+            continue
+        haystack = search_haystack(
+            [
+                entry.get("symbol", ""),
+                entry.get("name", ""),
+                entry.get("englishName", ""),
+                entry.get("aliases", []),
+                entry.get("themes", []),
+                entry.get("query", ""),
+            ]
+        )
+        if normalized_query not in haystack:
+            continue
+        matches.append(universe_search_result(entry, watched))
+    matches.sort(key=lambda item: search_relevance_rank(query, item))
     return matches[:limit]
 
 
@@ -3118,11 +3216,16 @@ def stock_search(query: str, limit: int = 8) -> dict:
     watched = set(watchlist())
     candidate_items = seed_candidate_search(query, watched, limit=limit)
     items = list(candidate_items)
+    existing_symbols = {str(item.get("symbol", "")).upper() for item in items}
+    if query:
+        items.extend(universe_candidate_search(query, watched, limit=limit, existing_symbols=existing_symbols))
+        items.sort(key=lambda item: search_relevance_rank(query, item))
+        items = items[:limit]
     messages = []
     toss_status = {
         "source": "skipped",
         "enabled": False,
-        "message": "종목 코드를 입력하면 토스 종목 기본정보를 직접 조회합니다.",
+        "message": "종목명, 별칭, 코드로 자동완성합니다.",
     }
 
     if query and search_query_looks_symbol(query):
@@ -3168,14 +3271,14 @@ def stock_search(query: str, limit: int = 8) -> dict:
             if not items:
                 messages.append(toss_status["message"])
     elif query and not items:
-        messages.append("후보 밖 종목은 현재 종목코드나 티커로 직접 조회할 수 있습니다.")
+        messages.append("종목명 일부, 별칭, 코드나 티커로 검색할 수 있습니다.")
 
     if not items and not messages:
         messages.append("검색 결과가 없습니다.")
 
     return {
         "query": query,
-        "items": items[:limit],
+        "items": sorted(items[:limit], key=lambda item: search_relevance_rank(query, item)),
         "status": toss_status,
         "message": " ".join(unique_texts(messages, limit=3)),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
