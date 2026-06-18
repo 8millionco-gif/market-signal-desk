@@ -1257,6 +1257,7 @@ function renderMetrics() {
     const groups = summary.decisionGroups ?? {};
     const gates = summary.qualityGateCounts ?? {};
     const reactions = summary.priceReactionCounts ?? {};
+    const decisions = summary.finalDecisionCounts ?? {};
     const confidence = summary.averageDataConfidence;
     const averageReaction = summary.averagePriceReaction;
     const gateText =
@@ -1269,6 +1270,10 @@ function renderMetrics() {
         ? ` · 가격반응 강 ${reactions.strong ?? 0} · 확인 ${reactions.confirmed ?? 0} · 약 ${reactions.weak ?? 0} · 부족 ${reactions.missing ?? 0}`
         : "";
     const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
+    const portfolioLinked = Number(summary.portfolioLinkedCandidateCount ?? 0);
+    const portfolioText = portfolioLinked
+      ? ` · 보유연결 ${portfolioLinked} · 추가 ${decisions.add ?? 0} · 보유 ${decisions.hold ?? 0} · 매도 ${decisions.trim ?? 0} · 손절 ${decisions.stop ?? 0}`
+      : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
@@ -1282,7 +1287,7 @@ function renderMetrics() {
         ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1599,6 +1604,8 @@ function formatPriceRange(low, high, template = "") {
 }
 
 function selectedHoldingFor(item) {
+  const serverHolding = item?.portfolio?.holding;
+  if (serverHolding && typeof serverHolding === "object") return serverHolding;
   const holdings = Array.isArray(state.portfolioStatus?.items) ? state.portfolioStatus.items : [];
   const symbol = String(item?.symbol ?? "").toUpperCase();
   const name = String(item?.name ?? "").replace(/\s+/g, "").toLowerCase();
@@ -1718,7 +1725,7 @@ function priceBandFor(item, current, group, change, score) {
   };
 }
 
-function tradePlanFromFinalDecision(item, decision) {
+function tradePlanFromFinalDecision(item, decision, holding = null) {
   const signalCards = Array.isArray(decision.signalCards) ? decision.signalCards : [];
   const rows = Array.isArray(decision.rows) ? decision.rows : [];
   const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
@@ -1726,7 +1733,7 @@ function tradePlanFromFinalDecision(item, decision) {
     action: decision.action || "확인 대기",
     tone: decision.tone || "wait",
     summary: decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.",
-    holding: null,
+    holding,
     hasPrice: Boolean(item?.price),
     signalCards: signalCards.length
       ? signalCards
@@ -1761,8 +1768,8 @@ function tradePlan(item) {
   const change = parseDisplayPercent(item?.change);
   const group = decisionGroupForDisplay(item);
   const holding = selectedHoldingFor(item);
-  if (!holding && item?.finalDecision) {
-    return tradePlanFromFinalDecision(item, item.finalDecision);
+  if (item?.finalDecision) {
+    return tradePlanFromFinalDecision(item, item.finalDecision, holding);
   }
   const holdingRate = parseDisplayPercent(holding?.profitLossRate);
   const holdingJudgement = String(holding?.judgement ?? "");
@@ -2396,6 +2403,8 @@ function primaryPriceGuide(plan) {
 }
 
 function feedActionLabel(item, plan) {
+  const finalDecision = item?.finalDecision ?? {};
+  if (finalDecision.portfolioAware && finalDecision.action) return finalDecision.action;
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return "매수 후보";
   if (gate?.key === "watch") return "관찰 후보";
@@ -2909,6 +2918,8 @@ function renderPerformance() {
         ${performanceMetric("실전 승률", summary.actionableHitRate ?? "-")}
         ${performanceMetric("매수 판단", summary.buyDecisionMeasuredCount ?? 0)}
         ${performanceMetric("매수 승률", summary.buyDecisionHitRate ?? "-")}
+        ${performanceMetric("추가 판단", summary.addDecisionMeasuredCount ?? 0)}
+        ${performanceMetric("추가 승률", summary.addDecisionHitRate ?? "-")}
         ${performanceMetric("상승", summary.positiveCount ?? 0)}
         ${performanceMetric("하락", summary.negativeCount ?? 0)}
       </div>
@@ -3153,6 +3164,7 @@ function decisionGroupSection(item) {
   const reaction = item.priceReaction ?? {};
   const gate = item.qualityGate ?? {};
   const finalDecision = item.finalDecision ?? {};
+  const holding = selectedHoldingFor(item);
   return `
     <section class="detail-section">
       <div class="section-title">
@@ -3166,10 +3178,13 @@ function decisionGroupSection(item) {
         ${qualityLabel ? statCard("품질", qualityLabel) : ""}
         ${confidence.score != null ? statCard("신뢰도", `${confidence.score}/100`) : ""}
         ${reaction.score != null ? statCard("가격 반응", `${reaction.label ?? "-"} · ${reaction.score}/100`) : ""}
+        ${holding ? statCard("보유 손익", `${holding.profitLossRate ?? "-"} · ${holding.judgement ?? "보유"}`) : ""}
+        ${holding ? statCard("평균단가", holding.averagePurchasePrice ?? "-") : ""}
         ${gate.label ? statCard("게이트", gate.label) : ""}
       </div>
       <ul class="bullet-list">
         ${finalDecision.summary ? `<li>${escapeHtml(`최종 판단: ${finalDecision.summary}`)}</li>` : ""}
+        ${holding ? `<li>${escapeHtml(`보유 기준: ${holding.quantity ?? "-"}주 · 비중 ${holding.allocation ?? "-"}`)}</li>` : ""}
         <li>${escapeHtml(group.reason)}</li>
         ${qualityReason ? `<li>${escapeHtml(`후보 품질: ${qualityReason}`)}</li>` : ""}
         ${(confidence.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`신뢰 근거: ${text}`)}</li>`).join("")}

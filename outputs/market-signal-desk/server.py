@@ -1296,14 +1296,21 @@ def money_display(value, currency: str) -> str:
     return display_price(str(number), currency)
 
 
+def normalized_rate_percent(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return value * Decimal(100) if abs(value) <= Decimal("2") else value
+
+
 def portfolio_position_label(profit_rate: Decimal | None, allocation_percent: Decimal | None) -> str:
+    profit_percent = normalized_rate_percent(profit_rate)
     if allocation_percent is not None and allocation_percent >= Decimal("35"):
         return "비중 점검"
-    if profit_rate is not None and profit_rate <= Decimal("-7"):
+    if profit_percent is not None and profit_percent <= Decimal("-7"):
         return "손절 경계"
-    if profit_rate is not None and profit_rate >= Decimal("12"):
+    if profit_percent is not None and profit_percent >= Decimal("12"):
         return "분할매도 검토"
-    if profit_rate is not None and profit_rate <= Decimal("-3"):
+    if profit_percent is not None and profit_percent <= Decimal("-3"):
         return "추가매수 대기"
     return "보유 유지"
 
@@ -1319,6 +1326,8 @@ def normalize_holding_item(item: dict, totals_by_currency: dict) -> dict:
     if amount is not None and total_amount is not None and total_amount > 0:
         allocation_percent = (amount / total_amount) * Decimal(100)
     profit_rate = decimal_or_none(profit_loss.get("rate"))
+    profit_percent = normalized_rate_percent(profit_rate)
+    average_price = decimal_or_none(item.get("averagePurchasePrice"))
     return {
         "symbol": item.get("symbol", ""),
         "name": item.get("name", ""),
@@ -1328,12 +1337,15 @@ def normalize_holding_item(item: dict, totals_by_currency: dict) -> dict:
         "marketValueAmount": str(amount) if amount is not None else "",
         "lastPrice": money_display(item.get("lastPrice"), currency),
         "averagePurchasePrice": money_display(item.get("averagePurchasePrice"), currency),
+        "averagePurchasePriceAmount": str(average_price) if average_price is not None else "",
         "marketValue": money_display(market_value.get("amount"), currency),
         "purchaseAmount": money_display(market_value.get("purchaseAmount"), currency),
         "profitLoss": money_display(profit_loss.get("amount"), currency),
         "profitLossRate": display_ratio_percent(profit_loss.get("rate")),
+        "profitLossPercent": str(profit_percent.quantize(Decimal("0.01"))) if profit_percent is not None else "",
         "dailyProfitLossRate": display_ratio_percent(daily_profit_loss.get("rate")),
         "allocation": display_decimal_percent(allocation_percent) if allocation_percent is not None else "-",
+        "allocationPercent": str(allocation_percent.quantize(Decimal("0.01"))) if allocation_percent is not None else "",
         "judgement": portfolio_position_label(profit_rate, allocation_percent),
     }
 
@@ -1430,6 +1442,98 @@ def portfolio_status() -> dict:
         },
         "buyingPower": buying_power,
         "items": items[:12],
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
+def safe_portfolio_status() -> dict:
+    fallback = {
+        "enabled": TOSS_LIVE_PORTFOLIO,
+        "readOnly": True,
+        "ready": bool(TOSS_LIVE_PORTFOLIO and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
+        "source": "unavailable",
+        "message": "포트폴리오 정보를 후보 판단에 반영하지 못했습니다.",
+        "accounts": [],
+        "items": [],
+        "summary": {},
+        "buyingPower": {},
+    }
+    try:
+        return portfolio_status()
+    except Exception as error:
+        return integration_failure_status(fallback, error, "포트폴리오 정보를 후보 판단에 반영하지 못했습니다.")
+
+
+def normalized_match_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def holding_lookup(portfolio: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+    by_symbol: dict[str, dict] = {}
+    by_name: dict[str, dict] = {}
+    for item in portfolio.get("items", []) if isinstance(portfolio, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol", "")).strip().upper()
+        name = normalized_match_text(str(item.get("name", "")))
+        if symbol:
+            by_symbol[symbol] = item
+        if name:
+            by_name[name] = item
+    return by_symbol, by_name
+
+
+def portfolio_currency_for_candidate(candidate: dict) -> str:
+    market = str(candidate.get("market", "") or candidate.get("category", "")).lower()
+    price = str(candidate.get("price", ""))
+    symbol = str(candidate.get("symbol", ""))
+    if "$" in price or market in {"us", "usa", "overseas", "global"} or symbol.isalpha():
+        return "USD"
+    return "KRW"
+
+
+def portfolio_buying_power(portfolio: dict, currency: str) -> dict:
+    buying_power = portfolio.get("buyingPower", {}) if isinstance(portfolio, dict) else {}
+    item = buying_power.get(currency, {}) if isinstance(buying_power, dict) else {}
+    cash_text = item.get("cashBuyingPower", "-") if isinstance(item, dict) else "-"
+    cash_value = display_number_to_decimal(cash_text)
+    return {
+        "currency": currency,
+        "cashBuyingPower": cash_text,
+        "cashBuyingPowerAmount": str(cash_value) if cash_value is not None else "",
+        "hasCash": cash_value is not None and cash_value > 0,
+    }
+
+
+def enrich_candidates_with_portfolio(candidates: list[dict], portfolio: dict) -> tuple[list[dict], dict]:
+    by_symbol, by_name = holding_lookup(portfolio)
+    enriched = []
+    linked_count = 0
+    for candidate in candidates:
+        item = dict(candidate)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        name = normalized_match_text(str(item.get("name", "")))
+        holding = by_symbol.get(symbol) or by_name.get(name)
+        currency = portfolio_currency_for_candidate(item)
+        context = {
+            "source": portfolio.get("source", "unavailable") if isinstance(portfolio, dict) else "unavailable",
+            "isHeld": bool(holding),
+            "currency": currency,
+            "buyingPower": portfolio_buying_power(portfolio, currency),
+        }
+        if holding:
+            linked_count += 1
+            context["holding"] = holding
+        item["portfolio"] = context
+        enriched.append(item)
+
+    return enriched, {
+        "source": portfolio.get("source", "unavailable") if isinstance(portfolio, dict) else "unavailable",
+        "enabled": bool(portfolio.get("enabled")) if isinstance(portfolio, dict) else False,
+        "ready": bool(portfolio.get("ready")) if isinstance(portfolio, dict) else False,
+        "message": portfolio.get("message", "포트폴리오 연결 상태를 확인했습니다.") if isinstance(portfolio, dict) else "포트폴리오 연결 상태를 확인했습니다.",
+        "holdingCount": len(by_symbol),
+        "linkedCandidateCount": linked_count,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -3380,19 +3484,26 @@ def final_price_band(candidate: dict, score_detail: dict, total: int, readiness:
     stop_pct = Decimal("0.040")
     trim_pct = Decimal("0.052")
 
-    if action_key == "buy":
+    if action_key in {"buy", "add"}:
         entry_low_pct = Decimal("0.006") if strength >= 78 else Decimal("0.010")
         entry_high_pct = Decimal("0.005") if strength >= 78 else Decimal("0.003")
         pullback_pct = Decimal("0.018")
         stop_pct = Decimal("0.032")
         trim_pct = Decimal("0.058")
-    elif action_key == "pullback":
+    elif action_key in {"pullback", "hold"}:
         entry_low_pct = Decimal("0.030")
         entry_high_pct = Decimal("-0.004")
         pullback_pct = Decimal("0.035")
         chase_pct = Decimal("0.012")
         stop_pct = Decimal("0.040")
-    elif action_key == "exclude":
+    elif action_key == "trim":
+        entry_low_pct = Decimal("0.020")
+        entry_high_pct = Decimal("-0.004")
+        pullback_pct = Decimal("0.030")
+        chase_pct = Decimal("0.010")
+        stop_pct = Decimal("0.038")
+        trim_pct = Decimal("0.030")
+    elif action_key in {"exclude", "stop"}:
         entry_low_pct = Decimal("0.040")
         entry_high_pct = Decimal("0.020")
         pullback_pct = Decimal("0.055")
@@ -3438,6 +3549,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
     group_key = str(group.get("key", "wait"))
     gate_key = str(gate.get("key", "defer"))
+    portfolio = candidate.get("portfolio", {}) if isinstance(candidate.get("portfolio"), dict) else {}
+    holding = portfolio.get("holding", {}) if isinstance(portfolio.get("holding"), dict) else {}
+    is_held = bool(portfolio.get("isHeld") or holding)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     change = display_percent_to_decimal(candidate.get("change"))
@@ -3448,8 +3562,31 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
+    profit_percent = display_number_to_decimal(holding.get("profitLossPercent") or holding.get("profitLossRate"))
+    allocation_percent = display_number_to_decimal(holding.get("allocationPercent") or holding.get("allocation"))
+    holding_judgement = str(holding.get("judgement", "보유 유지"))
 
-    if not has_price:
+    if is_held:
+        if risk >= 24 or (profit_percent is not None and profit_percent <= Decimal("-7")) or "손절" in holding_judgement:
+            action_key, action, tone = "stop", "손절 점검", "risk"
+            summary = "보유 손실 또는 리스크가 커져 추가매수보다 손절 기준 이탈 여부를 먼저 확인합니다."
+        elif (allocation_percent is not None and allocation_percent >= Decimal("35")) or (profit_percent is not None and profit_percent >= Decimal("12")) or "분할매도" in holding_judgement or "비중" in holding_judgement:
+            action_key, action, tone = "trim", "분할매도 검토", "sell"
+            summary = "수익 또는 비중이 커진 보유 종목입니다. 신규 매수보다 일부 이익 실현과 비중 조절을 먼저 봅니다."
+        elif profit_percent is not None and profit_percent <= Decimal("-3"):
+            if gate_key == "actionable" and reaction_key in {"strong", "confirmed"} and risk < 18:
+                action_key, action, tone = "add", "추가매수 검토", "buy"
+                summary = "보유 손실 구간이지만 가격 반응과 신뢰도가 확인되어 소액 추가매수 조건을 점검합니다."
+            else:
+                action_key, action, tone = "hold", "추가매수 대기", "wait"
+                summary = "손실 구간이나 가격 반응 또는 신뢰도가 부족해 성급한 물타기를 피하고 반응 확인을 기다립니다."
+        elif reaction_key in {"missing", "weak"} and reaction.get("hasEvent"):
+            action_key, action, tone = "hold", "보유 유지", "wait"
+            summary = "보유 종목에 재료는 있으나 시장 반응이 약해 추가매수보다 보유 관찰이 우선입니다."
+        else:
+            action_key, action, tone = "hold", "보유 유지", "wait"
+            summary = "보유 종목은 신규 진입보다 기존 수익률, 비중, 가격 반응을 기준으로 관리합니다."
+    elif not has_price:
         action_key, action, tone = "verify", "확인 대기", "wait"
         summary = "현재가가 확인되지 않아 매수·대기·손절 기준을 확정하지 않습니다."
     elif gate_key == "exclude" or risk >= 24 or total < 45:
@@ -3487,6 +3624,13 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         ["매수 구간", band["entryRange"] if band else "현재가 확인 후 계산"],
         ["위험 기준", f"{band['stopLine']} 이탈" if band else "-"],
     ]
+    if is_held:
+        signal_cards = [
+            ["현재 판단", action],
+            ["보유 손익", holding.get("profitLossRate", "-")],
+            ["평균단가", holding.get("averagePurchasePrice", "-")],
+            ["비중", holding.get("allocation", "-")],
+        ]
     rows = [
         ["관찰 매수", band["entryRange"] if band else "현재가 확인 후 계산"],
         ["눌림 대기", f"{band['pullback']} 부근 확인" if band else "-"],
@@ -3495,12 +3639,18 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         ["손절 점검", f"{band['stopLine']} 이탈" if band else "-"],
         ["분할매도", f"{band['trimLine']} 이상 또는 과열 신호" if band else "-"],
     ]
+    if is_held:
+        rows.append(["보유 수량", str(holding.get("quantity", "-"))])
+        rows.append(["평가금액", str(holding.get("marketValue", "-"))])
+        rows.append(["매수가능", portfolio.get("buyingPower", {}).get("cashBuyingPower", "-") if isinstance(portfolio.get("buyingPower"), dict) else "-"])
     reasons = [
         f"최종 게이트: {gate.get('label', '미분류')}",
         f"데이터 신뢰도: {confidence_score}/100",
         f"후보 점수: {total}/100",
         f"진입 준비도: {readiness}/100",
     ]
+    if is_held:
+        reasons.insert(0, f"보유 상태: {holding_judgement} · 손익 {holding.get('profitLossRate', '-')}")
     if change is not None:
         reasons.append(f"현재 등락률: {candidate.get('change')}")
     if group.get("reason"):
@@ -3511,11 +3661,13 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         "action": action,
         "tone": tone,
         "summary": summary,
-        "tradeAllowed": action_key == "buy",
+        "tradeAllowed": action_key in {"buy", "add"},
         "gateKey": gate_key,
         "confidenceScore": confidence_score,
         "reactionScore": reaction_score,
         "reactionLabel": reaction.get("label", ""),
+        "portfolioAware": is_held,
+        "holdingJudgement": holding_judgement if is_held else "",
         "priceLevels": band or {},
         "signalCards": signal_cards,
         "rows": rows,
@@ -3532,7 +3684,17 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     reaction_scores = []
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     reaction_counts = {"strong": 0, "confirmed": 0, "weak": 0, "missing": 0}
-    final_decision_counts = {"buy": 0, "pullback": 0, "watch": 0, "verify": 0, "exclude": 0}
+    final_decision_counts = {
+        "buy": 0,
+        "add": 0,
+        "hold": 0,
+        "trim": 0,
+        "stop": 0,
+        "pullback": 0,
+        "watch": 0,
+        "verify": 0,
+        "exclude": 0,
+    }
     for candidate in candidates:
         item = dict(candidate)
         base_score = item.get("score", {})
@@ -3649,6 +3811,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "priceReactionCounts": reaction_counts,
         "finalDecisionCounts": final_decision_counts,
         "buyDecisionCount": final_decision_counts.get("buy", 0),
+        "addDecisionCount": final_decision_counts.get("add", 0),
+        "holdDecisionCount": final_decision_counts.get("hold", 0),
+        "trimDecisionCount": final_decision_counts.get("trim", 0),
+        "stopDecisionCount": final_decision_counts.get("stop", 0),
         "pullbackDecisionCount": final_decision_counts.get("pullback", 0),
         "watchDecisionCount": final_decision_counts.get("watch", 0),
         "verifyDecisionCount": final_decision_counts.get("verify", 0),
@@ -4196,11 +4362,20 @@ def analyze_stock_lookup(symbol: str) -> dict:
     market, fx_status = enrich_market_with_fx(market)
     candidate, lookup_status = lookup_candidate_for_symbol(symbol, watched)
     candidates = [candidate]
+    portfolio = safe_portfolio_status()
 
     statuses: dict[str, dict] = {
         "lookup": lookup_status,
         "indices": index_status,
         "fx": fx_status,
+        "portfolio": {
+            "source": portfolio.get("source", "unavailable"),
+            "enabled": portfolio.get("enabled", False),
+            "ready": portfolio.get("ready", False),
+            "message": portfolio.get("message", "포트폴리오 연결 상태를 확인했습니다."),
+            "holdingCount": len(portfolio.get("items", [])) if isinstance(portfolio.get("items"), list) else 0,
+            "linkedCandidateCount": 0,
+        },
     }
 
     try:
@@ -4224,6 +4399,7 @@ def analyze_stock_lookup(symbol: str) -> dict:
     except Exception as error:
         statuses["gdelt"] = search_analysis_error_status("sample", error, "GDELT 글로벌 뉴스 반영에 실패했습니다.")
 
+    candidates, statuses["portfolio"] = enrich_candidates_with_portfolio(candidates, portfolio)
     candidates, statuses["selection"] = apply_candidate_selection(candidates, market, watched)
 
     try:
@@ -4861,6 +5037,14 @@ def dashboard_status_defaults() -> dict:
             "enabled": OPENAI_ANALYSIS_ENABLED,
             "message": "로컬 분석을 사용합니다.",
         },
+        "portfolio": {
+            "source": "disabled",
+            "enabled": TOSS_LIVE_PORTFOLIO,
+            "ready": False,
+            "message": "포트폴리오 정보를 후보 판단에 반영하지 않았습니다.",
+            "holdingCount": 0,
+            "linkedCandidateCount": 0,
+        },
         "selection": {
             "source": "static",
             "enabled": True,
@@ -4887,6 +5071,7 @@ def collect_signal_inputs(mode: str) -> dict:
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
     watched = set(watchlist())
+    portfolio = safe_portfolio_status()
     raw_candidates, discovery_status = initial_candidates(data, watched)
     candidates = [decorate_candidate(item, watched) for item in raw_candidates]
     defaults = dashboard_status_defaults()
@@ -4895,11 +5080,20 @@ def collect_signal_inputs(mode: str) -> dict:
         "data": data,
         "market": market,
         "watched": watched,
+        "portfolio": portfolio,
         "candidates": candidates,
         "statuses": {
             **defaults,
             "index": index_status,
             "fx": fx_status,
+            "portfolio": {
+                "source": portfolio.get("source", "unavailable"),
+                "enabled": portfolio.get("enabled", False),
+                "ready": portfolio.get("ready", False),
+                "message": portfolio.get("message", "포트폴리오 연결 상태를 확인했습니다."),
+                "holdingCount": len(portfolio.get("items", [])) if isinstance(portfolio.get("items"), list) else 0,
+                "linkedCandidateCount": 0,
+            },
             "discovery": discovery_status,
         },
         "pipeline": [
@@ -4981,6 +5175,19 @@ def analyze_signal_context(context: dict) -> dict:
 
 
 def score_signal_context(context: dict) -> dict:
+    context["candidates"], context["statuses"]["portfolio"] = enrich_candidates_with_portfolio(
+        context["candidates"],
+        context.get("portfolio", {}),
+    )
+    context["pipeline"].append(
+        pipeline_step(
+            "portfolio",
+            "보유 자산 반영",
+            "ok" if context["statuses"]["portfolio"].get("source") == "toss" else "fallback",
+            context["statuses"]["portfolio"].get("message", "포트폴리오 연결 상태를 확인했습니다."),
+            context["statuses"]["portfolio"].get("linkedCandidateCount", 0),
+        )
+    )
     context["candidates"], context["statuses"]["selection"] = apply_candidate_selection(
         context["candidates"],
         context["market"],
@@ -5004,8 +5211,12 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         key = str(decision.get("actionKey", "")) if isinstance(decision, dict) else ""
         return {
             "buy": 100,
+            "add": 96,
+            "hold": 86,
+            "trim": 84,
             "watch": 82,
             "pullback": 72,
+            "stop": 60,
             "verify": 45,
             "exclude": 10,
         }.get(key, 50)
@@ -5096,9 +5307,15 @@ def build_dashboard_payload(context: dict) -> dict:
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
             "buyDecisionCount": selection_status.get("buyDecisionCount"),
+            "addDecisionCount": selection_status.get("addDecisionCount"),
+            "holdDecisionCount": selection_status.get("holdDecisionCount"),
+            "trimDecisionCount": selection_status.get("trimDecisionCount"),
+            "stopDecisionCount": selection_status.get("stopDecisionCount"),
             "pullbackDecisionCount": selection_status.get("pullbackDecisionCount"),
             "watchDecisionCount": selection_status.get("watchDecisionCount"),
             "verifyDecisionCount": selection_status.get("verifyDecisionCount"),
+            "portfolioLinkedCandidateCount": context["statuses"].get("portfolio", {}).get("linkedCandidateCount", 0),
+            "portfolioHoldingCount": context["statuses"].get("portfolio", {}).get("holdingCount", 0),
             "investableCandidateCount": selection_status.get("investableCandidateCount"),
             "watchCandidateCount": selection_status.get("watchCandidateCount"),
             "deferCandidateCount": selection_status.get("deferCandidateCount"),
@@ -5111,6 +5328,7 @@ def build_dashboard_payload(context: dict) -> dict:
             "pipeline": context["pipeline"],
             "discovery": discovery_status,
             "selection": selection_status,
+            "portfolio": context["statuses"].get("portfolio", {}),
             "toss": {
                 "config": toss_config_status(),
                 "prices": context["statuses"]["toss_price"],
@@ -5290,9 +5508,15 @@ def dashboard_summary(payload: dict) -> dict:
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
         "buyDecisionCount": summary.get("buyDecisionCount"),
+        "addDecisionCount": summary.get("addDecisionCount"),
+        "holdDecisionCount": summary.get("holdDecisionCount"),
+        "trimDecisionCount": summary.get("trimDecisionCount"),
+        "stopDecisionCount": summary.get("stopDecisionCount"),
         "pullbackDecisionCount": summary.get("pullbackDecisionCount"),
         "watchDecisionCount": summary.get("watchDecisionCount"),
         "verifyDecisionCount": summary.get("verifyDecisionCount"),
+        "portfolioLinkedCandidateCount": summary.get("portfolioLinkedCandidateCount"),
+        "portfolioHoldingCount": summary.get("portfolioHoldingCount"),
         "investableCandidateCount": summary.get("investableCandidateCount"),
         "watchCandidateCount": summary.get("watchCandidateCount"),
         "deferCandidateCount": summary.get("deferCandidateCount"),
@@ -5595,6 +5819,7 @@ def performance_summary(observations: list[dict], run_count: int, price_status: 
     neutral = [item for item in measured if item.get("outcome") == "중립"]
     actionable = [item for item in measured if item.get("gateKey") == "actionable"]
     buy_decisions = [item for item in measured if item.get("finalActionKey") == "buy"]
+    add_decisions = [item for item in measured if item.get("finalActionKey") == "add"]
     average = decimal_average(changes)
     best = max(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
     worst = min(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
@@ -5614,6 +5839,9 @@ def performance_summary(observations: list[dict], run_count: int, price_status: 
         "buyDecisionMeasuredCount": len(buy_decisions),
         "buyDecisionHitRate": performance_hit_rate(buy_decisions),
         "buyDecisionAverageChange": performance_average_change(buy_decisions),
+        "addDecisionMeasuredCount": len(add_decisions),
+        "addDecisionHitRate": performance_hit_rate(add_decisions),
+        "addDecisionAverageChange": performance_average_change(add_decisions),
         "best": best,
         "worst": worst,
         "priceSource": price_status.get("source", "-"),
@@ -5699,7 +5927,7 @@ def performance_by_final_action(observations: list[dict]) -> list[dict]:
         observations,
         "finalActionKey",
         "finalAction",
-        ["buy", "watch", "pullback", "verify", "exclude", "unknown"],
+        ["buy", "add", "hold", "trim", "stop", "watch", "pullback", "verify", "exclude", "unknown"],
     )
 
 
