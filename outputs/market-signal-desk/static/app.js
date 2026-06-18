@@ -1707,14 +1707,33 @@ function renderStorageStatus() {
   const status = state.storageStatus;
   if (!status) return;
   const modeText = status.mode === "filesystem" ? "파일 저장" : status.mode || "-";
+  const database = status.database ?? {};
+  const migration = database.migration ?? {};
+  const counts = database.counts ?? {};
   const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
     : `${status.recentRunCount ?? 0}건`;
   const nextText = status.persistent ? "자동 실행 가능" : "DB/디스크 검토";
+  const dbText = database.urlConfigured
+    ? database.ready
+      ? "Postgres 준비"
+      : shortText(database.error || "DB 연결 확인", 28)
+    : "미연결";
+  const migrationText = migration.enabled
+    ? migration.done
+      ? `완료 · 스냅샷 ${migration.snapshotsInserted ?? 0}/${migration.snapshotsScanned ?? 0}`
+      : "대기"
+    : "꺼짐";
+  const recordText = counts.snapshotCount != null
+    ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0}`
+    : "-";
   const rows = [
     ["저장 방식", Boolean(status.mode), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
+    ["DB 상태", Boolean(database.ready), dbText],
+    ["DB 이관", Boolean(migration.done), migrationText],
+    ["DB 기록", counts.snapshotCount != null, recordText],
     ["보존성", Boolean(status.persistent), persistenceText],
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
     ["다음", status.persistent && status.writable, nextText]

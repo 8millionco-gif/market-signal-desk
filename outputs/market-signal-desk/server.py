@@ -37,6 +37,8 @@ CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
+SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -202,8 +204,20 @@ SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
+DB_MIGRATION_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
+DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
+DB_MIGRATION_STATUS: dict[str, object] = {
+    "enabled": SIGNAL_DB_AUTO_MIGRATE,
+    "done": False,
+    "ran": False,
+    "candidatePool": "pending",
+    "discoveryLatest": "pending",
+    "snapshotsInserted": 0,
+    "snapshotsScanned": 0,
+    "error": "",
+}
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
     "running": False,
@@ -264,14 +278,29 @@ def psycopg_modules():
     return psycopg, json_module.Jsonb
 
 
+def safe_read_json_file(path: Path):
+    try:
+        if path.exists():
+            return read_json(path, None)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
 def ensure_database_schema() -> bool:
     global DB_SCHEMA_READY
     if not database_storage_enabled():
         return False
     if DB_SCHEMA_READY:
+        migrate_files_to_database()
         return True
     with DB_LOCK:
         if DB_SCHEMA_READY:
+            schema_ready = True
+        else:
+            schema_ready = False
+        if schema_ready:
+            migrate_files_to_database()
             return True
         try:
             psycopg, _jsonb = psycopg_modules()
@@ -316,10 +345,11 @@ def ensure_database_schema() -> bool:
                     )
             DB_SCHEMA_READY = True
             set_db_error("")
-            return True
         except Exception as error:
             set_db_error(error)
             return False
+    migrate_files_to_database()
+    return True
 
 
 def normalize_db_payload(value, fallback):
@@ -331,6 +361,149 @@ def normalize_db_payload(value, fallback):
         except json.JSONDecodeError:
             return fallback
     return fallback
+
+
+def db_storage_counts() -> dict:
+    if not ensure_database_schema():
+        return {}
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM signal_kv")
+                kv_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM signal_snapshots")
+                snapshot_count = cur.fetchone()[0]
+                cur.execute("SELECT payload FROM signal_kv WHERE key = 'candidate_pool'")
+                pool_row = cur.fetchone()
+        pool_payload = normalize_db_payload(pool_row[0], {}) if pool_row else {}
+        pool_items = pool_payload.get("items", {}) if isinstance(pool_payload, dict) and isinstance(pool_payload.get("items"), dict) else {}
+        active_pool = len([
+            record
+            for record in pool_items.values()
+            if isinstance(record, dict) and str(record.get("stateKey", "")) not in {"excluded", "expired"}
+        ])
+        set_db_error("")
+        return {
+            "kvCount": bounded_int(kv_count, 0, 1_000_000),
+            "snapshotCount": bounded_int(snapshot_count, 0, 1_000_000),
+            "candidatePoolCount": len(pool_items),
+            "candidatePoolActiveCount": active_pool,
+        }
+    except Exception as error:
+        set_db_error(error)
+        return {}
+
+
+def migrate_files_to_database() -> dict:
+    global DB_MIGRATION_DONE, DB_MIGRATION_STATUS
+    if not SIGNAL_DB_AUTO_MIGRATE:
+        DB_MIGRATION_STATUS = {
+            **DB_MIGRATION_STATUS,
+            "enabled": False,
+            "done": True,
+            "ran": False,
+            "candidatePool": "disabled",
+            "discoveryLatest": "disabled",
+            "error": "",
+        }
+        DB_MIGRATION_DONE = True
+        return DB_MIGRATION_STATUS
+    if not database_storage_enabled() or not DB_SCHEMA_READY:
+        return DB_MIGRATION_STATUS
+    if DB_MIGRATION_DONE:
+        return DB_MIGRATION_STATUS
+    with DB_MIGRATION_LOCK:
+        if DB_MIGRATION_DONE:
+            return DB_MIGRATION_STATUS
+        status: dict[str, object] = {
+            "enabled": True,
+            "done": False,
+            "ran": True,
+            "candidatePool": "missing",
+            "discoveryLatest": "missing",
+            "snapshotsInserted": 0,
+            "snapshotsScanned": 0,
+            "snapshotLimit": max(0, SIGNAL_DB_MIGRATE_RUN_LIMIT),
+            "error": "",
+        }
+        try:
+            psycopg, Jsonb = psycopg_modules()
+            candidate_pool = safe_read_json_file(CANDIDATE_POOL_FILE)
+            discovery_latest = safe_read_json_file(DISCOVERY_LATEST_FILE)
+            run_paths = []
+            if RUNS_DIR.exists() and SIGNAL_DB_MIGRATE_RUN_LIMIT != 0:
+                limit = max(0, SIGNAL_DB_MIGRATE_RUN_LIMIT)
+                run_paths = sorted(RUNS_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+                if limit:
+                    run_paths = run_paths[:limit]
+            with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    if isinstance(candidate_pool, dict) and candidate_pool.get("items"):
+                        cur.execute(
+                            """
+                            INSERT INTO signal_kv (key, payload, updated_at)
+                            VALUES ('candidate_pool', %s, NOW())
+                            ON CONFLICT (key) DO NOTHING
+                            """,
+                            (Jsonb(candidate_pool),),
+                        )
+                        status["candidatePool"] = "inserted" if cur.rowcount else "already-present"
+                    elif isinstance(candidate_pool, dict):
+                        status["candidatePool"] = "empty"
+
+                    if isinstance(discovery_latest, dict) and discovery_latest:
+                        cur.execute(
+                            """
+                            INSERT INTO signal_kv (key, payload, updated_at)
+                            VALUES ('discovery_latest', %s, NOW())
+                            ON CONFLICT (key) DO NOTHING
+                            """,
+                            (Jsonb(discovery_latest),),
+                        )
+                        status["discoveryLatest"] = "inserted" if cur.rowcount else "already-present"
+                    elif isinstance(discovery_latest, dict):
+                        status["discoveryLatest"] = "empty"
+
+                    inserted = 0
+                    scanned = 0
+                    for path in run_paths:
+                        snapshot = safe_read_json_file(path)
+                        if not isinstance(snapshot, dict) or not snapshot.get("id"):
+                            continue
+                        scanned += 1
+                        cur.execute(
+                            """
+                            INSERT INTO signal_snapshots (
+                                id, mode, run_trigger, created_at, summary, dashboard, payload, file_name, updated_at
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT (id) DO NOTHING
+                            """,
+                            (
+                                str(snapshot.get("id")),
+                                str(snapshot.get("mode", "")),
+                                str(snapshot.get("trigger", "")),
+                                str(snapshot.get("createdAt") or datetime.now(KST).isoformat(timespec="seconds")),
+                                Jsonb(snapshot.get("summary", {})),
+                                Jsonb(snapshot.get("dashboard", {})),
+                                Jsonb(snapshot),
+                                path.name,
+                            ),
+                        )
+                        inserted += max(0, cur.rowcount)
+                    status["snapshotsInserted"] = inserted
+                    status["snapshotsScanned"] = scanned
+            status["done"] = True
+            DB_MIGRATION_DONE = True
+            DB_MIGRATION_STATUS = status
+            set_db_error("")
+            return DB_MIGRATION_STATUS
+        except Exception as error:
+            status["error"] = str(error)[:240]
+            DB_MIGRATION_STATUS = status
+            set_db_error(error)
+            return DB_MIGRATION_STATUS
 
 
 def db_read_kv(key: str, fallback):
@@ -404,7 +577,7 @@ def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
                         snapshot_id,
                         str(snapshot.get("mode", "")),
                         str(snapshot.get("trigger", "")),
-                        str(snapshot.get("createdAt", datetime.now(KST).isoformat(timespec="seconds"))),
+                        str(snapshot.get("createdAt") or datetime.now(KST).isoformat(timespec="seconds")),
                         Jsonb(snapshot.get("summary", {})),
                         Jsonb(snapshot.get("dashboard", {})),
                         Jsonb(snapshot),
@@ -509,6 +682,7 @@ def db_snapshot_detail(run_id: str) -> dict | None:
 def database_status() -> dict:
     enabled = database_storage_enabled()
     ready = ensure_database_schema() if enabled else False
+    counts = db_storage_counts() if ready else {}
     return {
         "backend": SIGNAL_STORAGE_BACKEND,
         "urlConfigured": bool(DATABASE_URL),
@@ -516,6 +690,9 @@ def database_status() -> dict:
         "ready": ready,
         "implementation": "postgres" if enabled else "filesystem",
         "persistent": bool(ready),
+        "autoMigrate": SIGNAL_DB_AUTO_MIGRATE,
+        "migration": dict(DB_MIGRATION_STATUS),
+        "counts": counts,
         "error": DB_LAST_ERROR,
     }
 

@@ -112,6 +112,23 @@ if (-not $storageMessage) {
   $storageMessage = "check persistent storage before auto-run"
 }
 Write-Check "snapshot storage persistence" ([bool]$storage.persistent) $storageMessage
+if ($storage.database) {
+  $db = $storage.database
+  $migration = $db.migration
+  $counts = $db.counts
+  $dbDetail = "backend=$($db.backend), configured=$($db.urlConfigured), ready=$($db.ready)"
+  Write-Check "database storage" ([bool]$db.ready) $dbDetail
+  if ($migration) {
+    Write-Check "database migration" ([bool]$migration.done) "candidatePool=$($migration.candidatePool), discoveryLatest=$($migration.discoveryLatest), snapshots=$($migration.snapshotsInserted)/$($migration.snapshotsScanned)"
+  }
+  if ($counts) {
+    $snapshotCount = 0
+    if ($null -ne $counts.snapshotCount) {
+      $snapshotCount = [int]$counts.snapshotCount
+    }
+    Write-Check "database records" ($snapshotCount -ge 0) "kv=$($counts.kvCount), snapshots=$($counts.snapshotCount), pool=$($counts.candidatePoolActiveCount)/$($counts.candidatePoolCount)"
+  }
+}
 
 try {
   $network = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/network/outbound-ip") -Headers $headers -Method Get -TimeoutSec 30

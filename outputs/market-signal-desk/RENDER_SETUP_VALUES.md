@@ -133,9 +133,11 @@ https://market-signal-desk.onrender.com
 ```text
 SIGNAL_STORAGE_BACKEND=auto
 DATABASE_URL=postgresql://...
+SIGNAL_DB_AUTO_MIGRATE=1
+SIGNAL_DB_MIGRATE_RUN_LIMIT=200
 ```
 
-앱은 DB 연결이 가능하면 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다.
+앱은 DB 연결이 가능하면 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 파일 저장소에 남은 후보 풀, 최신 발굴 결과, 최근 스냅샷을 DB에 한 번 자동 이관합니다.
 
 DB에 저장되는 데이터:
 
