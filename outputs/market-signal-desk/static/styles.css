@@ -576,6 +576,12 @@ h3 {
   background: rgba(255, 100, 115, 0.1);
 }
 
+.feed-title .quality-badge {
+  color: var(--soft);
+  border-color: rgba(180, 193, 216, 0.22);
+  background: rgba(180, 193, 216, 0.08);
+}
+
 .feed-subtitle {
   margin-top: 4px;
   color: var(--soft);

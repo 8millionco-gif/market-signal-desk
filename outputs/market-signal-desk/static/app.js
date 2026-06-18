@@ -494,6 +494,14 @@ function hasMomentumSignal(item) {
   );
 }
 
+function discoveryQualityLabel(item) {
+  const tier = item?.discovery?.qualityTier;
+  if (tier === "primary") return "1차";
+  if (tier === "reserve") return "보조";
+  if (tier === "rejected") return "제외";
+  return "";
+}
+
 function isActionCandidate(item) {
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
@@ -1066,8 +1074,15 @@ function renderMetrics() {
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
         : "";
+    const qualityPrimary = summary.qualitySelectedPrimary ?? discovery.qualitySelectedPrimary;
+    const qualityReserve = summary.qualitySelectedReserve ?? discovery.qualitySelectedReserve;
+    const qualityRejected = summary.qualityRejectedCount ?? discovery.qualityRejectedCount;
+    const qualityText =
+      qualityPrimary != null || qualityReserve != null || qualityRejected != null
+        ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0} · 제외 ${qualityRejected ?? 0}`
+        : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${groupText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2010,6 +2025,7 @@ function renderFeed() {
       const plan = tradePlan(item);
       const group = decisionGroupForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
+      const qualityLabel = discoveryQualityLabel(item);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -2018,6 +2034,7 @@ function renderFeed() {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
+              ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
@@ -2587,6 +2604,8 @@ function tradePlanSection(item) {
 function decisionGroupSection(item) {
   const group = decisionGroupForDisplay(item);
   const serverGroup = item.decisionGroup ?? {};
+  const qualityReason = item.discovery?.qualityReason;
+  const qualityLabel = discoveryQualityLabel(item);
   return `
     <section class="detail-section">
       <div class="section-title">
@@ -2596,9 +2615,11 @@ function decisionGroupSection(item) {
       <div class="stat-grid">
         ${statCard("판단 점수", `${Math.round(Number(group.score ?? 0))}/100`)}
         ${statCard("분류", group.label)}
+        ${qualityLabel ? statCard("품질", qualityLabel) : ""}
       </div>
       <ul class="bullet-list">
         <li>${escapeHtml(group.reason)}</li>
+        ${qualityReason ? `<li>${escapeHtml(`후보 품질: ${qualityReason}`)}</li>` : ""}
         ${
           serverGroup.reason && serverGroup.reason !== group.reason
             ? `<li>${escapeHtml(serverGroup.reason)}</li>`

@@ -153,6 +153,8 @@ SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
 SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
+SIGNAL_DISCOVERY_QUALITY_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALITY_MIN_SCORE", "55"))
+SIGNAL_DISCOVERY_RESERVE_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_RESERVE_MIN_SCORE", "42"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -4047,6 +4049,8 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
+            "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
+            "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
             "symbols": SIGNAL_DISCOVERY_SYMBOLS,
             "watch": sorted(watched),
             "naverReady": NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"],
@@ -4066,12 +4070,103 @@ def candidate_bucket(candidate: dict) -> str:
     return "domestic"
 
 
-def balanced_candidate_selection(discovered: list[dict]) -> tuple[list[dict], dict]:
-    domestic = [item for item in discovered if candidate_bucket(item) == "domestic"]
-    overseas = [item for item in discovered if candidate_bucket(item) == "overseas"]
-    selected = [*domestic[:SIGNAL_DOMESTIC_CANDIDATE_LIMIT], *overseas[:SIGNAL_OVERSEAS_CANDIDATE_LIMIT]]
+def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    score = bounded_int(discovery.get("score", 0), 0, 100)
+    focus = bounded_int(discovery.get("focusWeight", 0), 0, 15)
+    news_items = bounded_int(discovery.get("newsItems", 0), 0, 1_000)
+    raw_news = bounded_int(discovery.get("rawNewsItems", 0), 0, 1_000)
+    filtered = bounded_int(discovery.get("filteredNewsItems", 0), 0, 1_000)
+    hidden = is_hidden_discovery_candidate(candidate)
+    watched_hit = symbol in watched
+
+    if watched_hit:
+        tier, rank, reason = "primary", 0, "관심 종목이라 우선 검토"
+    elif news_items > 0 and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
+        tier, rank, reason = "primary", 0, "관련 뉴스가 확인된 후보"
+    elif score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE:
+        tier, rank, reason = "primary", 0, "발굴 점수가 1차 기준을 통과"
+    elif hidden and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "reserve", 1, "숨은 후보이나 추가 확인 필요"
+    elif focus >= 8 and filtered == 0 and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "reserve", 1, "테마 가중치가 높아 보조 후보로 유지"
+    elif raw_news and filtered and not news_items:
+        tier, rank, reason = "rejected", 3, "검색 뉴스는 있었지만 종목 관련성이 낮음"
+    else:
+        tier, rank, reason = "rejected", 3, "뉴스·점수 기준 미달"
+
+    return {
+        "tier": tier,
+        "rank": rank,
+        "reason": reason,
+        "score": score,
+        "focusWeight": focus,
+        "newsItems": news_items,
+    }
+
+
+def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int]:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    quality = discovery.get("qualityProfile", {}) if isinstance(discovery.get("qualityProfile"), dict) else {}
+    return (
+        -bounded_int(quality.get("rank", 9), 0, 9),
+        bounded_int(quality.get("score", discovery.get("score", 0)), 0, 100),
+        bounded_int(discovery.get("newsItems", 0), 0, 1_000),
+        score_candidate(candidate),
+    )
+
+
+def prepare_quality_candidates(discovered: list[dict], watched: set[str]) -> tuple[list[dict], dict]:
+    prepared = []
+    counts = {"primary": 0, "reserve": 0, "rejected": 0}
+    for candidate in discovered:
+        item = dict(candidate)
+        discovery = dict(item.get("discovery", {})) if isinstance(item.get("discovery"), dict) else {}
+        profile = discovery_quality_profile(item, watched)
+        discovery["qualityProfile"] = profile
+        discovery["qualityTier"] = profile["tier"]
+        discovery["qualityReason"] = profile["reason"]
+        item["discovery"] = discovery
+        counts[profile["tier"]] = counts.get(profile["tier"], 0) + 1
+        prepared.append(item)
+    prepared.sort(key=discovery_selection_sort_key, reverse=True)
+    return prepared, counts
+
+
+def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> tuple[list[dict], dict]:
+    quality_candidates, quality_counts = prepare_quality_candidates(discovered, watched)
+    selectable = [
+        item
+        for item in quality_candidates
+        if item.get("discovery", {}).get("qualityTier") in {"primary", "reserve"}
+    ]
+    domestic = [item for item in selectable if candidate_bucket(item) == "domestic"]
+    overseas = [item for item in selectable if candidate_bucket(item) == "overseas"]
+    selected: list[dict] = []
+
+    def add_from_bucket(bucket: list[dict], limit: int, tier: str | None = None) -> None:
+        existing = {str(item.get("symbol", "")).upper() for item in selected}
+        bucket_count = len([item for item in selected if candidate_bucket(item) == candidate_bucket(bucket[0])]) if bucket else 0
+        for item in bucket:
+            if bucket_count >= limit:
+                break
+            if tier and item.get("discovery", {}).get("qualityTier") != tier:
+                continue
+            symbol = str(item.get("symbol", "")).upper()
+            if not symbol or symbol in existing:
+                continue
+            selected.append(item)
+            existing.add(symbol)
+            bucket_count += 1
+
+    add_from_bucket(domestic, SIGNAL_DOMESTIC_CANDIDATE_LIMIT, "primary")
+    add_from_bucket(overseas, SIGNAL_OVERSEAS_CANDIDATE_LIMIT, "primary")
+    add_from_bucket(domestic, SIGNAL_DOMESTIC_CANDIDATE_LIMIT, "reserve")
+    add_from_bucket(overseas, SIGNAL_OVERSEAS_CANDIDATE_LIMIT, "reserve")
+
     seen = {str(item.get("symbol", "")).upper() for item in selected}
-    for item in discovered:
+    for item in selectable:
         if len(selected) >= SIGNAL_AUTO_CANDIDATE_LIMIT:
             break
         symbol = str(item.get("symbol", "")).upper()
@@ -4079,17 +4174,33 @@ def balanced_candidate_selection(discovered: list[dict]) -> tuple[list[dict], di
             continue
         selected.append(item)
         seen.add(symbol)
+
+    fallback_selected = 0
+    if not selected and quality_candidates:
+        selected = quality_candidates[: min(SIGNAL_AUTO_CANDIDATE_LIMIT, 6)]
+        fallback_selected = len(selected)
+
     selected.sort(
-        key=lambda item: (
-            bounded_int(item.get("discovery", {}).get("score", 0)),
-            score_candidate(item),
-        ),
+        key=discovery_selection_sort_key,
         reverse=True,
     )
     final_selected = selected[:SIGNAL_AUTO_CANDIDATE_LIMIT]
+    selected_tiers = {
+        "primary": len([item for item in final_selected if item.get("discovery", {}).get("qualityTier") == "primary"]),
+        "reserve": len([item for item in final_selected if item.get("discovery", {}).get("qualityTier") == "reserve"]),
+        "rejected": len([item for item in final_selected if item.get("discovery", {}).get("qualityTier") == "rejected"]),
+    }
     return final_selected, {
-        "domesticScanned": len(domestic),
-        "overseasScanned": len(overseas),
+        "domesticScanned": len([item for item in quality_candidates if candidate_bucket(item) == "domestic"]),
+        "overseasScanned": len([item for item in quality_candidates if candidate_bucket(item) == "overseas"]),
+        "qualityPrimaryCount": quality_counts.get("primary", 0),
+        "qualityReserveCount": quality_counts.get("reserve", 0),
+        "qualityRejectedCount": quality_counts.get("rejected", 0),
+        "qualitySelectedPrimary": selected_tiers["primary"],
+        "qualitySelectedReserve": selected_tiers["reserve"],
+        "qualityFallbackCount": fallback_selected,
+        "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
+        "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
         "domesticSelected": len([item for item in final_selected if candidate_bucket(item) == "domestic"]),
         "overseasSelected": len([item for item in final_selected if candidate_bucket(item) == "overseas"]),
         "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
@@ -4143,7 +4254,7 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         ),
         reverse=True,
     )
-    selected, balance_status = balanced_candidate_selection(discovered) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
+    selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
     source = (
         "auto-news"
         if any(
@@ -4153,10 +4264,19 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         )
         else "auto-universe"
     )
+    quality_selected = bounded_int(balance_status.get("qualitySelectedPrimary", 0), 0, 1_000) + bounded_int(
+        balance_status.get("qualitySelectedReserve", 0),
+        0,
+        1_000,
+    )
     status = {
         "source": source,
         "enabled": True,
-        "message": "뉴스와 유니버스 점수로 오늘 후보를 자동 생성했습니다." if source == "auto-news" else "유니버스 기본 점수로 오늘 후보를 구성했습니다.",
+        "message": (
+            f"품질 기준을 통과한 후보 {quality_selected}개를 우선 선정했습니다."
+            if quality_selected
+            else ("뉴스와 유니버스 점수로 오늘 후보를 자동 생성했습니다." if source == "auto-news" else "유니버스 기본 점수로 오늘 후보를 구성했습니다.")
+        ),
         "universeCount": len(entries),
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
@@ -4431,6 +4551,12 @@ def build_dashboard_payload(context: dict) -> dict:
             "overseasSelected": discovery_status.get("overseasSelected"),
             "domesticLimit": discovery_status.get("domesticLimit"),
             "overseasLimit": discovery_status.get("overseasLimit"),
+            "qualityPrimaryCount": discovery_status.get("qualityPrimaryCount"),
+            "qualityReserveCount": discovery_status.get("qualityReserveCount"),
+            "qualityRejectedCount": discovery_status.get("qualityRejectedCount"),
+            "qualitySelectedPrimary": discovery_status.get("qualitySelectedPrimary"),
+            "qualitySelectedReserve": discovery_status.get("qualitySelectedReserve"),
+            "qualityFallbackCount": discovery_status.get("qualityFallbackCount"),
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
             "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
