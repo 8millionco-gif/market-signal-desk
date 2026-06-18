@@ -507,9 +507,12 @@ function isActionCandidate(item) {
   const plan = tradePlan(item);
   const score = Number(item?.totalScore ?? 0);
   const readiness = Number(item?.triggerReadiness ?? 0);
+  const risk = Number(item?.score?.riskPenalty ?? 0);
+  const heat = Number(item?.score?.heatPenalty ?? 0);
   if (plan.tone === "risk") return false;
-  if (group.key === "action") return true;
-  return plan.tone === "buy" || score >= 75 || readiness >= 72;
+  if (!plan.hasPrice || plan.tone !== "buy") return false;
+  if (group.key === "action" && risk < 18 && heat < 10) return true;
+  return score >= 78 && readiness >= 74 && risk < 18 && heat < 10;
 }
 
 function actionPriority(item) {
@@ -562,7 +565,7 @@ function candidateActionSummary(candidates = []) {
   return candidates.reduce(
     (summary, item) => {
       const plan = tradePlan(item);
-      if (plan.tone === "buy") summary.buy += 1;
+      if (isActionCandidate(item)) summary.buy += 1;
       else if (plan.tone === "risk") summary.exclude += 1;
       else summary.wait += 1;
       return summary;
@@ -1182,7 +1185,17 @@ function renderMetrics() {
     const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
     const domestic = summary.domesticSelected ?? discovery.domesticSelected;
     const overseas = summary.overseasSelected ?? discovery.overseasSelected;
-    const splitText = domestic || overseas ? ` · 국내 ${domestic ?? 0} · 해외 ${overseas ?? 0}` : "";
+    const target = summary.targetCandidateCount ?? discovery.targetCandidateCount;
+    const domesticShortfall = Number(summary.domesticShortfall ?? discovery.domesticShortfall ?? 0);
+    const overseasShortfall = Number(summary.overseasShortfall ?? discovery.overseasShortfall ?? 0);
+    const shortfallText =
+      domesticShortfall || overseasShortfall
+        ? ` · 부족 국내 ${domesticShortfall} · 해외 ${overseasShortfall}`
+        : "";
+    const splitText =
+      domestic || overseas
+        ? ` · 목표 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}${shortfallText}`
+        : "";
     const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
     const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
     const opportunityText = hiddenOpportunityCount ? ` · 기회 ${hiddenOpportunityCount} · 평균 ${averageOpportunityScore}/18` : "";
@@ -1193,10 +1206,11 @@ function renderMetrics() {
         : "";
     const qualityPrimary = summary.qualitySelectedPrimary ?? discovery.qualitySelectedPrimary;
     const qualityReserve = summary.qualitySelectedReserve ?? discovery.qualitySelectedReserve;
+    const qualityFallback = summary.qualitySelectedFallback ?? discovery.qualitySelectedFallback;
     const qualityRejected = summary.qualityRejectedCount ?? discovery.qualityRejectedCount;
     const qualityText =
-      qualityPrimary != null || qualityReserve != null || qualityRejected != null
-        ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0} · 제외 ${qualityRejected ?? 0}`
+      qualityPrimary != null || qualityReserve != null || qualityFallback != null || qualityRejected != null
+        ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
     const detail = scanned
       ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
