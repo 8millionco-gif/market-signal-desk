@@ -567,6 +567,29 @@ function signalValidationForDisplay(item) {
   };
 }
 
+function candidatePoolStateForDisplay(item) {
+  const pool = item?.candidatePool ?? {};
+  const fallbackByCompression = {
+    core: ["entry_candidate", "진입 후보"],
+    review: ["validating", "검증중"],
+    wait: ["watching", "관찰중"],
+    portfolio: ["portfolio", "보유 판단"],
+    exclude: ["excluded", "제외"]
+  };
+  const compression = compressionForDisplay(item);
+  const [fallbackKey, fallbackLabel] = fallbackByCompression[compression.tier] ?? ["collected", "수집됨"];
+  return {
+    key: pool.stateKey || fallbackKey,
+    label: pool.stateLabel || fallbackLabel,
+    reason: pool.stateReason || compression.reason || "봇이 후보 풀에서 계속 관찰합니다.",
+    observations: Number(pool.observations ?? 0),
+    selectedCount: Number(pool.selectedCount ?? 0),
+    firstSeenAt: pool.firstSeenAt || "",
+    lastSeenAt: pool.lastSeenAt || "",
+    lastSelectedAt: pool.lastSelectedAt || ""
+  };
+}
+
 function isActionCandidate(item) {
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return true;
@@ -1372,6 +1395,13 @@ function renderMetrics() {
       confirmedSignals || evidenceWaitSignals || reactionOnlySignals || blockedSignals
         ? ` · 검증 확인 ${confirmedSignals} · 반응대기 ${evidenceWaitSignals} · 가격선행 ${reactionOnlySignals} · 차단 ${blockedSignals}`
         : "";
+    const poolCounts = summary.candidatePoolStatusCounts ?? {};
+    const poolTotal = Number(summary.candidatePoolCount ?? 0);
+    const poolActive = Number(summary.candidatePoolActiveCount ?? 0);
+    const poolText =
+      poolTotal || poolActive
+        ? ` · 후보풀 ${poolActive}/${poolTotal} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0}`
+        : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
@@ -1395,7 +1425,7 @@ function renderMetrics() {
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2564,6 +2594,7 @@ function renderFeed() {
       const plan = tradePlan(item);
       const group = decisionGroupForDisplay(item);
       const compression = compressionForDisplay(item);
+      const poolState = candidatePoolStateForDisplay(item);
       const validation = signalValidationForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       const qualityLabel = discoveryQualityLabel(item);
@@ -2590,6 +2621,7 @@ function renderFeed() {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
+              <span class="feed-badge pool-state-badge pool-${escapeHtml(poolState.key)}">${escapeHtml(poolState.label)}</span>
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${evidence.label ? `<span class="feed-badge evidence-badge evidence-${escapeHtml(evidence.grade || "weak")}">${escapeHtml(evidence.label)} ${escapeHtml(evidence.score)}</span>` : ""}
@@ -2926,6 +2958,7 @@ function renderDetail() {
     <div class="detail-grid">
       ${tradePlanSection(item)}
       ${decisionGroupSection(item)}
+      ${candidatePoolSection(item)}
       ${signalValidationSection(item)}
       ${discoveryEvidenceSection(item)}
       ${hiddenOpportunitySection(item)}
@@ -3390,6 +3423,32 @@ function decisionGroupSection(item) {
             ? `<li>${escapeHtml(serverGroup.reason)}</li>`
             : ""
         }
+      </ul>
+    </section>
+  `;
+}
+
+function candidatePoolSection(item) {
+  const pool = candidatePoolStateForDisplay(item);
+  const rows = [
+    ["상태", pool.label],
+    ["관측 횟수", pool.observations ? `${pool.observations}회` : "-"],
+    ["선정 횟수", pool.selectedCount ? `${pool.selectedCount}회` : "-"],
+    ["최근 관측", timeLabel(pool.lastSeenAt)],
+    ["첫 수집", timeLabel(pool.firstSeenAt)],
+    ["최근 선정", pool.lastSelectedAt ? timeLabel(pool.lastSelectedAt) : "-"]
+  ];
+  return `
+    <section class="detail-section">
+      <div class="section-title">
+        <p class="eyebrow">후보 풀</p>
+        <h2>${escapeHtml(pool.label)}</h2>
+      </div>
+      <div class="stat-grid">
+        ${rows.map(([label, value]) => statCard(label, value)).join("")}
+      </div>
+      <ul class="bullet-list">
+        <li>${escapeHtml(pool.reason)}</li>
       </ul>
     </section>
   `;

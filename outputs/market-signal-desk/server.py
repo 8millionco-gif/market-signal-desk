@@ -32,6 +32,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
 DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
+CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
@@ -157,6 +158,9 @@ SIGNAL_DISCOVERY_QUALITY_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALITY_MIN
 SIGNAL_DISCOVERY_RESERVE_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_RESERVE_MIN_SCORE", "42"))
 SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE", "68"))
 SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE", "52"))
+SIGNAL_CANDIDATE_POOL_ENABLED = os.getenv("SIGNAL_CANDIDATE_POOL_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_CANDIDATE_POOL_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS", "500"))
+SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -190,6 +194,7 @@ GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
+CANDIDATE_POOL_LOCK = threading.Lock()
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
     "running": False,
@@ -4266,6 +4271,251 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
     }
 
 
+CANDIDATE_POOL_STATES = {
+    "collected": {"label": "수집됨", "rank": 10},
+    "watching": {"label": "관찰중", "rank": 20},
+    "validating": {"label": "검증중", "rank": 30},
+    "entry_candidate": {"label": "진입 후보", "rank": 40},
+    "pullback_wait": {"label": "눌림 대기", "rank": 35},
+    "portfolio": {"label": "보유 판단", "rank": 34},
+    "excluded": {"label": "제외", "rank": 5},
+    "expired": {"label": "만료", "rank": 0},
+}
+
+
+def candidate_pool_empty() -> dict:
+    return {
+        "version": 1,
+        "updatedAt": "",
+        "items": {},
+    }
+
+
+def candidate_pool_data() -> dict:
+    data = read_json(CANDIDATE_POOL_FILE, candidate_pool_empty())
+    if not isinstance(data, dict):
+        return candidate_pool_empty()
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    return data
+
+
+def candidate_pool_state(candidate: dict, stage: str = "selected") -> tuple[str, str]:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
+    quality = discovery.get("qualityProfile", {}) if isinstance(discovery.get("qualityProfile"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+
+    action_key = str(final_decision.get("actionKey", ""))
+    compression_tier = str(compression.get("tier", ""))
+    validation_key = str(validation.get("key", ""))
+    evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
+    quality_tier = str(discovery.get("qualityTier", quality.get("tier", "")))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+
+    if official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or compression_tier == "exclude" or risk >= 24:
+        return "excluded", "리스크 또는 제외 판단으로 신규 진입 대상에서 제외"
+    if candidate_is_portfolio_linked(candidate):
+        return "portfolio", "보유 자산과 연결되어 추가매수·보유·매도 판단 대상"
+    if compression_tier == "core" or (action_key in {"buy", "add"} and validation_key == "confirmed"):
+        return "entry_candidate", "근거와 가격 반응이 확인되어 오늘 판단 후보로 승격"
+    if action_key == "pullback":
+        return "pullback_wait", "재료는 있으나 가격이 이미 반응해 눌림 구간 대기"
+    if validation_key in {"evidence_wait", "reaction_only"}:
+        return "validating", "재료와 가격 반응 중 하나가 부족해 검증 중"
+    if action_key in {"watch", "verify"} or compression_tier in {"review", "wait"}:
+        return "watching", "조건은 감지됐지만 진입 전 추가 확인 필요"
+    if stage == "discovered" and (quality_tier in {"primary", "reserve"} or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE):
+        return "watching", "수집 단계에서 의미 있는 근거가 감지되어 관찰 풀에 유지"
+    return "collected", "봇이 발견했지만 아직 투자 판단 근거는 부족"
+
+
+def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str, now: datetime) -> tuple[dict, bool]:
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    previous_state = str(existing.get("stateKey", ""))
+    state_key, state_reason = candidate_pool_state(candidate, stage)
+    now_text = now.isoformat(timespec="seconds")
+
+    record = dict(existing)
+    record.update({
+        "symbol": symbol,
+        "name": candidate.get("name", existing.get("name", symbol)),
+        "market": candidate.get("market", existing.get("market", "")),
+        "category": candidate.get("category", existing.get("category", "")),
+        "headline": candidate.get("headline", existing.get("headline", "")),
+        "price": candidate.get("price", existing.get("price", "-")),
+        "change": candidate.get("change", existing.get("change", "-")),
+        "stateKey": state_key,
+        "stateLabel": CANDIDATE_POOL_STATES.get(state_key, {}).get("label", state_key),
+        "stateReason": state_reason,
+        "lastMode": mode,
+        "lastStage": stage,
+        "lastSeenAt": now_text,
+        "observations": bounded_int(existing.get("observations", 0), 0, 100_000) + 1,
+        "totalScore": bounded_int(candidate.get("totalScore", existing.get("totalScore", 0)), 0, 100),
+        "triggerReadiness": bounded_int(candidate.get("triggerReadiness", existing.get("triggerReadiness", 0)), 0, 100),
+        "confidenceScore": bounded_int(confidence.get("score", existing.get("confidenceScore", 0)), 0, 100),
+        "reactionScore": bounded_int(reaction.get("score", existing.get("reactionScore", 0)), 0, 100),
+        "evidenceScore": bounded_int(evidence.get("score", discovery.get("evidenceScore", existing.get("evidenceScore", 0))), 0, 100),
+        "evidenceGrade": evidence.get("grade", discovery.get("evidenceGrade", existing.get("evidenceGrade", ""))),
+        "validationKey": validation.get("key", existing.get("validationKey", "")),
+        "validationLabel": validation.get("label", existing.get("validationLabel", "")),
+        "compressionTier": compression.get("tier", existing.get("compressionTier", "")),
+        "compressionLabel": compression.get("label", existing.get("compressionLabel", "")),
+        "finalActionKey": final_decision.get("actionKey", existing.get("finalActionKey", "")),
+        "finalAction": final_decision.get("action", existing.get("finalAction", "")),
+        "newsItems": bounded_int(discovery.get("newsItems", existing.get("newsItems", 0)), 0, 100_000),
+        "materialNewsItems": bounded_int(discovery.get("materialNewsItems", existing.get("materialNewsItems", 0)), 0, 100_000),
+        "qualityTier": discovery.get("qualityTier", existing.get("qualityTier", "")),
+        "updatedAt": now_text,
+    })
+    if not record.get("firstSeenAt"):
+        record["firstSeenAt"] = now_text
+    if stage == "selected":
+        record["lastSelectedAt"] = now_text
+        record["selectedCount"] = bounded_int(existing.get("selectedCount", 0), 0, 100_000) + 1
+
+    promoted = previous_state not in {"entry_candidate", "portfolio"} and state_key in {"entry_candidate", "portfolio"}
+    return record, promoted
+
+
+def expire_candidate_pool_items(items: dict, now: datetime) -> int:
+    if SIGNAL_CANDIDATE_POOL_TTL_DAYS <= 0:
+        return 0
+    expired = 0
+    threshold = now - timedelta(days=SIGNAL_CANDIDATE_POOL_TTL_DAYS)
+    for record in items.values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("stateKey") == "expired":
+            continue
+        last_seen = parse_iso_datetime(str(record.get("lastSeenAt", "")))
+        if last_seen and last_seen.astimezone(KST) < threshold:
+            record["stateKey"] = "expired"
+            record["stateLabel"] = CANDIDATE_POOL_STATES["expired"]["label"]
+            record["stateReason"] = f"{SIGNAL_CANDIDATE_POOL_TTL_DAYS}일 동안 새 근거가 없어 만료"
+            record["updatedAt"] = now.isoformat(timespec="seconds")
+            expired += 1
+    return expired
+
+
+def trim_candidate_pool_items(items: dict) -> int:
+    if SIGNAL_CANDIDATE_POOL_MAX_ITEMS <= 0 or len(items) <= SIGNAL_CANDIDATE_POOL_MAX_ITEMS:
+        return 0
+    ranked = sorted(
+        items.items(),
+        key=lambda pair: (
+            CANDIDATE_POOL_STATES.get(str(pair[1].get("stateKey", "")), {}).get("rank", 0),
+            bounded_int(pair[1].get("totalScore", 0), 0, 100),
+            str(pair[1].get("lastSeenAt", "")),
+        ),
+        reverse=True,
+    )
+    keep = {symbol for symbol, _record in ranked[:SIGNAL_CANDIDATE_POOL_MAX_ITEMS]}
+    removed = 0
+    for symbol in list(items.keys()):
+        if symbol not in keep:
+            items.pop(symbol, None)
+            removed += 1
+    return removed
+
+
+def candidate_pool_summary(data: dict | None = None) -> dict:
+    payload = data if isinstance(data, dict) else candidate_pool_data()
+    items = payload.get("items", {}) if isinstance(payload.get("items"), dict) else {}
+    counts: dict[str, int] = {key: 0 for key in CANDIDATE_POOL_STATES}
+    active_count = 0
+    for record in items.values():
+        if not isinstance(record, dict):
+            continue
+        key = str(record.get("stateKey", "collected"))
+        counts[key] = counts.get(key, 0) + 1
+        if key not in {"excluded", "expired"}:
+            active_count += 1
+    return {
+        "enabled": SIGNAL_CANDIDATE_POOL_ENABLED,
+        "file": display_local_path(CANDIDATE_POOL_FILE),
+        "totalCount": len(items),
+        "activeCount": active_count,
+        "statusCounts": counts,
+        "updatedAt": payload.get("updatedAt", ""),
+        "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
+        "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
+    }
+
+
+def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "selected") -> dict:
+    if not SIGNAL_CANDIDATE_POOL_ENABLED:
+        return {
+            "enabled": False,
+            "message": "후보 풀 저장이 꺼져 있습니다.",
+            "totalCount": 0,
+            "activeCount": 0,
+            "statusCounts": {},
+        }
+    now = datetime.now(KST)
+    with CANDIDATE_POOL_LOCK:
+        data = candidate_pool_data()
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        new_count = 0
+        updated_count = 0
+        promoted_count = 0
+        for candidate in candidates:
+            symbol = str(candidate.get("symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            existing = items.get(symbol, {}) if isinstance(items.get(symbol), dict) else {}
+            if not existing:
+                new_count += 1
+            else:
+                updated_count += 1
+            items[symbol], promoted = candidate_pool_record(candidate, existing, mode, stage, now)
+            candidate["candidatePool"] = {
+                key: items[symbol].get(key)
+                for key in [
+                    "stateKey",
+                    "stateLabel",
+                    "stateReason",
+                    "firstSeenAt",
+                    "lastSeenAt",
+                    "lastSelectedAt",
+                    "observations",
+                    "selectedCount",
+                ]
+                if key in items[symbol]
+            }
+            if promoted:
+                promoted_count += 1
+        expired_count = expire_candidate_pool_items(items, now)
+        removed_count = trim_candidate_pool_items(items)
+        data["items"] = items
+        data["updatedAt"] = now.isoformat(timespec="seconds")
+        write_json(CANDIDATE_POOL_FILE, data)
+        summary = candidate_pool_summary(data)
+    summary.update({
+        "stage": stage,
+        "mode": mode,
+        "newCount": new_count,
+        "updatedCount": updated_count,
+        "promotedCount": promoted_count,
+        "expiredCount": expired_count,
+        "removedCount": removed_count,
+        "message": f"후보 풀 {summary['totalCount']}개 중 {summary['activeCount']}개를 계속 관찰합니다.",
+    })
+    return summary
+
+
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
@@ -5877,7 +6127,7 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
     }
 
 
-def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]:
+def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[list[dict], dict]:
     seed_candidates = data.get("candidates", [])
     if not SIGNAL_AUTO_CANDIDATES_ENABLED:
         return seed_candidates, {
@@ -5923,6 +6173,7 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         ),
         reverse=True,
     )
+    pool_scan_status = update_candidate_pool(discovered, mode=mode, stage="discovered") if discovered else {}
     selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
     source = (
         "auto-news"
@@ -5955,6 +6206,12 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         "materialNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1_000) for item in discovered),
         "selectedMaterialNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1_000) for item in selected),
         "filteredNewsCount": sum(bounded_int(item.get("discovery", {}).get("filteredNewsItems", 0), 0, 1_000) for item in discovered),
+        "candidatePool": pool_scan_status,
+        "candidatePoolCount": pool_scan_status.get("totalCount"),
+        "candidatePoolActiveCount": pool_scan_status.get("activeCount"),
+        "candidatePoolStatusCounts": pool_scan_status.get("statusCounts", {}),
+        "candidatePoolNewCount": pool_scan_status.get("newCount"),
+        "candidatePoolPromotedCount": pool_scan_status.get("promotedCount"),
         "errorCount": len(errors),
         "errors": errors[:3],
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -6033,6 +6290,7 @@ def dashboard_status_defaults() -> dict:
             "enabled": True,
             "message": "기본 후보 점수를 사용합니다.",
         },
+        "candidate_pool": candidate_pool_summary(),
     }
 
 
@@ -6055,7 +6313,7 @@ def collect_signal_inputs(mode: str) -> dict:
     market, fx_status = enrich_market_with_fx(market)
     watched = set(watchlist())
     portfolio = safe_portfolio_status()
-    raw_candidates, discovery_status = initial_candidates(data, watched)
+    raw_candidates, discovery_status = initial_candidates(data, watched, mode)
     candidates = [decorate_candidate(item, watched) for item in raw_candidates]
     defaults = dashboard_status_defaults()
     return {
@@ -6078,6 +6336,7 @@ def collect_signal_inputs(mode: str) -> dict:
                 "linkedCandidateCount": 0,
             },
             "discovery": discovery_status,
+            "candidate_pool": discovery_status.get("candidatePool") or defaults.get("candidate_pool", {}),
         },
         "pipeline": [
             pipeline_step(
@@ -6176,6 +6435,11 @@ def score_signal_context(context: dict) -> dict:
         context["market"],
         context["watched"],
     )
+    context["statuses"]["candidate_pool"] = update_candidate_pool(
+        context["candidates"],
+        mode=context["mode"],
+        stage="selected",
+    )
     context["pipeline"].append(
         pipeline_step(
             "scorer",
@@ -6183,6 +6447,15 @@ def score_signal_context(context: dict) -> dict:
             "ok",
             context["statuses"]["selection"].get("message", "후보 점수를 재계산했습니다."),
             len(context["candidates"]),
+        )
+    )
+    context["pipeline"].append(
+        pipeline_step(
+            "pool",
+            "후보 풀 갱신",
+            "ok" if context["statuses"]["candidate_pool"].get("enabled", False) else "fallback",
+            context["statuses"]["candidate_pool"].get("message", "후보 풀 상태를 갱신했습니다."),
+            context["statuses"]["candidate_pool"].get("activeCount", 0),
         )
     )
     return context
@@ -6261,6 +6534,7 @@ def build_dashboard_payload(context: dict) -> dict:
     candidates = context["candidates"]
     discovery_status = context["statuses"]["discovery"]
     selection_status = context["statuses"]["selection"]
+    pool_status = context["statuses"].get("candidate_pool", candidate_pool_summary())
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         "mode": context["mode"],
@@ -6314,6 +6588,13 @@ def build_dashboard_payload(context: dict) -> dict:
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
             "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
             "signalValidationCounts": selection_status.get("signalValidationCounts", {}),
+            "candidatePoolCount": pool_status.get("totalCount"),
+            "candidatePoolActiveCount": pool_status.get("activeCount"),
+            "candidatePoolStatusCounts": pool_status.get("statusCounts", {}),
+            "candidatePoolNewCount": pool_status.get("newCount"),
+            "candidatePoolUpdatedCount": pool_status.get("updatedCount"),
+            "candidatePoolPromotedCount": pool_status.get("promotedCount"),
+            "candidatePoolExpiredCount": pool_status.get("expiredCount"),
             "confirmedSignalCount": selection_status.get("confirmedSignalCount"),
             "evidenceWaitSignalCount": selection_status.get("evidenceWaitSignalCount"),
             "reactionOnlySignalCount": selection_status.get("reactionOnlySignalCount"),
@@ -6348,6 +6629,7 @@ def build_dashboard_payload(context: dict) -> dict:
             "pipeline": context["pipeline"],
             "discovery": discovery_status,
             "selection": selection_status,
+            "candidatePool": pool_status,
             "portfolio": context["statuses"].get("portfolio", {}),
             "toss": {
                 "config": toss_config_status(),
@@ -6507,6 +6789,7 @@ def dashboard_summary(payload: dict) -> dict:
             "finalDecision": item.get("finalDecision", {}).get("action", "") if isinstance(item.get("finalDecision"), dict) else "",
             "compression": item.get("candidateCompression", {}).get("label", "") if isinstance(item.get("candidateCompression"), dict) else "",
             "validation": item.get("signalValidation", {}).get("label", "") if isinstance(item.get("signalValidation"), dict) else "",
+            "poolState": item.get("candidatePool", {}).get("stateLabel", "") if isinstance(item.get("candidatePool"), dict) else "",
             "evidence": item.get("discovery", {}).get("evidenceLabel", "") if isinstance(item.get("discovery"), dict) else "",
         })
     summary = payload.get("summary", {})
@@ -6535,6 +6818,11 @@ def dashboard_summary(payload: dict) -> dict:
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
         "candidateCompressionCounts": summary.get("candidateCompressionCounts", {}),
         "signalValidationCounts": summary.get("signalValidationCounts", {}),
+        "candidatePoolCount": summary.get("candidatePoolCount"),
+        "candidatePoolActiveCount": summary.get("candidatePoolActiveCount"),
+        "candidatePoolStatusCounts": summary.get("candidatePoolStatusCounts", {}),
+        "candidatePoolNewCount": summary.get("candidatePoolNewCount"),
+        "candidatePoolPromotedCount": summary.get("candidatePoolPromotedCount"),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
@@ -6586,6 +6874,7 @@ def discovery_bot_config_status() -> dict:
         "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
         "mode": discovery_bot_mode(),
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
+        "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
 
 
@@ -7397,6 +7686,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not-found", "message": "아직 저장된 발굴 결과가 없습니다."}, 404)
                 return
             self.send_json(latest)
+            return
+
+        if parsed.path == "/api/candidate-pool/status":
+            self.send_json(candidate_pool_summary())
             return
 
         if parsed.path == "/api/storage/status":

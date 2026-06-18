@@ -673,6 +673,39 @@ h3 {
   background: rgba(255, 100, 115, 0.1);
 }
 
+.feed-title .pool-entry_candidate {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.44);
+  background: rgba(123, 216, 143, 0.16);
+}
+
+.feed-title .pool-validating,
+.feed-title .pool-pullback_wait {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.34);
+  background: rgba(244, 201, 93, 0.11);
+}
+
+.feed-title .pool-watching,
+.feed-title .pool-collected {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.34);
+  background: rgba(105, 210, 231, 0.1);
+}
+
+.feed-title .pool-portfolio {
+  color: #d7ecff;
+  border-color: rgba(108, 166, 255, 0.34);
+  background: rgba(108, 166, 255, 0.12);
+}
+
+.feed-title .pool-excluded,
+.feed-title .pool-expired {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
+}
+
 .feed-title .evidence-badge {
   color: var(--soft);
   border-color: rgba(180, 193, 216, 0.24);
