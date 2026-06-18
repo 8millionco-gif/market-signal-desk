@@ -3182,6 +3182,219 @@ def stock_search(query: str, limit: int = 8) -> dict:
     }
 
 
+def candidate_market_from_search_item(item: dict) -> str:
+    if item.get("category") == "overseas":
+        return "US"
+    market = str(item.get("market", "")).upper()
+    currency = str(item.get("currency", "")).upper()
+    if currency == "USD" or market in {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}:
+        return "US"
+    return "KR"
+
+
+def candidate_from_stock_search_item(item: dict) -> dict:
+    symbol = str(item.get("symbol", "")).strip().upper()
+    name = str(item.get("name") or symbol).strip()
+    tags = unique_texts(
+        [
+            "종목 검색",
+            str(item.get("market", "")),
+            str(item.get("securityType", "")),
+            str(item.get("currency", "")),
+            str(item.get("status", "")),
+        ],
+        limit=5,
+    )
+    return {
+        "symbol": symbol,
+        "name": name,
+        "englishName": item.get("englishName", ""),
+        "market": candidate_market_from_search_item(item),
+        "category": item.get("category", "domestic"),
+        "price": item.get("price") or "-",
+        "change": item.get("change") or "",
+        "updated": "검색 분석",
+        "headline": f"{name} 검색 종목 분석",
+        "verdict": "분석 대기",
+        "stage": "lookup-analysis",
+        "preopenPriority": 0,
+        "triggerReadiness": 0,
+        "score": {
+            "event": 8,
+            "news": 4,
+            "volume": 4,
+            "price": 6,
+            "market": 5,
+            "attention": 4,
+            "riskPenalty": 6,
+            "heatPenalty": 2,
+        },
+        "tags": tags or ["종목 검색"],
+        "thesis": "후보 목록 밖에서 직접 검색한 종목입니다. 최신 뉴스, 공시, 가격 반응을 연결해 관찰 가능성을 점검합니다.",
+        "why": [
+            f"{name} 기본정보를 조회했습니다.",
+            "검색 종목은 후보 편입 전 가격, 뉴스, 공시 근거를 먼저 확인합니다.",
+        ],
+        "entryConditions": [
+            "뉴스와 공시 재료가 최근 가격 반응과 같은 방향인지 확인",
+            "거래대금과 섹터 흐름이 후보 기준을 충족하는지 확인",
+            "손절 기준이 진입가에서 3% 안쪽으로 관리되는 가격대인지 확인",
+        ],
+        "noEntry": [
+            "뉴스만 있고 실제 수급 반응이 확인되지 않은 경우",
+            "현재가나 거래량 데이터가 연결되지 않은 상태",
+            "공시 리스크가 가격 반응보다 큰 경우",
+        ],
+        "stopRules": [
+            "후보 편입 후 기준 가격 재이탈",
+            "섹터 동반 약세 전환",
+            "거래량 없는 상승만 이어지는 경우",
+        ],
+        "trend": {
+            "newsCount": 0,
+            "globalNewsCount": None,
+            "newsSpike": "-",
+            "volumeSpike": "-",
+            "dailyVolume": "-",
+            "tradePressure": "-",
+            "orderbookPressure": "-",
+            "spread": "-",
+            "sentiment": "-",
+        },
+        "sources": [
+            {
+                "title": item.get("sourceLabel") or "종목 기본정보 조회",
+                "publisher": "Toss Open API" if item.get("source") == "toss" else "후보 목록",
+                "time": item.get("updated") or "검색",
+            }
+        ],
+        "disclosures": [
+            "직접 조회 종목은 후보 편입 전 검증 단계입니다.",
+            "가격 행동 구간은 수집된 현재가 기준으로 계산됩니다.",
+        ],
+        "related": [],
+        "chart": [50, 50, 50, 50, 50, 50],
+        "livePrice": item.get("livePrice") or {"source": "lookup", "message": "종목 검색 결과입니다."},
+        "liveCandles": {"source": "lookup"},
+        "lookupOnly": False,
+        "candidateSource": "search-analysis",
+    }
+
+
+def lookup_candidate_for_symbol(symbol: str, watched: set[str]) -> tuple[dict, dict]:
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise ValueError("분석할 종목 코드가 필요합니다.")
+
+    seed_lookup = seed_candidate_by_symbol()
+    if symbol in seed_lookup:
+        candidate = copy.deepcopy(seed_lookup[symbol])
+        candidate["candidateSource"] = "search-candidate"
+        return decorate_candidate(candidate, watched), {
+            "source": "candidate",
+            "message": "오늘 후보에 있는 종목을 분석합니다.",
+        }
+
+    universe_match = next(
+        (
+            entry
+            for entry in candidate_universe_entries()
+            if str(entry.get("symbol", "")).strip().upper() == symbol
+        ),
+        None,
+    )
+    if universe_match:
+        candidate = default_candidate_for_entry(universe_match, [], {"source": "lookup", "total": 0})
+        candidate["candidateSource"] = "search-universe"
+        candidate["updated"] = "검색 분석"
+        return decorate_candidate(candidate, watched), {
+            "source": "universe",
+            "message": "감시 유니버스에 있는 종목을 분석합니다.",
+        }
+
+    search_payload = stock_search(symbol, limit=8)
+    items = search_payload.get("items", []) if isinstance(search_payload, dict) else []
+    exact = next(
+        (item for item in items if str(item.get("symbol", "")).strip().upper() == symbol),
+        items[0] if items else None,
+    )
+    if not exact:
+        raise ValueError("검색 종목을 찾지 못했습니다.")
+    candidate = candidate_from_stock_search_item(exact)
+    return decorate_candidate(candidate, watched), {
+        "source": exact.get("source", "lookup"),
+        "message": "후보 밖 검색 종목을 분석합니다.",
+        "searchStatus": search_payload.get("status", {}),
+    }
+
+
+def search_analysis_error_status(source: str, error: Exception, fallback_message: str) -> dict:
+    payload, _ = integration_error_payload(error)
+    return {
+        "source": source,
+        "enabled": True,
+        "error": payload.get("error", "unknown"),
+        "status": payload.get("status"),
+        "detail": payload.get("detail", ""),
+        "message": payload.get("message", fallback_message),
+    }
+
+
+def analyze_stock_lookup(symbol: str) -> dict:
+    watched = set(watchlist())
+    data = seed_data()
+    market, index_status = enrich_market_with_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_fx(market)
+    candidate, lookup_status = lookup_candidate_for_symbol(symbol, watched)
+    candidates = [candidate]
+
+    statuses: dict[str, dict] = {
+        "lookup": lookup_status,
+        "indices": index_status,
+        "fx": fx_status,
+    }
+
+    try:
+        candidates, statuses["prices"] = enrich_candidates_with_toss_prices(candidates)
+    except Exception as error:
+        statuses["prices"] = search_analysis_error_status("sample", error, "토스 현재가 반영에 실패했습니다.")
+    try:
+        candidates, statuses["candles"] = enrich_candidates_with_toss_candles(candidates)
+    except Exception as error:
+        statuses["candles"] = search_analysis_error_status("sample", error, "토스 일봉 반영에 실패했습니다.")
+    try:
+        candidates, statuses["disclosures"] = enrich_candidates_with_dart_disclosures(candidates)
+    except Exception as error:
+        statuses["disclosures"] = search_analysis_error_status("sample", error, "OpenDART 공시 반영에 실패했습니다.")
+    try:
+        candidates, statuses["naver"] = enrich_candidates_with_naver_news(candidates)
+    except Exception as error:
+        statuses["naver"] = search_analysis_error_status("sample", error, "네이버 뉴스 반영에 실패했습니다.")
+    try:
+        candidates, statuses["gdelt"] = enrich_candidates_with_gdelt_news(candidates)
+    except Exception as error:
+        statuses["gdelt"] = search_analysis_error_status("sample", error, "GDELT 글로벌 뉴스 반영에 실패했습니다.")
+
+    candidates, statuses["selection"] = apply_candidate_selection(candidates, market, watched)
+
+    try:
+        candidates, statuses["analysis"] = enrich_candidates_with_openai_analysis(candidates)
+    except Exception as error:
+        statuses["analysis"] = search_analysis_error_status("local", error, "OpenAI 분석에 실패해 로컬 분석을 사용합니다.")
+        candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
+
+    item = candidates[0]
+    item["lookupOnly"] = False
+    item["analysisMode"] = "search"
+    item["updated"] = "검색 분석"
+    return {
+        "symbol": item.get("symbol"),
+        "candidate": item,
+        "status": statuses,
+        "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
 def seed_candidate_by_symbol() -> dict[str, dict]:
     return {
         str(candidate.get("symbol", "")).strip().upper(): candidate
@@ -4321,6 +4534,16 @@ class AppHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", ["8"])[0])
             try:
                 self.send_json(stock_search(search_query, limit=limit))
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/stocks/analyze":
+            query = parse_qs(parsed.query)
+            symbol = query.get("symbol", [""])[0].strip()
+            try:
+                self.send_json(analyze_stock_lookup(symbol))
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)

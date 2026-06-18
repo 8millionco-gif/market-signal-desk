@@ -33,7 +33,8 @@ const state = {
     loading: false,
     items: [],
     message: "",
-    status: null
+    status: null,
+    analyzingSymbol: null
   },
   selectedLookup: null,
   searchTimer: null,
@@ -412,7 +413,9 @@ function selectedCandidate() {
   );
 }
 
-function candidateFromSearchResult(item) {
+function candidateFromSearchResult(item, options = {}) {
+  const analysisLoading = Boolean(options.analysisLoading);
+  const analysisError = options.analysisError || "";
   const tags = uniqueTexts([
     "종목 검색",
     item.market,
@@ -428,15 +431,17 @@ function candidateFromSearchResult(item) {
     price: item.price || "-",
     change: item.change || "",
     updated: item.updated || "직접 조회",
-    headline: item.headline || "후보 편입 전 종목 조회",
-    verdict: "후보 편입 전",
+    headline: analysisLoading ? "검색 종목 분석 중" : item.headline || "후보 편입 전 종목 조회",
+    verdict: analysisLoading ? "분석 중" : "후보 편입 전",
     stage: "lookup",
     totalScore: 0,
     triggerReadiness: 0,
     preopenPriority: 0,
     score: {},
     tags,
-    thesis: "오늘 후보로 점수화되기 전의 직접 조회 결과입니다. 뉴스, 공시, 가격 반응을 확인한 뒤 후보 편입 여부를 먼저 판단해야 합니다.",
+    thesis: analysisLoading
+      ? "현재가, 뉴스, 공시, 가격 반응을 연결해 후보 분석 형태로 변환하고 있습니다."
+      : analysisError || "오늘 후보로 점수화되기 전의 직접 조회 결과입니다. 뉴스, 공시, 가격 반응을 확인한 뒤 후보 편입 여부를 먼저 판단해야 합니다.",
     why: [
       `${item.name || item.symbol} 기본정보를 조회했습니다.`,
       item.price && item.price !== "-" ? `현재가 ${item.price} 기준으로 추가 분석을 시작할 수 있습니다.` : "현재가는 아직 연결되지 않았습니다.",
@@ -484,7 +489,9 @@ function candidateFromSearchResult(item) {
     livePrice: item.livePrice || { source: "lookup", message: "종목 검색 결과입니다." },
     liveCandles: { source: "lookup" },
     isWatched: Boolean(item.isWatched),
-    lookupOnly: true
+    lookupOnly: true,
+    analysisLoading,
+    analysisError
   };
 }
 
@@ -1759,7 +1766,7 @@ function stockSearchSubtitle(item) {
   return parts.join(" · ") || "종목 검색 결과";
 }
 
-function openSearchResult(symbol) {
+async function openSearchResult(symbol) {
   const item = (state.stockSearch.items ?? []).find((entry) => entry.symbol === symbol);
   if (!item) return;
   const candidate = (state.dashboard?.candidates ?? []).find((entry) => entry.symbol === symbol);
@@ -1769,9 +1776,33 @@ function openSearchResult(symbol) {
   if (candidate) {
     state.selectedLookup = null;
     state.selectedSymbol = candidate.symbol;
+    state.stockSearch = { ...state.stockSearch, analyzingSymbol: null };
+    renderFeed();
+    renderTradeDecisionStatus();
+    renderDetail();
+    return;
   } else {
-    state.selectedLookup = candidateFromSearchResult(item);
+    state.selectedLookup = candidateFromSearchResult(item, { analysisLoading: true });
     state.selectedSymbol = item.symbol;
+    state.stockSearch = { ...state.stockSearch, analyzingSymbol: item.symbol };
+  }
+  renderFeed();
+  renderTradeDecisionStatus();
+  renderDetail();
+
+  const payload = await safeFetchJson(
+    `/api/stocks/analyze?symbol=${encodeURIComponent(item.symbol)}`,
+    { candidate: null, message: "검색 종목 분석을 불러오지 못했습니다." },
+    45000
+  );
+  if (state.selectedSymbol !== item.symbol) return;
+  state.stockSearch = { ...state.stockSearch, analyzingSymbol: null };
+  if (payload?.candidate) {
+    state.selectedLookup = payload.candidate;
+  } else {
+    state.selectedLookup = candidateFromSearchResult(item, {
+      analysisError: payload?.message || "검색 종목 분석을 불러오지 못했습니다."
+    });
   }
   renderFeed();
   renderTradeDecisionStatus();
@@ -1811,7 +1842,9 @@ function renderStockSearchResults() {
                       <strong>${escapeHtml(item.name || item.symbol)}</strong>
                       <em>${escapeHtml(stockSearchSubtitle(item))}</em>
                     </span>
-                    <span>${escapeHtml(item.inCandidates ? "후보 열기" : "조회")}</span>
+                    <span>${escapeHtml(
+                      payload.analyzingSymbol === item.symbol ? "분석 중" : item.inCandidates ? "후보 열기" : "분석"
+                    )}</span>
                   </button>
                 `
               )
@@ -1835,7 +1868,8 @@ async function loadStockSearch() {
       loading: false,
       items: [],
       message: "",
-      status: null
+      status: null,
+      analyzingSymbol: null
     };
     renderStockSearchResults();
     return;
@@ -1860,7 +1894,8 @@ async function loadStockSearch() {
     loading: false,
     items: Array.isArray(payload.items) ? payload.items : [],
     message: payload.message || "",
-    status: payload.status || null
+    status: payload.status || null,
+    analyzingSymbol: state.stockSearch.analyzingSymbol
   };
   renderStockSearchResults();
 }
