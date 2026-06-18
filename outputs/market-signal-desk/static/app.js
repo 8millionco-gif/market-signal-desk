@@ -69,6 +69,7 @@ const els = {
   candidateCount: document.querySelector("#candidateCount"),
   candidateSource: document.querySelector("#candidateSource"),
   searchInput: document.querySelector("#searchInput"),
+  quickSearch: document.querySelector("#quickSearch"),
   stockSearchResults: document.querySelector("#stockSearchResults"),
   principles: document.querySelector("#principles"),
   kospiValue: document.querySelector("#kospiValue"),
@@ -105,6 +106,15 @@ els.activityBar = document.querySelector("#activityBar");
 els.activityTitle = document.querySelector("#activityTitle");
 els.activityDetail = document.querySelector("#activityDetail");
 els.activityFill = document.querySelector("#activityFill");
+
+const QUICK_SEARCH_PRESETS = [
+  { label: "삼성", query: "삼성" },
+  { label: "하이닉스", query: "하이닉스" },
+  { label: "방산", query: "방산" },
+  { label: "엔비디아", query: "엔비디아" },
+  { label: "AI", query: "AI" },
+  { label: "배당", query: "배당" }
+];
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -2252,9 +2262,98 @@ function renderPrinciples() {
   els.principles.innerHTML = principles.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
 }
 
+function applySearchQuery(query) {
+  state.query = String(query ?? "").trim();
+  if (els.searchInput) {
+    els.searchInput.value = state.query;
+  }
+  if (state.searchTimer) {
+    window.clearTimeout(state.searchTimer);
+    state.searchTimer = null;
+  }
+  renderFeed();
+  loadStockSearch();
+}
+
+function renderQuickSearch() {
+  if (!els.quickSearch) return;
+  const query = state.query.trim();
+  if (query) {
+    els.quickSearch.hidden = true;
+    els.quickSearch.innerHTML = "";
+    return;
+  }
+  const candidateTerms = (state.dashboard?.candidates ?? [])
+    .slice(0, 4)
+    .map((item) => ({
+      label: item.name || item.symbol,
+      query: item.name || item.symbol
+    }));
+  const items = uniqueTexts(
+    [...candidateTerms, ...QUICK_SEARCH_PRESETS].map((item) => `${item.label}|${item.query}`),
+    8
+  )
+    .map((value) => {
+      const [label, searchQuery] = value.split("|");
+      return { label, query: searchQuery || label };
+    })
+    .slice(0, 8);
+
+  els.quickSearch.hidden = false;
+  els.quickSearch.innerHTML = `
+    ${items
+      .map(
+        (item) => `
+          <button type="button" class="quick-search-chip" data-search-query="${escapeHtml(item.query)}">
+            ${escapeHtml(item.label)}
+          </button>
+        `
+      )
+      .join("")}
+  `;
+
+  els.quickSearch.querySelectorAll("[data-search-query]").forEach((button) => {
+    button.addEventListener("click", () => applySearchQuery(button.dataset.searchQuery));
+  });
+}
+
+function primaryPriceGuide(plan) {
+  const rows = plan?.rows ?? [];
+  if (plan?.tone === "buy") {
+    return rows.find(([label]) => label === "관찰 매수")?.[1] ?? "조건 충족 시 관찰";
+  }
+  if (plan?.tone === "sell") {
+    return rows.find(([label]) => label === "분할매도")?.[1] ?? "일부 이익 실현 점검";
+  }
+  if (plan?.tone === "risk") {
+    return "신규 진입 금지";
+  }
+  if (String(plan?.action ?? "").includes("눌림")) {
+    return rows.find(([label]) => label === "눌림 대기")?.[1] ?? "눌림 확인 대기";
+  }
+  if (String(plan?.action ?? "").includes("반등")) {
+    return rows.find(([label]) => label === "반등 확인")?.[1] ?? "반등 확인 대기";
+  }
+  return rows.find(([label]) => label === "관찰 매수")?.[1] ?? plan?.summary ?? "가격대 확인";
+}
+
+function feedActionLabel(item, plan) {
+  const group = decisionGroupForDisplay(item);
+  if (isActionCandidate(item)) return "매수 후보";
+  if (plan.tone === "sell") return "매도 검토";
+  if (plan.tone === "risk") return "오늘 제외";
+  if (group.key === "holding") return "보유 대응";
+  if (String(plan.action).includes("눌림")) return "눌림 대기";
+  if (String(plan.action).includes("반등")) return "반등 확인";
+  if (group.key === "hidden") return "숨은 후보";
+  if (group.key === "momentum") return "모멘텀 확인";
+  return "관찰 대기";
+}
+
 function renderFeed() {
   renderStrategyCounts();
   const candidates = filteredCandidates();
+  renderQuickSearch();
   renderStockSearchResults();
   if (!candidates.length) {
     const label = strategyLabel(state.strategy);
@@ -2274,6 +2373,8 @@ function renderFeed() {
       const group = decisionGroupForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       const qualityLabel = discoveryQualityLabel(item);
+      const actionLabel = feedActionLabel(item, plan);
+      const priceGuide = primaryPriceGuide(plan);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -2287,6 +2388,10 @@ function renderFeed() {
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
+            <span class="feed-signal-line ${escapeHtml(plan.tone)}">
+              <strong>${escapeHtml(actionLabel)}</strong>
+              <em>${escapeHtml(shortText(priceGuide, 34))}</em>
+            </span>
           </span>
           <span class="feed-meta">
             <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
@@ -2494,7 +2599,7 @@ async function loadStockSearch() {
   renderStockSearchResults();
 
   const payload = await safeFetchJson(
-    `/api/stocks/search?query=${encodeURIComponent(query)}&limit=8`,
+    `/api/stocks/search?query=${encodeURIComponent(query)}&limit=12`,
     { query, items: [], message: "종목 검색을 불러오지 못했습니다.", status: null },
     10000
   );
@@ -3154,6 +3259,23 @@ els.searchInput.addEventListener("input", (event) => {
     loadStockSearch();
   }, 280);
   renderFeed();
+});
+
+els.searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    const currentQuery = state.query.trim();
+    const first = state.stockSearch.query === currentQuery ? state.stockSearch.items?.[0] : null;
+    if (first?.symbol) {
+      event.preventDefault();
+      openSearchResult(first.symbol);
+    } else if (shouldSearchStocks(state.query)) {
+      event.preventDefault();
+      loadStockSearch();
+    }
+  }
+  if (event.key === "Escape") {
+    applySearchQuery("");
+  }
 });
 
 if (els.performanceButton) {
