@@ -569,6 +569,7 @@ function signalValidationForDisplay(item) {
 
 function candidatePoolStateForDisplay(item) {
   const pool = item?.candidatePool ?? {};
+  const memory = item?.discovery?.poolMemory ?? {};
   const fallbackByCompression = {
     core: ["entry_candidate", "진입 후보"],
     review: ["validating", "검증중"],
@@ -596,6 +597,10 @@ function candidatePoolStateForDisplay(item) {
     peakEvidenceScore: Number(pool.peakEvidenceScore ?? 0),
     scoreDelta: Number(pool.scoreDelta ?? 0),
     momentumLabel: pool.momentumLabel || "",
+    retained: Boolean(item?.discovery?.poolRetained || memory.retained),
+    retainScore: Number(memory.score ?? item?.discovery?.poolScore ?? 0),
+    retainReason: memory.reason || "",
+    retainStateLabel: memory.stateLabel || "",
     transitionHistory: Array.isArray(pool.transitionHistory) ? pool.transitionHistory : [],
     firstSeenAt: pool.firstSeenAt || "",
     lastSeenAt: pool.lastSeenAt || "",
@@ -1413,7 +1418,7 @@ function renderMetrics() {
     const poolActive = Number(summary.candidatePoolActiveCount ?? 0);
     const poolText =
       poolTotal || poolActive
-        ? ` · 후보풀 ${poolActive}/${poolTotal} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
+        ? ` · 후보풀 ${poolActive}/${poolTotal} · 풀재점검 ${summary.candidatePoolRetainedScanCount ?? 0} · 풀선정 ${summary.candidatePoolSelectedCount ?? 0} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
         : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
@@ -2635,6 +2640,7 @@ function renderFeed() {
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
               <span class="feed-badge pool-state-badge pool-${escapeHtml(poolState.key)}">${escapeHtml(poolState.label)}</span>
+              ${poolState.retained ? `<span class="feed-badge pool-retained-badge">풀재점검 ${escapeHtml(poolState.retainScore || "")}</span>` : ""}
               ${poolState.momentumLabel ? `<span class="feed-badge pool-momentum pool-momentum-${escapeHtml(poolState.momentumLabel === "개선" ? "up" : poolState.momentumLabel === "약화" ? "down" : "flat")}">${escapeHtml(poolState.momentumLabel)}${poolState.scoreDelta ? ` ${poolState.scoreDelta > 0 ? "+" : ""}${escapeHtml(poolState.scoreDelta)}` : ""}</span>` : ""}
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
@@ -3450,6 +3456,7 @@ function candidatePoolSection(item) {
     ["상태", pool.label],
     ["관측 횟수", pool.observations ? `${pool.observations}회` : "-"],
     ["선정 횟수", pool.selectedCount ? `${pool.selectedCount}회` : "-"],
+    ["재점검 점수", pool.retained && pool.retainScore ? `${pool.retainScore}/100` : "-"],
     ["최고 점수", pool.peakScore ? `${pool.peakScore}/100` : "-"],
     ["최고 준비도", pool.peakReadiness ? `${pool.peakReadiness}/100` : "-"],
     ["상태 변화", `${pool.promotionCount}회 승격 · ${pool.demotionCount}회 강등`],
@@ -3469,6 +3476,7 @@ function candidatePoolSection(item) {
       </div>
       <ul class="bullet-list">
         <li>${escapeHtml(pool.reason)}</li>
+        ${pool.retained ? `<li>${escapeHtml(pool.retainReason || `${pool.retainStateLabel || "후보 풀"} 상태로 재점검 대상입니다.`)}</li>` : ""}
         ${pool.stateChangedAt ? `<li>${escapeHtml(`최근 상태 변경: ${timeLabel(pool.stateChangedAt)}`)}</li>` : ""}
       </ul>
       ${

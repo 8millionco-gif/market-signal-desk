@@ -162,6 +162,8 @@ SIGNAL_CANDIDATE_POOL_ENABLED = os.getenv("SIGNAL_CANDIDATE_POOL_ENABLED", "1").
 SIGNAL_CANDIDATE_POOL_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS", "500"))
 SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
 SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
+SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "8"))
+SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -4550,6 +4552,188 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     }
 
 
+def candidate_pool_selection_score(record: dict) -> int:
+    state_key = str(record.get("stateKey", "collected"))
+    if state_key in {"excluded", "expired"}:
+        return 0
+    state_bonus = {
+        "entry_candidate": 30,
+        "pullback_wait": 24,
+        "portfolio": 22,
+        "validating": 20,
+        "watching": 10,
+        "collected": 0,
+    }.get(state_key, 0)
+    peak_score = bounded_int(record.get("peakScore", record.get("totalScore", 0)), 0, 100)
+    score = bounded_int(record.get("totalScore", 0), 0, 100)
+    readiness = bounded_int(record.get("peakReadiness", record.get("triggerReadiness", 0)), 0, 100)
+    evidence = bounded_int(record.get("peakEvidenceScore", record.get("evidenceScore", 0)), 0, 100)
+    reaction = bounded_int(record.get("peakReactionScore", record.get("reactionScore", 0)), 0, 100)
+    selected = min(10, bounded_int(record.get("selectedCount", 0), 0, 100_000))
+    observations = min(12, bounded_int(record.get("observations", 0), 0, 100_000))
+    momentum_penalty = 8 if str(record.get("momentumLabel", "")) == "약화" else 0
+    return bounded_int(
+        state_bonus
+        + peak_score * 0.24
+        + score * 0.18
+        + readiness * 0.16
+        + evidence * 0.14
+        + reaction * 0.14
+        + selected
+        + observations // 2
+        - momentum_penalty,
+        0,
+        100,
+    )
+
+
+def candidate_pool_memory_payload(record: dict) -> dict:
+    score = bounded_int(record.get("retainScore", candidate_pool_selection_score(record)), 0, 100)
+    state_key = str(record.get("stateKey", "collected"))
+    return {
+        "retained": True,
+        "score": score,
+        "stateKey": state_key,
+        "stateLabel": record.get("stateLabel") or CANDIDATE_POOL_STATES.get(state_key, {}).get("label", state_key),
+        "stateReason": record.get("stateReason", ""),
+        "peakScore": bounded_int(record.get("peakScore", record.get("totalScore", 0)), 0, 100),
+        "peakReadiness": bounded_int(record.get("peakReadiness", record.get("triggerReadiness", 0)), 0, 100),
+        "observations": bounded_int(record.get("observations", 0), 0, 100_000),
+        "selectedCount": bounded_int(record.get("selectedCount", 0), 0, 100_000),
+        "lastSeenAt": record.get("lastSeenAt", ""),
+        "reason": "후보 풀에서 의미 있는 상태가 유지되어 재점검 대상",
+    }
+
+
+def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
+    if not SIGNAL_CANDIDATE_POOL_ENABLED or SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT <= 0:
+        return []
+    data = candidate_pool_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    records = []
+    keep_states = {"entry_candidate", "pullback_wait", "portfolio", "validating", "watching"}
+    for record in items.values():
+        if not isinstance(record, dict):
+            continue
+        symbol = str(record.get("symbol", "")).strip().upper()
+        state_key = str(record.get("stateKey", "collected"))
+        if not symbol or state_key in {"excluded", "expired"}:
+            continue
+        retain_score = candidate_pool_selection_score(record)
+        if retain_score < SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and state_key not in keep_states:
+            continue
+        item = dict(record)
+        item["symbol"] = symbol
+        item["retainScore"] = retain_score
+        records.append(item)
+    records.sort(
+        key=lambda item: (
+            bounded_int(item.get("retainScore", 0), 0, 100),
+            candidate_pool_rank(str(item.get("stateKey", ""))),
+            bounded_int(item.get("peakScore", item.get("totalScore", 0)), 0, 100),
+            str(item.get("lastSeenAt", "")),
+        ),
+        reverse=True,
+    )
+    selected_limit = limit if limit is not None else SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT
+    return records[: max(0, selected_limit)]
+
+
+def candidate_pool_entry_from_record(record: dict) -> dict:
+    symbol = str(record.get("symbol", "")).strip().upper()
+    name = str(record.get("name") or symbol)
+    market = str(record.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", symbol) else "KR"))
+    category = str(record.get("category") or ("overseas" if market == "US" else "domestic"))
+    headline = str(record.get("headline") or f"{name} 후보 풀 재점검")
+    themes = unique_texts(
+        [
+            record.get("stateLabel", ""),
+            record.get("finalAction", ""),
+            record.get("compressionLabel", ""),
+            record.get("validationLabel", ""),
+        ],
+        limit=4,
+    )
+    return {
+        "symbol": symbol,
+        "name": name,
+        "market": market,
+        "category": category,
+        "themes": themes,
+        "query": " ".join(value for value in [name, symbol, headline] if value).strip(),
+        "focusWeight": min(15, 7 + candidate_pool_rank(str(record.get("stateKey", ""))) // 10),
+        "discoveryTier": "pool",
+        "opportunityType": "pool-retain",
+        "headline": headline,
+        "poolMemory": candidate_pool_memory_payload(record),
+    }
+
+
+def merge_candidate_pool_scan_entries(entries: list[dict], pool_records: list[dict]) -> tuple[list[dict], dict]:
+    pool_by_symbol = {
+        str(record.get("symbol", "")).strip().upper(): record
+        for record in pool_records
+        if str(record.get("symbol", "")).strip()
+    }
+    merged = []
+    seen = set()
+    retained_existing = 0
+    retained_added = 0
+    for entry in entries:
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        item = dict(entry)
+        if symbol in pool_by_symbol:
+            item["poolMemory"] = candidate_pool_memory_payload(pool_by_symbol[symbol])
+            retained_existing += 1
+        merged.append(item)
+        seen.add(symbol)
+    for record in pool_records:
+        symbol = str(record.get("symbol", "")).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        merged.append(candidate_pool_entry_from_record(record))
+        seen.add(symbol)
+        retained_added += 1
+    return merged, {
+        "retainedInputCount": len(pool_records),
+        "retainedExistingCount": retained_existing,
+        "retainedAddedCount": retained_added,
+        "retainedScanCount": retained_existing + retained_added,
+    }
+
+
+def apply_candidate_pool_memory(candidates: list[dict], pool_records: list[dict]) -> dict:
+    pool_by_symbol = {
+        str(record.get("symbol", "")).strip().upper(): record
+        for record in pool_records
+        if str(record.get("symbol", "")).strip()
+    }
+    applied = 0
+    for candidate in candidates:
+        symbol = str(candidate.get("symbol", "")).strip().upper()
+        record = pool_by_symbol.get(symbol)
+        if not record:
+            continue
+        discovery = dict(candidate.get("discovery", {})) if isinstance(candidate.get("discovery"), dict) else {}
+        memory = discovery.get("poolMemory") if isinstance(discovery.get("poolMemory"), dict) else candidate_pool_memory_payload(record)
+        pool_score = bounded_int(memory.get("score", record.get("retainScore", 0)), 0, 100)
+        current_score = bounded_int(discovery.get("score", 0), 0, 100)
+        bonus = min(8, pool_score // 12)
+        discovery["poolRetained"] = True
+        discovery["poolMemory"] = memory
+        discovery["poolScore"] = pool_score
+        discovery["score"] = bounded_int(current_score + bonus, 0, 100)
+        evidence = dict(discovery.get("evidenceProfile", {})) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+        reasons = text_list(evidence.get("reasons", []), limit=8)
+        evidence["reasons"] = unique_texts([*reasons, memory.get("reason", "후보 풀 재점검")], limit=8)
+        discovery["evidenceProfile"] = evidence
+        candidate["discovery"] = discovery
+        applied += 1
+    return {"appliedCount": applied}
+
+
 def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "selected") -> dict:
     if not SIGNAL_CANDIDATE_POOL_ENABLED:
         return {
@@ -5981,6 +6165,11 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         "evidenceReasons": evidence.get("reasons", []),
         "evidenceBlockers": evidence.get("blockers", []),
     }
+    pool_memory = entry.get("poolMemory")
+    if isinstance(pool_memory, dict):
+        base["discovery"]["poolRetained"] = True
+        base["discovery"]["poolMemory"] = pool_memory
+        base["discovery"]["poolScore"] = bounded_int(pool_memory.get("score", 0), 0, 100)
     return base
 
 
@@ -5997,6 +6186,9 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
             "strongEvidenceScore": SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE,
             "qualifiedEvidenceScore": SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE,
+            "poolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
+            "poolRetainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
+            "poolUpdatedAt": candidate_pool_summary().get("updatedAt", ""),
             "symbols": SIGNAL_DISCOVERY_SYMBOLS,
             "watch": sorted(watched),
             "naverReady": NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"],
@@ -6029,6 +6221,9 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     filtered = bounded_int(discovery.get("filteredNewsItems", 0), 0, 1_000)
     material_news = bounded_int(discovery.get("materialNewsItems", 0), 0, 1_000)
     relevance_average = display_number_to_decimal(discovery.get("newsRelevanceAverage"))
+    pool_memory = discovery.get("poolMemory", {}) if isinstance(discovery.get("poolMemory"), dict) else {}
+    pool_retained = bool(discovery.get("poolRetained") or pool_memory.get("retained"))
+    pool_score = bounded_int(pool_memory.get("score", discovery.get("poolScore", 0)), 0, 100)
     hidden = is_hidden_discovery_candidate(candidate)
     watched_hit = symbol in watched
 
@@ -6050,6 +6245,8 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
         tier, rank, reason = "reserve", 1, "숨은 후보이나 뉴스·가격 반응 추가 확인 필요"
     elif focus >= 8 and filtered == 0 and score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE and evidence_score >= 45:
         tier, rank, reason = "reserve", 1, "테마 가중치가 높아 보조 후보로 유지"
+    elif pool_retained and pool_score >= SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and score >= max(40, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE - 8):
+        tier, rank, reason = "reserve", 1, "후보 풀에서 검증 상태가 유지되어 재점검 대상"
     elif raw_news and filtered and not news_items:
         tier, rank, reason = "rejected", 3, "검색 뉴스는 있었지만 종목 관련성이 낮음"
     elif evidence_grade == "weak":
@@ -6069,14 +6266,16 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     }
 
 
-def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int, int, int]:
+def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int, int, int, int]:
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     quality = discovery.get("qualityProfile", {}) if isinstance(discovery.get("qualityProfile"), dict) else {}
     evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    pool_memory = discovery.get("poolMemory", {}) if isinstance(discovery.get("poolMemory"), dict) else {}
     return (
         -bounded_int(quality.get("rank", 9), 0, 9),
         bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100),
         bounded_int(discovery.get("materialNewsItems", 0), 0, 1_000),
+        bounded_int(pool_memory.get("score", discovery.get("poolScore", 0)), 0, 100),
         bounded_int(quality.get("score", discovery.get("score", 0)), 0, 100),
         bounded_int(discovery.get("newsItems", 0), 0, 1_000),
         score_candidate(candidate),
@@ -6256,7 +6455,12 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[l
         cached = copy.deepcopy(DISCOVERY_CACHE["payload"])  # type: ignore[index]
         return cached["candidates"], cached["status"]
 
-    entries = candidate_universe_entries()[: max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)]
+    base_entries = candidate_universe_entries()
+    pool_records = candidate_pool_retainable_records()
+    entries, pool_input_status = merge_candidate_pool_scan_entries(
+        base_entries[: max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)],
+        pool_records,
+    )
     if not entries:
         return seed_candidates, {
             "source": "seed",
@@ -6274,6 +6478,7 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[l
         except Exception as error:
             errors.append(str(error)[:160])
 
+    pool_memory_status = apply_candidate_pool_memory(discovered, pool_records) if discovered else {"appliedCount": 0}
     discovered.sort(
         key=lambda item: (
             bounded_int(item.get("discovery", {}).get("score", 0)),
@@ -6283,6 +6488,12 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[l
     )
     pool_scan_status = update_candidate_pool(discovered, mode=mode, stage="discovered") if discovered else {}
     selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
+    pool_selected = [
+        item
+        for item in selected
+        if isinstance(item.get("discovery"), dict)
+        and bool(item.get("discovery", {}).get("poolRetained"))
+    ]
     source = (
         "auto-news"
         if any(
@@ -6305,9 +6516,19 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[l
             if quality_selected
             else ("뉴스와 유니버스 점수로 오늘 후보를 자동 생성했습니다." if source == "auto-news" else "유니버스 기본 점수로 오늘 후보를 구성했습니다.")
         ),
-        "universeCount": len(entries),
+        "universeCount": len(base_entries),
+        "scanTargetCount": len(entries),
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
+        "candidatePoolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
+        "candidatePoolRetainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
+        "candidatePoolRetainedInputCount": pool_input_status.get("retainedInputCount", 0),
+        "candidatePoolRetainedExistingCount": pool_input_status.get("retainedExistingCount", 0),
+        "candidatePoolRetainedAddedCount": pool_input_status.get("retainedAddedCount", 0),
+        "candidatePoolRetainedScanCount": pool_input_status.get("retainedScanCount", 0),
+        "candidatePoolMemoryAppliedCount": pool_memory_status.get("appliedCount", 0),
+        "candidatePoolSelectedCount": len(pool_selected),
+        "candidatePoolSelectedSymbols": [item.get("symbol", "") for item in pool_selected],
         **balance_status,
         "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in discovered),
         "selectedNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
@@ -6708,6 +6929,13 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolSoftDemotionCount": pool_status.get("softDemotionCount"),
             "candidatePoolImprovingCount": pool_status.get("improvingCount"),
             "candidatePoolWeakeningCount": pool_status.get("weakeningCount"),
+            "candidatePoolRetainLimit": discovery_status.get("candidatePoolRetainLimit"),
+            "candidatePoolRetainMinScore": discovery_status.get("candidatePoolRetainMinScore"),
+            "candidatePoolRetainedInputCount": discovery_status.get("candidatePoolRetainedInputCount"),
+            "candidatePoolRetainedScanCount": discovery_status.get("candidatePoolRetainedScanCount"),
+            "candidatePoolMemoryAppliedCount": discovery_status.get("candidatePoolMemoryAppliedCount"),
+            "candidatePoolSelectedCount": discovery_status.get("candidatePoolSelectedCount"),
+            "candidatePoolSelectedSymbols": discovery_status.get("candidatePoolSelectedSymbols", []),
             "confirmedSignalCount": selection_status.get("confirmedSignalCount"),
             "evidenceWaitSignalCount": selection_status.get("evidenceWaitSignalCount"),
             "reactionOnlySignalCount": selection_status.get("reactionOnlySignalCount"),
@@ -6941,6 +7169,13 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolSoftDemotionCount": summary.get("candidatePoolSoftDemotionCount"),
         "candidatePoolImprovingCount": summary.get("candidatePoolImprovingCount"),
         "candidatePoolWeakeningCount": summary.get("candidatePoolWeakeningCount"),
+        "candidatePoolRetainLimit": summary.get("candidatePoolRetainLimit"),
+        "candidatePoolRetainMinScore": summary.get("candidatePoolRetainMinScore"),
+        "candidatePoolRetainedInputCount": summary.get("candidatePoolRetainedInputCount"),
+        "candidatePoolRetainedScanCount": summary.get("candidatePoolRetainedScanCount"),
+        "candidatePoolMemoryAppliedCount": summary.get("candidatePoolMemoryAppliedCount"),
+        "candidatePoolSelectedCount": summary.get("candidatePoolSelectedCount"),
+        "candidatePoolSelectedSymbols": summary.get("candidatePoolSelectedSymbols", []),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
