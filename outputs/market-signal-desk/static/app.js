@@ -1184,6 +1184,10 @@ function renderDiscoveryBotStatus() {
   const latest = status.latest && Object.keys(status.latest).length ? status.latest : botState.lastRun ?? {};
   const summary = latest.summary ?? {};
   const topText = snapshotTopText({ summary });
+  const pipeline = Array.isArray(summary.pipeline) ? summary.pipeline : [];
+  const pipelineText = pipeline.length
+    ? uniqueTexts(pipeline.map((step) => step.stage || step.label).filter(Boolean), 4).join(" → ")
+    : "-";
   const intervalMinutes = Math.max(1, Math.round(Number(config.intervalSeconds ?? 0) / 60));
   const latestText = latest.createdAt ? `${modeLabel(latest.mode)} · ${timeLabel(latest.createdAt)}` : "아직 없음";
   const rows = [
@@ -1191,6 +1195,7 @@ function renderDiscoveryBotStatus() {
     ["실행 상태", !botState.running && !botState.lastError, botState.running ? "실행 중" : botState.lastError ? "확인 필요" : "대기"],
     ["주기", Boolean(config.intervalSeconds), config.enabled ? `${intervalMinutes}분마다` : "수동 실행"],
     ["최신 발굴", Boolean(latest.createdAt), latestText],
+    ["파이프라인", pipeline.length >= 4, pipelineText],
     ["상위 후보", Boolean(summary.topCandidates?.length), topText]
   ];
   const lastError = botState.lastError

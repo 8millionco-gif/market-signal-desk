@@ -3936,167 +3936,241 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
     return selected, status
 
 
-def dashboard(mode: str) -> dict:
+def pipeline_step(stage: str, label: str, status: str, message: str = "", count: int | None = None) -> dict:
+    step = {
+        "stage": stage,
+        "label": label,
+        "status": status,
+        "message": message,
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    if count is not None:
+        step["count"] = count
+    return step
+
+
+def dashboard_status_defaults() -> dict:
+    return {
+        "toss_price": {
+            "source": "sample",
+            "enabled": TOSS_LIVE_PRICES,
+            "message": "샘플 가격을 사용합니다.",
+        },
+        "toss_candle": {
+            "source": "sample",
+            "enabled": TOSS_LIVE_CANDLES,
+            "message": "샘플 차트를 사용합니다.",
+        },
+        "toss_orderbook": {
+            "source": "sample",
+            "enabled": TOSS_LIVE_ORDERBOOK,
+            "message": "샘플 호가 지표를 사용합니다.",
+        },
+        "toss_trades": {
+            "source": "sample",
+            "enabled": TOSS_LIVE_TRADES,
+            "message": "샘플 체결 지표를 사용합니다.",
+        },
+        "dart_disclosure": {
+            "source": "sample",
+            "enabled": DART_LIVE_DISCLOSURES,
+            "message": "샘플 공시 메모를 사용합니다.",
+        },
+        "naver_news": {
+            "source": "sample",
+            "enabled": NAVER_LIVE_NEWS,
+            "message": "샘플 뉴스를 사용합니다.",
+        },
+        "gdelt_news": {
+            "source": "sample",
+            "enabled": GDELT_LIVE_NEWS,
+            "message": "글로벌 뉴스 보강을 사용하지 않았습니다.",
+        },
+        "openai_analysis": {
+            "source": "local",
+            "enabled": OPENAI_ANALYSIS_ENABLED,
+            "message": "로컬 분석을 사용합니다.",
+        },
+        "selection": {
+            "source": "static",
+            "enabled": True,
+            "message": "기본 후보 점수를 사용합니다.",
+        },
+    }
+
+
+def integration_failure_status(fallback: dict, error: Exception, message: str) -> dict:
+    payload, _ = integration_error_payload(error)
+    status = dict(fallback)
+    status.update({
+        "error": payload.get("error", "unknown"),
+        "status": payload.get("status"),
+        "detail": payload.get("detail", ""),
+        "message": payload.get("message", message),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    })
+    return status
+
+
+def collect_signal_inputs(mode: str) -> dict:
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
     watched = set(watchlist())
     raw_candidates, discovery_status = initial_candidates(data, watched)
     candidates = [decorate_candidate(item, watched) for item in raw_candidates]
-    toss_price_status = {
-        "source": "sample",
-        "enabled": TOSS_LIVE_PRICES,
-        "message": "샘플 가격을 사용합니다.",
+    defaults = dashboard_status_defaults()
+    return {
+        "mode": mode,
+        "data": data,
+        "market": market,
+        "watched": watched,
+        "candidates": candidates,
+        "statuses": {
+            **defaults,
+            "index": index_status,
+            "fx": fx_status,
+            "discovery": discovery_status,
+        },
+        "pipeline": [
+            pipeline_step(
+                "collector",
+                "후보·시장 수집",
+                "ok",
+                discovery_status.get("message", "후보와 시장 데이터를 수집했습니다."),
+                len(candidates),
+            )
+        ],
     }
-    toss_candle_status = {
-        "source": "sample",
-        "enabled": TOSS_LIVE_CANDLES,
-        "message": "샘플 차트를 사용합니다.",
-    }
-    toss_orderbook_status = {
-        "source": "sample",
-        "enabled": TOSS_LIVE_ORDERBOOK,
-        "message": "샘플 호가 지표를 사용합니다.",
-    }
-    toss_trades_status = {
-        "source": "sample",
-        "enabled": TOSS_LIVE_TRADES,
-        "message": "샘플 체결 지표를 사용합니다.",
-    }
-    dart_disclosure_status = {
-        "source": "sample",
-        "enabled": DART_LIVE_DISCLOSURES,
-        "message": "샘플 공시 메모를 사용합니다.",
-    }
-    naver_news_status = {
-        "source": "sample",
-        "enabled": NAVER_LIVE_NEWS,
-        "message": "샘플 뉴스를 사용합니다.",
-    }
-    gdelt_news_status = {
-        "source": "sample",
-        "enabled": GDELT_LIVE_NEWS,
-        "message": "글로벌 뉴스 보강을 사용하지 않았습니다.",
-    }
-    openai_analysis_status = {
-        "source": "local",
-        "enabled": OPENAI_ANALYSIS_ENABLED,
-        "message": "로컬 분석을 사용합니다.",
-    }
-    selection_status = {
-        "source": "static",
-        "enabled": True,
-        "message": "기본 후보 점수를 사용합니다.",
-    }
-    try:
-        candidates, toss_price_status = enrich_candidates_with_toss_prices(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        toss_price_status = {
-            "source": "sample",
-            "enabled": TOSS_LIVE_PRICES,
-            "error": payload.get("error", "unknown"),
-            "status": payload.get("status"),
-            "detail": payload.get("detail", ""),
-            "message": payload.get("message", "토스 현재가 반영에 실패해 샘플 가격을 사용합니다."),
-        }
-    try:
-        candidates, toss_candle_status = enrich_candidates_with_toss_candles(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        toss_candle_status = {
-            "source": "sample",
-            "enabled": TOSS_LIVE_CANDLES,
-            "error": payload.get("error", "unknown"),
-            "status": payload.get("status"),
-            "detail": payload.get("detail", ""),
-            "message": payload.get("message", "토스 캔들 반영에 실패해 샘플 차트를 사용합니다."),
-        }
-    try:
-        candidates, toss_orderbook_status = enrich_candidates_with_toss_orderbook(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        toss_orderbook_status = {
-            "source": "sample",
-            "enabled": TOSS_LIVE_ORDERBOOK,
-            "error": payload.get("error", "unknown"),
-            "status": payload.get("status"),
-            "detail": payload.get("detail", ""),
-            "message": payload.get("message", "토스 호가 반영에 실패해 샘플 호가 지표를 사용합니다."),
-        }
-    try:
-        candidates, toss_trades_status = enrich_candidates_with_toss_trades(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        toss_trades_status = {
-            "source": "sample",
-            "enabled": TOSS_LIVE_TRADES,
-            "error": payload.get("error", "unknown"),
-            "status": payload.get("status"),
-            "detail": payload.get("detail", ""),
-            "message": payload.get("message", "토스 체결 반영에 실패해 샘플 체결 지표를 사용합니다."),
-        }
-    try:
-        candidates, dart_disclosure_status = enrich_candidates_with_dart_disclosures(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        dart_disclosure_status = {
-            "source": "sample",
-            "enabled": DART_LIVE_DISCLOSURES,
-            "error": payload.get("error", "unknown"),
-            "message": payload.get("message", "OpenDART 공시 반영에 실패해 샘플 공시 메모를 사용합니다."),
-        }
-    try:
-        candidates, naver_news_status = enrich_candidates_with_naver_news(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        naver_news_status = {
-            "source": "sample",
-            "enabled": NAVER_LIVE_NEWS,
-            "error": payload.get("error", "unknown"),
-            "message": payload.get("message", "네이버 뉴스 반영에 실패해 샘플 뉴스를 사용합니다."),
-        }
-    try:
-        candidates, gdelt_news_status = enrich_candidates_with_gdelt_news(candidates)
-    except Exception as error:
-        payload, _ = integration_error_payload(error)
-        gdelt_news_status = {
-            "source": "sample",
-            "enabled": GDELT_LIVE_NEWS,
-            "error": payload.get("error", "unknown"),
-            "message": payload.get("message", "GDELT 글로벌 뉴스 반영에 실패해 샘플 뉴스를 사용합니다."),
-            "detail": payload.get("detail", ""),
-            "status": payload.get("status", ""),
-            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-        }
 
-    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
 
+def run_candidate_enricher(context: dict, key: str, label: str, enricher, failure_message: str) -> None:
+    fallback = context["statuses"][key]
+    try:
+        context["candidates"], context["statuses"][key] = enricher(context["candidates"])
+        status = "ok" if context["statuses"][key].get("source") not in {"sample", "disabled"} else "fallback"
+        message = context["statuses"][key].get("message", f"{label} 완료")
+    except Exception as error:
+        context["statuses"][key] = integration_failure_status(fallback, error, failure_message)
+        status = "fallback"
+        message = context["statuses"][key].get("message", failure_message)
+    context["pipeline"].append(pipeline_step("analyzer", label, status, message, len(context["candidates"])))
+
+
+def analyze_signal_context(context: dict) -> dict:
+    run_candidate_enricher(
+        context,
+        "toss_price",
+        "현재가 수집",
+        enrich_candidates_with_toss_prices,
+        "토스 현재가 반영에 실패해 샘플 가격을 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "toss_candle",
+        "차트 수집",
+        enrich_candidates_with_toss_candles,
+        "토스 캔들 반영에 실패해 샘플 차트를 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "toss_orderbook",
+        "호가 수집",
+        enrich_candidates_with_toss_orderbook,
+        "토스 호가 반영에 실패해 샘플 호가 지표를 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "toss_trades",
+        "체결 수집",
+        enrich_candidates_with_toss_trades,
+        "토스 체결 반영에 실패해 샘플 체결 지표를 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "dart_disclosure",
+        "공시 수집",
+        enrich_candidates_with_dart_disclosures,
+        "OpenDART 공시 반영에 실패해 샘플 공시 메모를 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "naver_news",
+        "국내 뉴스 수집",
+        enrich_candidates_with_naver_news,
+        "네이버 뉴스 반영에 실패해 샘플 뉴스를 사용합니다.",
+    )
+    run_candidate_enricher(
+        context,
+        "gdelt_news",
+        "글로벌 뉴스 수집",
+        enrich_candidates_with_gdelt_news,
+        "GDELT 글로벌 뉴스 반영에 실패해 샘플 뉴스를 사용합니다.",
+    )
+    return context
+
+
+def score_signal_context(context: dict) -> dict:
+    context["candidates"], context["statuses"]["selection"] = apply_candidate_selection(
+        context["candidates"],
+        context["market"],
+        context["watched"],
+    )
+    context["pipeline"].append(
+        pipeline_step(
+            "scorer",
+            "후보 점수 재계산",
+            "ok",
+            context["statuses"]["selection"].get("message", "후보 점수를 재계산했습니다."),
+            len(context["candidates"]),
+        )
+    )
+    return context
+
+
+def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
     if mode == "preopen":
         candidates.sort(key=lambda item: (item["preopenPriority"], item["totalScore"]), reverse=True)
     elif mode == "intraday":
         candidates.sort(key=lambda item: (item["triggerReadiness"], item["totalScore"]), reverse=True)
     else:
         candidates.sort(key=lambda item: item["totalScore"], reverse=True)
+    return candidates
 
+
+def select_signal_context(context: dict) -> dict:
+    context["candidates"] = sort_candidates_for_mode(context["candidates"], context["mode"])
     try:
-        candidates, openai_analysis_status = enrich_candidates_with_openai_analysis(candidates)
+        context["candidates"], context["statuses"]["openai_analysis"] = enrich_candidates_with_openai_analysis(context["candidates"])
+        analysis_status = "ok" if context["statuses"]["openai_analysis"].get("source") == "openai" else "fallback"
+        message = context["statuses"]["openai_analysis"].get("message", "분석 문장을 생성했습니다.")
     except Exception as error:
-        payload, _ = integration_error_payload(error)
-        openai_analysis_status = {
-            "source": "local",
-            "enabled": OPENAI_ANALYSIS_ENABLED,
-            "error": payload.get("error", "unknown"),
-            "message": payload.get("message", "OpenAI 분석에 실패해 로컬 분석을 사용합니다."),
-        }
-        candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
+        context["statuses"]["openai_analysis"] = integration_failure_status(
+            context["statuses"]["openai_analysis"],
+            error,
+            "OpenAI 분석에 실패해 로컬 분석을 사용합니다.",
+        )
+        context["candidates"] = [
+            apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate))
+            for candidate in context["candidates"]
+        ]
+        analysis_status = "fallback"
+        message = context["statuses"]["openai_analysis"].get("message", "OpenAI 분석에 실패해 로컬 분석을 사용합니다.")
 
-    selected = candidates[0] if candidates else None
+    context["selected"] = context["candidates"][0] if context["candidates"] else None
+    context["pipeline"].append(pipeline_step("selector", "후보 정렬·대표 선정", analysis_status, message, len(context["candidates"])))
+    return context
+
+
+def build_dashboard_payload(context: dict) -> dict:
+    candidates = context["candidates"]
+    discovery_status = context["statuses"]["discovery"]
+    selection_status = context["statuses"]["selection"]
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-        "mode": mode,
-        "market": market,
-        "principles": data.get("principles", []),
+        "mode": context["mode"],
+        "market": context["market"],
+        "principles": context["data"].get("principles", []),
         "summary": {
             "candidateCount": len(candidates),
             "watchedCount": len([item for item in candidates if item["isWatched"]]),
@@ -4115,42 +4189,51 @@ def dashboard(mode: str) -> dict:
             "averageScoreShift": selection_status.get("averageScoreShift"),
         },
         "integrations": {
+            "pipeline": context["pipeline"],
             "discovery": discovery_status,
             "selection": selection_status,
             "toss": {
                 "config": toss_config_status(),
-                "prices": toss_price_status,
-                "candles": toss_candle_status,
-                "orderbook": toss_orderbook_status,
-                "trades": toss_trades_status,
+                "prices": context["statuses"]["toss_price"],
+                "candles": context["statuses"]["toss_candle"],
+                "orderbook": context["statuses"]["toss_orderbook"],
+                "trades": context["statuses"]["toss_trades"],
             },
             "market": {
                 "config": market_config_status(),
-                "indices": index_status,
-                "fx": fx_status,
+                "indices": context["statuses"]["index"],
+                "fx": context["statuses"]["fx"],
             },
             "dart": {
                 "config": dart_config_status(),
-                "disclosures": dart_disclosure_status,
+                "disclosures": context["statuses"]["dart_disclosure"],
             },
             "news": {
                 "naver": {
                     "config": naver_news_config_status(),
-                    "items": naver_news_status,
+                    "items": context["statuses"]["naver_news"],
                 },
                 "gdelt": {
                     "config": gdelt_news_config_status(),
-                    "items": gdelt_news_status,
-                }
+                    "items": context["statuses"]["gdelt_news"],
+                },
             },
             "openai": {
                 "config": openai_config_status(),
-                "analysis": openai_analysis_status,
-            }
+                "analysis": context["statuses"]["openai_analysis"],
+            },
         },
         "candidates": candidates,
-        "selected": selected,
+        "selected": context.get("selected"),
     }
+
+
+def dashboard(mode: str) -> dict:
+    context = collect_signal_inputs(mode)
+    context = analyze_signal_context(context)
+    context = score_signal_context(context)
+    context = select_signal_context(context)
+    return build_dashboard_payload(context)
 
 
 def minutes_from_hhmm(value: str) -> int | None:
@@ -4265,6 +4348,12 @@ def dashboard_summary(payload: dict) -> dict:
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
         summary = {}
+    integrations = payload.get("integrations", {})
+    if not isinstance(integrations, dict):
+        integrations = {}
+    pipeline = integrations.get("pipeline", [])
+    if not isinstance(pipeline, list):
+        pipeline = []
     return {
         "mode": payload.get("mode"),
         "generatedAt": payload.get("generatedAt"),
@@ -4273,6 +4362,16 @@ def dashboard_summary(payload: dict) -> dict:
         "readyCount": summary.get("readyCount", 0),
         "averageScoreShift": summary.get("averageScoreShift"),
         "topCandidates": top_candidates,
+        "pipeline": [
+            {
+                "stage": step.get("stage", ""),
+                "label": step.get("label", ""),
+                "status": step.get("status", ""),
+                "count": step.get("count"),
+            }
+            for step in pipeline
+            if isinstance(step, dict)
+        ],
     }
 
 
