@@ -222,3 +222,51 @@ OpenAI analyze API      source=openai
 ```
 
 모델 권한이나 모델명이 맞지 않으면 화면은 자동으로 로컬 분석을 사용하고, 테스트 결과에 OpenAI 오류 사유가 표시됩니다. 이 경우 `OPENAI_MODEL`을 계정에서 사용 가능한 모델명으로 바꾼 뒤 다시 배포합니다.
+
+## Toss 실시간 시세 활성화
+
+OpenAI 분석까지 확인되면 Render Environment에 아래 값을 추가합니다.
+
+```text
+TOSS_CLIENT_ID=토스증권_API_Key
+TOSS_CLIENT_SECRET=토스증권_Secret_Key
+TOSS_LIVE_PRICES=1
+TOSS_LIVE_CANDLES=1
+TOSS_LIVE_ORDERBOOK=1
+TOSS_LIVE_TRADES=1
+```
+
+선택값은 처음에는 후보 수를 작게 둡니다.
+
+```text
+TOSS_CANDLE_MAX_CANDIDATES=2
+TOSS_ORDERBOOK_MAX_CANDIDATES=2
+TOSS_TRADES_MAX_CANDIDATES=2
+TOSS_TRADES_COUNT=30
+TOSS_REQUEST_TIMEOUT_SECONDS=8
+TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT=50
+```
+
+토스증권 Open API에서 허용 IP를 관리한다면 Render 서버의 외부 IP가 허용 IP에 등록되어 있어야 합니다. IP가 맞지 않으면 테스트에서 `Toss prices API` 또는 토큰 발급 단계가 `CHECK`로 표시됩니다.
+
+저장 후 재배포가 끝나면 아래 스크립트를 실행합니다.
+
+```powershell
+.\test-render-deploy.ps1
+```
+
+정상 기준:
+
+```text
+Toss status              ready=True
+Toss dashboard prices    source=toss
+Toss dashboard candles   source=toss
+Toss dashboard orderbook source=toss
+Toss dashboard trades    source=toss
+Toss prices API          items=1개 이상
+Toss candles API         items=1개 이상
+Toss orderbook API       symbol=005930
+Toss trades API          items=1개 이상
+```
+
+현재가만 먼저 확인하고 싶으면 `TOSS_LIVE_PRICES=1`만 켜고 나머지 live 플래그는 `0`으로 둡니다. 화면 가격이 안정적으로 맞으면 차트, 호가, 체결 순서로 하나씩 켭니다.

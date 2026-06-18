@@ -63,6 +63,10 @@ Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "ca
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler disabled for staging" (-not [bool]$scheduler.config.enabled) "enabled=$($scheduler.config.enabled)"
 
+$toss = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/status") -Headers $headers -Method Get -TimeoutSec 30
+$tossReady = [bool]$toss.readyForMarketData
+Write-Check "Toss status" $tossReady "ready=$tossReady, prices=$($toss.livePricesEnabled), candles=$($toss.liveCandlesEnabled), orderbook=$($toss.liveOrderbookEnabled), trades=$($toss.liveTradesEnabled)"
+
 $dart = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/dart/status") -Headers $headers -Method Get -TimeoutSec 30
 $dartReady = [bool]$dart.readyForDisclosures
 Write-Check "OpenDART status" $dartReady "ready=$dartReady, cache=$($dart.corpCodeCacheExists)"
@@ -100,6 +104,74 @@ if ($naverReady) {
   Write-Check "Naver search API" (($naverSearch.items | Measure-Object).Count -gt 0) "items=$(($naverSearch.items | Measure-Object).Count)"
 } else {
   Write-Check "Naver search API" $false "waiting for NAVER_CLIENT_ID/SECRET and NAVER_LIVE_NEWS=1"
+}
+
+$tossPriceStatus = $dashboard.integrations.toss.prices
+if ($tossPriceStatus) {
+  $detail = "source=$($tossPriceStatus.source), prices=$($tossPriceStatus.priceCount)"
+  if ($tossPriceStatus.error) {
+    $detail = "$detail, error=$($tossPriceStatus.error)"
+  }
+  Write-Check "Toss dashboard prices" ($tossPriceStatus.source -eq "toss") $detail
+}
+
+$tossCandleStatus = $dashboard.integrations.toss.candles
+if ($tossCandleStatus) {
+  $detail = "source=$($tossCandleStatus.source), candles=$($tossCandleStatus.candleCount), stale=$($tossCandleStatus.staleCount)"
+  if ($tossCandleStatus.error) {
+    $detail = "$detail, error=$($tossCandleStatus.error)"
+  }
+  Write-Check "Toss dashboard candles" ($tossCandleStatus.source -eq "toss") $detail
+}
+
+$tossOrderbookStatus = $dashboard.integrations.toss.orderbook
+if ($tossOrderbookStatus) {
+  $detail = "source=$($tossOrderbookStatus.source), orderbooks=$($tossOrderbookStatus.orderbookCount)"
+  if ($tossOrderbookStatus.error) {
+    $detail = "$detail, error=$($tossOrderbookStatus.error)"
+  }
+  Write-Check "Toss dashboard orderbook" ($tossOrderbookStatus.source -eq "toss") $detail
+}
+
+$tossTradesStatus = $dashboard.integrations.toss.trades
+if ($tossTradesStatus) {
+  $detail = "source=$($tossTradesStatus.source), trades=$($tossTradesStatus.tradeCount)"
+  if ($tossTradesStatus.error) {
+    $detail = "$detail, error=$($tossTradesStatus.error)"
+  }
+  Write-Check "Toss dashboard trades" ($tossTradesStatus.source -eq "toss") $detail
+}
+
+if ($tossReady) {
+  try {
+    $prices = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/prices?symbols=005930") -Headers $headers -Method Get -TimeoutSec 45
+    Write-Check "Toss prices API" (($prices.result | Measure-Object).Count -gt 0) "items=$(($prices.result | Measure-Object).Count)"
+  } catch {
+    Write-Check "Toss prices API" $false $_.Exception.Message
+  }
+  try {
+    $candles = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/candles?symbol=005930&interval=1d&count=5") -Headers $headers -Method Get -TimeoutSec 45
+    Write-Check "Toss candles API" (($candles.result.candles | Measure-Object).Count -gt 0) "items=$(($candles.result.candles | Measure-Object).Count)"
+  } catch {
+    Write-Check "Toss candles API" $false $_.Exception.Message
+  }
+  try {
+    $orderbook = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/orderbook?symbol=005930") -Headers $headers -Method Get -TimeoutSec 45
+    Write-Check "Toss orderbook API" ($null -ne $orderbook.result) "symbol=005930"
+  } catch {
+    Write-Check "Toss orderbook API" $false $_.Exception.Message
+  }
+  try {
+    $trades = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/trades?symbol=005930&count=5") -Headers $headers -Method Get -TimeoutSec 45
+    Write-Check "Toss trades API" (($trades.result | Measure-Object).Count -gt 0) "items=$(($trades.result | Measure-Object).Count)"
+  } catch {
+    Write-Check "Toss trades API" $false $_.Exception.Message
+  }
+} else {
+  Write-Check "Toss prices API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_PRICES=1"
+  Write-Check "Toss candles API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_CANDLES=1"
+  Write-Check "Toss orderbook API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_ORDERBOOK=1"
+  Write-Check "Toss trades API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_TRADES=1"
 }
 
 $dartDashboardStatus = $dashboard.integrations.dart.disclosures
