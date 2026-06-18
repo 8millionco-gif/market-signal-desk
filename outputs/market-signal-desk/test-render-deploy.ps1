@@ -93,6 +93,7 @@ Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "ca
 
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler config" $true "enabled=$($scheduler.config.enabled)"
+$manualSnapshotReady = @($scheduler.recentRuns | Where-Object { "$($_.trigger)" -like "manual*" }).Count -gt 0
 
 try {
   $network = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/network/outbound-ip") -Headers $headers -Method Get -TimeoutSec 30
@@ -256,10 +257,14 @@ if ($RunSchedulerMode -ne "none") {
     $runBody = @{ mode = $RunSchedulerMode } | ConvertTo-Json -Compress
     $run = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/run") -Headers $headers -Method Post -Body $runBody -ContentType "application/json" -TimeoutSec 90
     Write-Check "scheduler manual run" ([bool]$run.ok) "mode=$RunSchedulerMode, id=$($run.record.id)"
+    if ($run.status) {
+      $scheduler = $run.status
+    }
 
     $runs = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/runs?limit=3") -Headers $headers -Method Get -TimeoutSec 30
     $latestRun = @($runs.runs)[0]
     Write-Check "snapshot history" ($null -ne $latestRun) "latest=$($latestRun.id), trigger=$($latestRun.trigger)"
+    $manualSnapshotReady = @($runs.runs | Where-Object { "$($_.trigger)" -like "manual*" }).Count -gt 0
 
     if ($latestRun) {
       $detail = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/runs/$($latestRun.id)") -Headers $headers -Method Get -TimeoutSec 30
@@ -274,6 +279,19 @@ if ($RunSchedulerMode -ne "none") {
 } else {
   Write-Skip "scheduler manual run" "optional: run with -RunSchedulerMode close"
 }
+
+$tossSourcesReady =
+  $tossPriceStatus.source -eq "toss" -and
+  $tossCandleStatus.source -eq "toss" -and
+  $tossOrderbookStatus.source -eq "toss" -and
+  $tossTradesStatus.source -eq "toss"
+$contextReady =
+  $dartDashboardStatus.source -eq "opendart" -and
+  $naverDashboardStatus.source -eq "naver" -and
+  $openaiAnalysisStatus.source -eq "openai"
+$schedulerReadyForAuto = $tossSourcesReady -and $contextReady -and $manualSnapshotReady -and -not [bool]$scheduler.state.lastError
+$readinessDetail = "toss=$tossSourcesReady, context=$contextReady, manualSnapshot=$manualSnapshotReady, schedulerEnabled=$($scheduler.config.enabled)"
+Write-Check "auto-run readiness" $schedulerReadyForAuto $readinessDetail
 
 Write-Host ""
 Write-Host "Render deployment test finished." -ForegroundColor Green

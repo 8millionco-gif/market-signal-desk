@@ -62,6 +62,7 @@ const els = {
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
   schedulerStatus: document.querySelector("#schedulerStatus"),
+  readinessStatus: document.querySelector("#readinessStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
   networkStatus: document.querySelector("#networkStatus"),
   tossStatus: document.querySelector("#tossStatus"),
@@ -263,6 +264,7 @@ async function loadDashboard() {
     maybeNotifySchedulerRun(schedulerStatus);
     renderAuthStatus();
     renderSchedulerStatus();
+    renderReadinessStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
     renderNextSteps();
@@ -369,6 +371,7 @@ function render() {
   renderMetrics();
   renderAuthStatus();
   renderSchedulerStatus();
+  renderReadinessStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
   renderNextSteps();
@@ -698,25 +701,21 @@ function renderMetrics() {
 
 function renderNextSteps() {
   if (!els.nextSteps) return;
-  const toss = state.dashboard?.integrations?.toss ?? {};
-  const scheduler = state.schedulerStatus ?? {};
-  const schedulerEnabled = Boolean(scheduler.config?.enabled);
-  const recentRuns = Array.isArray(scheduler.recentRuns) ? scheduler.recentRuns : [];
-  const tossReady =
-    toss.prices?.source === "toss" &&
-    toss.candles?.source === "toss" &&
-    toss.orderbook?.source === "toss" &&
-    toss.trades?.source === "toss";
+  const readiness = readinessState();
   const steps = [];
-  if (!tossReady) {
+  if (!readiness.tossReady) {
     steps.push("Toss 출처 확인");
     steps.push("허용 IP 점검");
     steps.push("현재가부터 재검증");
-  } else if (!recentRuns.length) {
+  } else if (!readiness.contextReady) {
+    steps.push("뉴스·공시·AI 점검");
+    steps.push("분석 출처 확인");
+    steps.push("후보 점수 재확인");
+  } else if (!readiness.manualRunReady) {
     steps.push("장마감 수동 실행");
     steps.push("스냅샷 저장 확인");
     steps.push("성과 화면 점검");
-  } else if (!schedulerEnabled) {
+  } else if (!readiness.autoEnabled) {
     steps.push("자동 실행 켜기");
     steps.push("장전·장마감 예약 확인");
     steps.push("알림 조건 확정");
@@ -808,6 +807,80 @@ function renderSchedulerStatus() {
       await runSchedulerMode(button.dataset.schedulerMode);
     });
   });
+}
+
+function readinessState() {
+  const integrations = state.dashboard?.integrations ?? {};
+  const toss = integrations.toss ?? {};
+  const dart = integrations.dart ?? {};
+  const news = integrations.news ?? {};
+  const openai = integrations.openai ?? {};
+  const scheduler = state.schedulerStatus ?? {};
+  const recentRuns = Array.isArray(scheduler.recentRuns) ? scheduler.recentRuns : [];
+  const tossReady =
+    toss.prices?.source === "toss" &&
+    toss.candles?.source === "toss" &&
+    toss.orderbook?.source === "toss" &&
+    toss.trades?.source === "toss";
+  const contextReady =
+    dart.disclosures?.source === "opendart" &&
+    news.naver?.items?.source === "naver" &&
+    openai.analysis?.source === "openai";
+  const manualRunReady = recentRuns.some((run) => String(run.trigger ?? "").startsWith("manual"));
+  const autoEnabled = Boolean(scheduler.config?.enabled);
+  const hasError = Boolean(scheduler.state?.lastError);
+  return {
+    tossReady,
+    contextReady,
+    manualRunReady,
+    autoEnabled,
+    hasError,
+    allBeforeAuto: tossReady && contextReady && manualRunReady && !hasError,
+    fullReady: tossReady && contextReady && manualRunReady && autoEnabled && !hasError
+  };
+}
+
+function renderReadinessStatus() {
+  if (!els.readinessStatus) return;
+  const readiness = readinessState();
+  const rows = [
+    [
+      "실시간 데이터",
+      readiness.tossReady,
+      readiness.tossReady ? "Toss 완료" : "Toss 점검"
+    ],
+    [
+      "분석 재료",
+      readiness.contextReady,
+      readiness.contextReady ? "뉴스·공시·AI 완료" : "연결 점검"
+    ],
+    [
+      "수동 스냅샷",
+      readiness.manualRunReady,
+      readiness.manualRunReady ? "저장됨" : "먼저 실행"
+    ],
+    [
+      "자동 실행",
+      readiness.autoEnabled,
+      readiness.autoEnabled ? "켜짐" : readiness.allBeforeAuto ? "켜도 됨" : "대기"
+    ],
+    [
+      "판정",
+      readiness.fullReady || readiness.allBeforeAuto,
+      readiness.fullReady ? "운영 중" : readiness.allBeforeAuto ? "활성화 가능" : "준비 중"
+    ]
+  ];
+  els.readinessStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function renderSnapshotHistory() {
