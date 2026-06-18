@@ -2827,6 +2827,8 @@ function renderPerformance() {
   const summary = payload.summary ?? {};
   const observations = Array.isArray(payload.observations) ? payload.observations : [];
   const bySymbol = Array.isArray(payload.bySymbol) ? payload.bySymbol : [];
+  const byGate = Array.isArray(payload.byGate) ? payload.byGate : [];
+  const byHorizon = Array.isArray(payload.byHorizon) ? payload.byHorizon : [];
   const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : "샘플 가격";
   const threshold = payload.config?.successThreshold ?? "+1.0%";
   const best = summary.best;
@@ -2852,6 +2854,8 @@ function renderPerformance() {
         ${performanceMetric("관측", summary.measuredCount ?? 0)}
         ${performanceMetric("상승 비율", summary.hitRate ?? "-")}
         ${performanceMetric("평균 변화", summary.averageChange ?? "-", changeClass(summary.averageChange ?? ""))}
+        ${performanceMetric("실전 관측", summary.actionableMeasuredCount ?? 0)}
+        ${performanceMetric("실전 승률", summary.actionableHitRate ?? "-")}
         ${performanceMetric("상승", summary.positiveCount ?? 0)}
         ${performanceMetric("하락", summary.negativeCount ?? 0)}
       </div>
@@ -2867,6 +2871,34 @@ function renderPerformance() {
               bySymbol.length
                 ? bySymbol.slice(0, 8).map(renderSymbolPerformance).join("")
                 : `<div class="history-empty">측정 가능한 종목이 아직 없습니다</div>`
+            }
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">
+            <p class="eyebrow">신뢰도</p>
+            <h2>게이트별 성과</h2>
+          </div>
+          <div class="performance-list">
+            ${
+              byGate.length
+                ? byGate.map(renderPerformanceGroup).join("")
+                : `<div class="history-empty">게이트별 관측값이 아직 없습니다</div>`
+            }
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">
+            <p class="eyebrow">기간</p>
+            <h2>관측 기간별 성과</h2>
+          </div>
+          <div class="performance-list">
+            ${
+              byHorizon.length
+                ? byHorizon.map(renderPerformanceGroup).join("")
+                : `<div class="history-empty">기간별 관측값이 아직 없습니다</div>`
             }
           </div>
         </section>
@@ -2896,6 +2928,21 @@ function renderPerformance() {
           </div>
         </section>
       </div>
+    </div>
+  `;
+}
+
+function renderPerformanceGroup(item) {
+  return `
+    <div class="performance-row">
+      <span>
+        <strong>${escapeHtml(item.label)}</strong>
+        <em>${escapeHtml(item.measuredCount)} / ${escapeHtml(item.observationCount)}건 측정</em>
+      </span>
+      <span>
+        <strong class="${changeClass(item.averageChange)}">${escapeHtml(item.averageChange)}</strong>
+        <em>승률 ${escapeHtml(item.hitRate)} · 최근 ${escapeHtml(item.latestOutcome)}</em>
+      </span>
     </div>
   `;
 }
@@ -2945,15 +2992,19 @@ function performanceExtreme(label, item) {
 
 function renderPerformanceObservation(item) {
   const tone = item.measured ? changeClass(item.change) : "";
+  const gate = item.gateLabel || item.verdict || "미분류";
+  const confidence = item.confidenceScore === null || item.confidenceScore === undefined ? "-" : item.confidenceScore;
+  const horizon = item.horizonLabel || "기간 미확인";
+  const priceNote = item.sanityMessage || `${horizon} · ${item.snapshotPrice} → ${item.currentPrice} · ${item.outcome}`;
   return `
     <div class="performance-observation">
       <span>
         <strong>${escapeHtml(item.name)}</strong>
-        <em>${escapeHtml(modeLabel(item.mode))} · ${escapeHtml(timeLabel(item.createdAt))} · ${escapeHtml(item.score)}점</em>
+        <em>${escapeHtml(modeLabel(item.mode))} · ${escapeHtml(timeLabel(item.createdAt))} · ${escapeHtml(gate)} · 신뢰 ${escapeHtml(confidence)}</em>
       </span>
       <span>
         <strong class="${tone}">${escapeHtml(item.change)}</strong>
-        <em>${escapeHtml(item.snapshotPrice)} → ${escapeHtml(item.currentPrice)} · ${escapeHtml(item.outcome)}</em>
+        <em>${escapeHtml(priceNote)}</em>
       </span>
     </div>
   `;

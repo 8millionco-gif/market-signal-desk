@@ -160,6 +160,11 @@ try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
 except InvalidOperation:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal("1")
+_SIGNAL_PERFORMANCE_OUTLIER_PERCENT = os.getenv("SIGNAL_PERFORMANCE_OUTLIER_PERCENT", "25")
+try:
+    SIGNAL_PERFORMANCE_OUTLIER_PERCENT = Decimal(_SIGNAL_PERFORMANCE_OUTLIER_PERCENT)
+except InvalidOperation:
+    SIGNAL_PERFORMANCE_OUTLIER_PERCENT = Decimal("25")
 TOKEN_CACHE: dict[str, object] = {"access_token": "", "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 PRICE_CACHE: dict[str, object] = {"symbols": (), "payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 CANDLE_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
@@ -5194,12 +5199,43 @@ def decimal_average(values: list[Decimal]) -> Decimal:
     return sum(values) / Decimal(len(values)) if values else Decimal("0")
 
 
+def performance_horizon(created_at: str) -> dict:
+    created = parse_iso_datetime(created_at)
+    if created is None:
+        return {"key": "unknown", "label": "시점 미확인", "elapsedMinutes": None}
+    minutes = max(0, int((datetime.now(KST) - created).total_seconds() // 60))
+    if minutes < 90:
+        key, label = "1h", "1시간"
+    elif minutes < 24 * 60:
+        key, label = "close", "당일"
+    elif minutes < 3 * 24 * 60:
+        key, label = "1d", "1일"
+    elif minutes < 5 * 24 * 60:
+        key, label = "3d", "3일"
+    else:
+        key, label = "5d", "5일+"
+    return {"key": key, "label": label, "elapsedMinutes": minutes}
+
+
+def performance_hit_rate(items: list[dict]) -> str:
+    if not items:
+        return "-"
+    positives = len([item for item in items if item.get("outcome") == "상승"])
+    return display_percent_abs(Decimal(positives) / Decimal(len(items)) * Decimal(100))
+
+
+def performance_average_change(items: list[dict]) -> str:
+    changes = [Decimal(str(item["changeRate"])) for item in items if item.get("measured")]
+    return display_decimal_percent(decimal_average(changes)) if changes else "-"
+
+
 def performance_summary(observations: list[dict], run_count: int, price_status: dict) -> dict:
     measured = [item for item in observations if item.get("measured")]
     changes = [Decimal(str(item["changeRate"])) for item in measured]
     positive = [item for item in measured if item.get("outcome") == "상승"]
     negative = [item for item in measured if item.get("outcome") == "하락"]
     neutral = [item for item in measured if item.get("outcome") == "중립"]
+    actionable = [item for item in measured if item.get("gateKey") == "actionable"]
     average = decimal_average(changes)
     best = max(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
     worst = min(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
@@ -5213,6 +5249,9 @@ def performance_summary(observations: list[dict], run_count: int, price_status: 
         "neutralCount": len(neutral),
         "hitRate": display_percent_abs(hit_rate),
         "averageChange": display_decimal_percent(average),
+        "actionableMeasuredCount": len(actionable),
+        "actionableHitRate": performance_hit_rate(actionable),
+        "actionableAverageChange": performance_average_change(actionable),
         "best": best,
         "worst": worst,
         "priceSource": price_status.get("source", "-"),
@@ -5244,6 +5283,55 @@ def performance_by_symbol(observations: list[dict]) -> list[dict]:
     return rows
 
 
+def performance_group_rows(observations: list[dict], key_field: str, label_field: str, order: list[str]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for item in observations:
+        key = str(item.get(key_field) or "unknown")
+        label = str(item.get(label_field) or key or "미분류")
+        bucket = grouped.setdefault(key, {"label": label, "items": []})
+        bucket["items"].append(item)
+
+    rows = []
+    for key, group in grouped.items():
+        items = group["items"]
+        measured = [item for item in items if item.get("measured")]
+        positives = len([item for item in measured if item.get("outcome") == "상승"])
+        latest = items[0] if items else {}
+        rows.append({
+            "key": key,
+            "label": group["label"],
+            "observationCount": len(items),
+            "measuredCount": len(measured),
+            "positiveCount": positives,
+            "hitRate": performance_hit_rate(measured),
+            "averageChange": performance_average_change(measured),
+            "latestChange": latest.get("change", "-"),
+            "latestOutcome": latest.get("outcome", "-"),
+        })
+
+    order_index = {key: index for index, key in enumerate(order)}
+    rows.sort(key=lambda item: (order_index.get(item["key"], len(order)), -item["measuredCount"]))
+    return rows
+
+
+def performance_by_gate(observations: list[dict]) -> list[dict]:
+    return performance_group_rows(
+        observations,
+        "gateKey",
+        "gateLabel",
+        ["actionable", "watch", "defer", "exclude", "unknown"],
+    )
+
+
+def performance_by_horizon(observations: list[dict]) -> list[dict]:
+    return performance_group_rows(
+        observations,
+        "horizonKey",
+        "horizonLabel",
+        ["1h", "close", "1d", "3d", "5d", "unknown"],
+    )
+
+
 def performance_report(limit: int | None = None, top_n: int | None = None) -> dict:
     limit = SIGNAL_PERFORMANCE_RUN_LIMIT if limit is None else max(1, min(int(limit), 50))
     top_n = SIGNAL_PERFORMANCE_TOP_CANDIDATES if top_n is None else max(1, min(int(top_n), 10))
@@ -5270,12 +5358,34 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
         start_price = display_number_to_decimal(candidate.get("price"))
         current = prices.get(symbol, {})
         current_price = current.get("value")
+        score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+        total_score = bounded_int(candidate.get("totalScore", score_candidate(candidate)))
+        readiness = bounded_int(candidate.get("triggerReadiness", 0))
+        confidence = candidate.get("dataConfidence") if isinstance(candidate.get("dataConfidence"), dict) else candidate_data_confidence(candidate)
+        gate = candidate.get("qualityGate") if isinstance(candidate.get("qualityGate"), dict) else candidate_quality_gate(
+            candidate,
+            score_detail,
+            total_score,
+            readiness,
+            confidence,
+        )
+        decision_group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
+        horizon = performance_horizon(str(run.get("createdAt", "")))
         measured = start_price is not None and start_price > 0 and isinstance(current_price, Decimal)
         change_rate = Decimal("0")
         outcome = "미측정"
+        price_sanity = True
+        sanity_message = ""
         if measured:
             change_rate = ((current_price - start_price) / start_price) * Decimal(100)
-            outcome = performance_outcome(change_rate, threshold)
+            if SIGNAL_PERFORMANCE_OUTLIER_PERCENT > 0 and abs(change_rate) > SIGNAL_PERFORMANCE_OUTLIER_PERCENT:
+                price_sanity = False
+                sanity_message = f"가격 변화가 {display_percent_abs(change_rate)}로 커서 기준가와 현재가 출처 확인이 필요합니다."
+                measured = False
+                change_rate = Decimal("0")
+                outcome = "가격 검증 필요"
+            else:
+                outcome = performance_outcome(change_rate, threshold)
         observations.append({
             "runId": run.get("id"),
             "mode": run.get("mode"),
@@ -5286,6 +5396,14 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "score": candidate.get("totalScore", 0),
             "readiness": candidate.get("triggerReadiness", 0),
             "verdict": candidate.get("verdict", ""),
+            "decisionGroup": decision_group.get("label", ""),
+            "gateKey": gate.get("key", "unknown"),
+            "gateLabel": gate.get("label", "미분류"),
+            "confidenceScore": confidence.get("score"),
+            "confidenceLabel": confidence.get("label", ""),
+            "horizonKey": horizon.get("key", "unknown"),
+            "horizonLabel": horizon.get("label", "시점 미확인"),
+            "elapsedMinutes": horizon.get("elapsedMinutes"),
             "snapshotPrice": candidate.get("price", "-"),
             "currentPrice": current.get("price", "-"),
             "priceSource": current.get("source", "missing"),
@@ -5293,6 +5411,8 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "changeRate": str(change_rate.quantize(Decimal("0.01"))) if measured else "0",
             "outcome": outcome,
             "measured": measured,
+            "priceSanity": price_sanity,
+            "sanityMessage": sanity_message,
         })
 
     return {
@@ -5301,10 +5421,13 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "runLimit": limit,
             "topCandidates": top_n,
             "successThreshold": display_percent_abs(threshold),
+            "outlierThreshold": display_percent_abs(SIGNAL_PERFORMANCE_OUTLIER_PERCENT),
         },
         "priceStatus": price_status,
         "summary": performance_summary(observations, len(runs), price_status),
         "bySymbol": performance_by_symbol(observations),
+        "byGate": performance_by_gate(observations),
+        "byHorizon": performance_by_horizon(observations),
         "observations": observations,
     }
 
