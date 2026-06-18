@@ -84,6 +84,14 @@ Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "ca
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler disabled for staging" (-not [bool]$scheduler.config.enabled) "enabled=$($scheduler.config.enabled)"
 
+try {
+  $network = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/network/outbound-ip") -Headers $headers -Method Get -TimeoutSec 30
+  $networkDetail = if ($network.ip) { "ip=$($network.ip)" } else { "message=$($network.message), detail=$($network.detail)" }
+  Write-Check "Render outbound IP" ([bool]$network.ip) $networkDetail
+} catch {
+  Write-Check "Render outbound IP" $false (Format-ApiError $_)
+}
+
 $toss = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/status") -Headers $headers -Method Get -TimeoutSec 30
 $tossReady = [bool]$toss.readyForMarketData
 Write-Check "Toss status" $tossReady "ready=$tossReady, prices=$($toss.livePricesEnabled), candles=$($toss.liveCandlesEnabled), orderbook=$($toss.liveOrderbookEnabled), trades=$($toss.liveTradesEnabled)"

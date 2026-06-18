@@ -116,6 +116,9 @@ OPENAI_ANALYSIS_ENABLED = os.getenv("OPENAI_ANALYSIS_ENABLED", "1").lower() not 
 OPENAI_ANALYSIS_CACHE_SECONDS = int(os.getenv("OPENAI_ANALYSIS_CACHE_SECONDS", "900"))
 OPENAI_ANALYSIS_MAX_CANDIDATES = int(os.getenv("OPENAI_ANALYSIS_MAX_CANDIDATES", "1"))
 OPENAI_REQUEST_TIMEOUT_SECONDS = int(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "20"))
+OUTBOUND_IP_CHECK_URL = os.getenv("OUTBOUND_IP_CHECK_URL", "https://api.ipify.org?format=json")
+OUTBOUND_IP_CACHE_SECONDS = int(os.getenv("OUTBOUND_IP_CACHE_SECONDS", "300"))
+OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS", "5"))
 SIGNAL_SCHEDULER_ENABLED = os.getenv("SIGNAL_SCHEDULER_ENABLED", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SECONDS", "30"))
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
@@ -135,6 +138,7 @@ PRICE_CACHE: dict[str, object] = {"symbols": (), "payload": None, "expires_at": 
 CANDLE_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 ORDERBOOK_CACHE: dict[str, dict[str, object]] = {}
 TRADES_CACHE: dict[tuple[str, int], dict[str, object]] = {}
+OUTBOUND_IP_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 CORP_CODE_CACHE: dict[str, object] = {"payload": None}
 DISCLOSURE_CACHE: dict[tuple[str, int], dict[str, object]] = {}
 NEWS_CACHE: dict[tuple[str, int, int, str], dict[str, object]] = {}
@@ -276,6 +280,52 @@ def market_config_status() -> dict:
         "fxCacheSeconds": FX_RATE_CACHE_SECONDS,
         "indexCacheSeconds": MARKET_INDEX_CACHE_SECONDS,
     }
+
+
+def outbound_ip_status() -> dict:
+    cached = OUTBOUND_IP_CACHE.get("payload")
+    expires_at = OUTBOUND_IP_CACHE.get("expires_at")
+    if cached and isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+        payload = dict(cached)  # type: ignore[arg-type]
+        payload["cached"] = True
+        return payload
+
+    try:
+        request = Request(
+            OUTBOUND_IP_CHECK_URL,
+            headers={"User-Agent": "market-signal-desk/1.0"},
+            method="GET",
+        )
+        with urlopen(request, timeout=OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        ip = ""
+        try:
+            parsed = json.loads(raw)
+            ip = str(parsed.get("ip") or parsed.get("origin") or "").strip()
+        except json.JSONDecodeError:
+            ip = raw.strip()
+        payload = {
+            "source": "external-check",
+            "provider": OUTBOUND_IP_CHECK_URL,
+            "ip": ip,
+            "cached": False,
+            "cacheSeconds": OUTBOUND_IP_CACHE_SECONDS,
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+            "message": "현재 Render 서버가 외부 API에 접근할 때 보이는 IP입니다.",
+        }
+        OUTBOUND_IP_CACHE["payload"] = payload
+        OUTBOUND_IP_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=OUTBOUND_IP_CACHE_SECONDS)
+        return payload
+    except Exception as error:
+        return {
+            "source": "unavailable",
+            "provider": OUTBOUND_IP_CHECK_URL,
+            "ip": "",
+            "cached": False,
+            "error": type(error).__name__,
+            "message": "외부 IP를 확인하지 못했습니다.",
+            "detail": str(error)[:240],
+        }
 
 
 def openai_config_status() -> dict:
@@ -3280,6 +3330,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/integrations/toss/status":
             self.send_json(toss_config_status())
+            return
+
+        if parsed.path == "/api/network/outbound-ip":
+            self.send_json(outbound_ip_status())
             return
 
         if parsed.path == "/api/integrations/market/status":

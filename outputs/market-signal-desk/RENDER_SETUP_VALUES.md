@@ -249,6 +249,10 @@ TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT=50
 
 토스증권 Open API에서 허용 IP를 관리한다면 Render 서버의 외부 IP가 허용 IP에 등록되어 있어야 합니다. IP가 맞지 않으면 테스트에서 `Toss prices API` 또는 토큰 발급 단계가 `CHECK`로 표시됩니다.
 
+Render의 outbound IP는 서비스 상세 화면에서 `Connect` 드롭다운을 열고 `Outbound` 탭에서 확인합니다. 앱 화면의 `Render 외부 IP` 카드와 `test-render-deploy.ps1`의 `Render outbound IP` 항목은 현재 서버가 외부에서 보이는 IP를 보여줍니다.
+
+Toss가 CIDR 범위를 허용하면 Render `Outbound` 탭의 IP 범위를 등록합니다. Toss가 단일 IP만 허용하면 앱에 표시된 현재 IP를 먼저 등록해 테스트하고, 안정 운영에는 Render Dedicated Outbound IP 또는 고정 IP 프록시가 필요할 수 있습니다.
+
 저장 후 재배포가 끝나면 아래 스크립트를 실행합니다.
 
 ```powershell

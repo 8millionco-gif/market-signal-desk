@@ -131,6 +131,7 @@ $env:TOSS_ACCESS_TOKEN="your_access_token"
 토스증권 Open API는 `client_id`와 `client_secret`으로 OAuth 토큰을 발급한 뒤 API를 호출합니다. 라이브 키가 노출되면 재발급 후 기존 키를 폐기하세요.
 
 토스증권 Open API 화면에서 허용 IP를 관리하는 경우, 서버를 실행하는 PC/서버의 외부 IP가 허용 IP에 등록되어 있어야 합니다. IP가 다르면 키와 시크릿이 맞아도 토큰 발급 또는 API 호출이 실패할 수 있습니다.
+Render 배포 환경에서는 오른쪽 `Render 외부 IP` 카드 또는 `GET /api/network/outbound-ip`로 현재 외부 IP를 확인할 수 있습니다. Render 대시보드의 서비스 상세 `Connect > Outbound` 탭에서도 outbound IP 범위를 확인합니다.
 
 환경변수가 설정되어 있으면 대시보드는 후보 종목의 현재가를 `GET /api/v1/prices`로 조회해 샘플 가격을 덮어씁니다. 또한 `GET /api/v1/candles` 일봉 데이터를 이용해 미니 차트와 전일 대비 등락률을 보강합니다.
 

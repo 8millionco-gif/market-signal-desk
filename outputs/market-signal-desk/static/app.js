@@ -62,6 +62,7 @@ const els = {
   notificationStatus: document.querySelector("#notificationStatus"),
   schedulerStatus: document.querySelector("#schedulerStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
+  networkStatus: document.querySelector("#networkStatus"),
   tossStatus: document.querySelector("#tossStatus"),
   dartStatus: document.querySelector("#dartStatus"),
   newsStatus: document.querySelector("#newsStatus"),
@@ -203,6 +204,11 @@ function statusFallbacks() {
       state: { started: false, running: false, lastError: "" },
       recentRuns: []
     },
+    network: {
+      source: "unavailable",
+      provider: "",
+      ip: ""
+    },
     toss: {
       clientIdConfigured: false,
       clientSecretConfigured: false,
@@ -240,13 +246,15 @@ async function loadDashboard() {
   const statusPromise = Promise.all([
     safeFetchJson("/api/auth/status", fallbacks.auth),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
+    safeFetchJson("/api/network/outbound-ip", fallbacks.network),
     safeFetchJson("/api/integrations/toss/status", fallbacks.toss),
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.schedulerStatus = schedulerStatus;
+    state.networkStatus = networkStatus;
     state.tossStatus = tossStatus;
     state.dartStatus = dartStatus;
     state.newsStatus = newsStatus;
@@ -257,6 +265,7 @@ async function loadDashboard() {
     renderSnapshotHistory();
     renderNotificationStatus();
     renderMarketStatus();
+    renderNetworkStatus();
     renderTossStatus();
     renderDartStatus();
     renderNewsStatus();
@@ -361,6 +370,7 @@ function render() {
   renderSnapshotHistory();
   renderNotificationStatus();
   renderMarketStatus();
+  renderNetworkStatus();
   renderTossStatus();
   renderDartStatus();
   renderNewsStatus();
@@ -875,6 +885,40 @@ function renderMarketStatus() {
     ]
   ];
   els.marketStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderNetworkStatus() {
+  if (!els.networkStatus) return;
+  const status = state.networkStatus;
+  const rows = [
+    ["현재 외부 IP", Boolean(status?.ip), status?.ip || "확인 실패"],
+    [
+      "확인 방식",
+      status?.source === "external-check",
+      status?.source === "external-check" ? "외부 조회" : "대시보드 확인"
+    ],
+    [
+      "등록 위치",
+      true,
+      "Toss 허용 IP"
+    ],
+    [
+      "주의",
+      !status?.error,
+      status?.error ? shortText(status.detail || status.message || status.error, 28) : "범위/고정IP 확인"
+    ]
+  ];
+  els.networkStatus.innerHTML = rows
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
