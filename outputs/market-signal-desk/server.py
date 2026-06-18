@@ -29,6 +29,7 @@ SEED_FILE = DATA_DIR / "seed.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
+SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -2937,6 +2938,44 @@ def job_is_due(job: dict, now: datetime) -> bool:
     return not scheduled_snapshot_exists(now.date().isoformat(), str(job.get("mode", "")))
 
 
+def scheduled_datetime(job: dict, run_date) -> datetime | None:
+    scheduled_minutes = minutes_from_hhmm(str(job.get("time", "")))
+    if scheduled_minutes is None:
+        return None
+    return datetime.combine(run_date, datetime.min.time(), tzinfo=KST) + timedelta(minutes=scheduled_minutes)
+
+
+def next_scheduler_run(now: datetime | None = None) -> dict:
+    now = now or datetime.now(KST)
+    candidates = []
+    for job in scheduler_jobs():
+        mode = str(job.get("mode", ""))
+        run_at = scheduled_datetime(job, now.date())
+        if run_at is None:
+            continue
+        window_minutes = bounded_int(job.get("windowMinutes", 0), 0, 24 * 60)
+        window_end = run_at + timedelta(minutes=window_minutes)
+        already_ran_today = scheduled_snapshot_exists(now.date().isoformat(), mode)
+        if already_ran_today or now > window_end:
+            run_at = scheduled_datetime(job, now.date() + timedelta(days=1))
+            already_ran_today = False
+        if run_at is None:
+            continue
+        due_seconds = max(0, int((run_at - now).total_seconds()))
+        status = "ready-now" if SIGNAL_SCHEDULER_ENABLED and due_seconds == 0 and not already_ran_today else "waiting"
+        candidates.append({
+            "mode": mode,
+            "label": job.get("label", ""),
+            "time": job.get("time", ""),
+            "runAt": run_at.isoformat(timespec="seconds"),
+            "dueInMinutes": due_seconds // 60,
+            "windowMinutes": window_minutes,
+            "status": status,
+        })
+    candidates.sort(key=lambda item: item["runAt"])
+    return candidates[0] if candidates else {}
+
+
 def dashboard_summary(payload: dict) -> dict:
     candidates = payload.get("candidates", [])
     if not isinstance(candidates, list):
@@ -2990,6 +3029,39 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
     return records
+
+
+def snapshot_storage_status() -> dict:
+    writable = False
+    error = ""
+    check_path = RUNS_DIR / ".storage-check.tmp"
+    try:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        check_path.write_text(datetime.now(KST).isoformat(timespec="seconds"), encoding="utf-8")
+        check_path.unlink(missing_ok=True)
+        writable = True
+    except OSError as storage_error:
+        error = str(storage_error)
+
+    recent_runs = recent_scheduler_runs()
+    persistent = SNAPSHOT_STORAGE_MODE not in {"", "filesystem", "local", "ephemeral"}
+    return {
+        "mode": SNAPSHOT_STORAGE_MODE,
+        "implementation": "filesystem",
+        "runsDir": display_local_path(RUNS_DIR),
+        "runsDirExists": RUNS_DIR.exists(),
+        "writable": writable,
+        "persistent": persistent,
+        "recentRunCount": len(recent_runs),
+        "latestRunId": recent_runs[0]["id"] if recent_runs else "",
+        "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
+        "message": (
+            "영구 저장소로 표시되어 있습니다."
+            if persistent
+            else "현재 스냅샷은 파일 저장소에 남습니다. 운영 전에는 영구 저장소를 검토하세요."
+        ),
+        "error": error,
+    }
 
 
 def scheduler_snapshot_path(run_id: str) -> Path | None:
@@ -3253,6 +3325,7 @@ def scheduler_status() -> dict:
     return {
         "config": scheduler_config_status(),
         "state": state,
+        "nextRun": next_scheduler_run(),
         "recentRuns": recent_scheduler_runs(),
     }
 
@@ -3448,6 +3521,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/scheduler/status":
             self.send_json(scheduler_status())
+            return
+
+        if parsed.path == "/api/storage/status":
+            self.send_json(snapshot_storage_status())
             return
 
         if parsed.path == "/api/performance":

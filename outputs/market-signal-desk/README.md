@@ -331,6 +331,7 @@ Render 배포에서는 자동 실행을 켜기 전에 아래처럼 수동 스냅
 ```
 
 화면의 `자동 실행 준비도` 카드에서 `판정`이 `활성화 가능`이면 `SIGNAL_SCHEDULER_ENABLED=1`로 전환합니다.
+자동 실행을 켠 뒤에는 `스케줄러 상태` 카드의 `다음 실행`과 `최근 실행`을 같이 봅니다. `최근 실행`에는 수동/자동 구분이 표시되며, 예약 시간이 지나면 `스냅샷 히스토리`에 `자동` 기록이 쌓여야 합니다.
 
 ## 성과 검증 설정
 
@@ -355,7 +356,9 @@ $env:SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT="1"
 - 장마감/장전/장중 모드별 후보 정렬
 - 뉴스, 시세, 지수, 공시 신호 기반 후보 점수 재계산
 - 장전/장마감 자동 실행 및 분석 스냅샷 저장
+- 다음 자동 실행 예정 시간 표시
 - 저장된 스냅샷 히스토리 조회
+- 스냅샷 저장소 쓰기/보존 상태 점검
 - 저장된 스냅샷 후보의 성과 검증 화면
 - 브라우저 알림 연결
 - 관리자 토큰 기반 API 접근 보호
@@ -395,6 +398,7 @@ GET  /api/integrations/news/search?provider=gdelt&query=NVIDIA&display=3&timespa
 GET  /api/integrations/openai/status
 GET  /api/integrations/openai/analyze?symbol=005930
 GET  /api/scheduler/status
+GET  /api/storage/status
 GET  /api/scheduler/runs?limit=12
 GET  /api/scheduler/runs/{id}
 GET  /api/performance?limit=12&top=3

@@ -93,7 +93,18 @@ Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "ca
 
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler config" $true "enabled=$($scheduler.config.enabled)"
+if ($scheduler.nextRun) {
+  Write-Check "scheduler next run" ([bool]$scheduler.nextRun.runAt) "mode=$($scheduler.nextRun.mode), at=$($scheduler.nextRun.runAt), dueMin=$($scheduler.nextRun.dueInMinutes)"
+}
 $manualSnapshotReady = @($scheduler.recentRuns | Where-Object { "$($_.trigger)" -like "manual*" }).Count -gt 0
+
+$storage = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/storage/status") -Headers $headers -Method Get -TimeoutSec 30
+Write-Check "snapshot storage writable" ([bool]$storage.writable) "mode=$($storage.mode), runs=$($storage.recentRunCount), dir=$($storage.runsDir)"
+$storageMessage = $storage.message
+if (-not $storageMessage) {
+  $storageMessage = "check persistent storage before auto-run"
+}
+Write-Check "snapshot storage persistence" ([bool]$storage.persistent) $storageMessage
 
 try {
   $network = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/network/outbound-ip") -Headers $headers -Method Get -TimeoutSec 30

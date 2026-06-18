@@ -34,6 +34,7 @@ const state = {
   authRequired: false,
   adminToken: readStoredValue("marketSignalAdminToken", ""),
   schedulerStatus: null,
+  storageStatus: null,
   viewingSnapshot: null,
   selectedSymbol: null,
   notificationsEnabled: readStoredValue("marketSignalNotifications") === "1",
@@ -63,6 +64,7 @@ const els = {
   notificationStatus: document.querySelector("#notificationStatus"),
   schedulerStatus: document.querySelector("#schedulerStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
+  storageStatus: document.querySelector("#storageStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
   networkStatus: document.querySelector("#networkStatus"),
   tossStatus: document.querySelector("#tossStatus"),
@@ -206,6 +208,14 @@ function statusFallbacks() {
       state: { started: false, running: false, lastError: "" },
       recentRuns: []
     },
+    storage: {
+      mode: "filesystem",
+      implementation: "filesystem",
+      runsDir: "",
+      writable: false,
+      persistent: false,
+      recentRunCount: 0
+    },
     network: {
       source: "unavailable",
       provider: "",
@@ -248,14 +258,16 @@ async function loadDashboard() {
   const statusPromise = Promise.all([
     safeFetchJson("/api/auth/status", fallbacks.auth),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
+    safeFetchJson("/api/storage/status", fallbacks.storage),
     safeFetchJson("/api/network/outbound-ip", fallbacks.network),
     safeFetchJson("/api/integrations/toss/status", fallbacks.toss),
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, storageStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.schedulerStatus = schedulerStatus;
+    state.storageStatus = storageStatus;
     state.networkStatus = networkStatus;
     state.tossStatus = tossStatus;
     state.dartStatus = dartStatus;
@@ -265,6 +277,7 @@ async function loadDashboard() {
     renderAuthStatus();
     renderSchedulerStatus();
     renderReadinessStatus();
+    renderStorageStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
     renderNextSteps();
@@ -372,6 +385,7 @@ function render() {
   renderAuthStatus();
   renderSchedulerStatus();
   renderReadinessStatus();
+  renderStorageStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
   renderNextSteps();
@@ -739,6 +753,14 @@ function timeLabel(value) {
   return text ? text.replace("T", " ").slice(5, 16) : "-";
 }
 
+function scheduleTimeLabel(value) {
+  const text = String(value ?? "");
+  if (!text) return "-";
+  const date = text.slice(5, 10);
+  const time = text.slice(11, 16);
+  return `${date} ${time}`;
+}
+
 function modeLabel(mode) {
   if (mode === "preopen") return "장전";
   if (mode === "intraday") return "장중";
@@ -766,12 +788,18 @@ function renderSchedulerStatus() {
   if (!status) return;
   const config = status.config ?? {};
   const schedulerState = status.state ?? {};
+  const nextRun = status.nextRun ?? {};
   const jobs = Array.isArray(config.jobs) ? config.jobs : [];
   const recentRuns = Array.isArray(status.recentRuns) ? status.recentRuns : [];
   const latest = recentRuns[0];
   const runText = latest
-    ? `${modeLabel(latest.mode)} · ${String(latest.createdAt ?? "").replace("T", " ").slice(5, 16)}`
+    ? `${modeLabel(latest.mode)} · ${triggerLabel(latest.trigger)} · ${String(latest.createdAt ?? "").replace("T", " ").slice(5, 16)}`
     : "없음";
+  const nextRunText = config.enabled && nextRun?.runAt
+    ? `${modeLabel(nextRun.mode)} · ${scheduleTimeLabel(nextRun.runAt)}`
+    : config.enabled
+      ? "계산 중"
+      : "꺼짐";
   const jobText = jobs.length
     ? jobs.map((job) => `${modeLabel(job.mode)} ${job.time}`).join(" · ")
     : "-";
@@ -779,6 +807,7 @@ function renderSchedulerStatus() {
     ["자동 실행", config.enabled, config.enabled ? "켜짐" : "꺼짐"],
     ["실행 상태", !schedulerState.running && !schedulerState.lastError, schedulerState.running ? "실행 중" : schedulerState.lastError ? "확인 필요" : "대기"],
     ["예약", true, jobText],
+    ["다음 실행", Boolean(config.enabled && nextRun?.runAt), nextRunText],
     ["최근 실행", Boolean(latest), runText]
   ];
   const lastError = schedulerState.lastError
@@ -909,6 +938,36 @@ function renderReadinessStatus() {
   }
 }
 
+function renderStorageStatus() {
+  if (!els.storageStatus) return;
+  const status = state.storageStatus;
+  if (!status) return;
+  const modeText = status.mode === "filesystem" ? "파일 저장" : status.mode || "-";
+  const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
+  const latestText = status.latestRunCreatedAt
+    ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
+    : `${status.recentRunCount ?? 0}건`;
+  const nextText = status.persistent ? "자동 실행 가능" : "DB/디스크 검토";
+  const rows = [
+    ["저장 방식", Boolean(status.mode), modeText],
+    ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
+    ["보존성", Boolean(status.persistent), persistenceText],
+    ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
+    ["다음", status.persistent && status.writable, nextText]
+  ];
+  els.storageStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderSnapshotHistory() {
   if (!els.snapshotHistory) return;
   const runs = state.schedulerStatus?.recentRuns ?? [];
@@ -983,8 +1042,10 @@ async function runSchedulerMode(mode) {
   try {
     const payload = await postJson("/api/scheduler/run", { mode }, 60000);
     state.schedulerStatus = payload.status ?? state.schedulerStatus;
+    state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
     maybeNotifySchedulerRun(state.schedulerStatus);
     renderSchedulerStatus();
+    renderStorageStatus();
     renderSnapshotHistory();
   } catch (error) {
     state.schedulerStatus = {
@@ -1847,9 +1908,12 @@ els.refreshButton.addEventListener("click", () => {
 
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
+  const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
   state.schedulerStatus = status;
+  state.storageStatus = storage;
   maybeNotifySchedulerRun(status);
   renderSchedulerStatus();
+  renderStorageStatus();
   renderSnapshotHistory();
 }
 
