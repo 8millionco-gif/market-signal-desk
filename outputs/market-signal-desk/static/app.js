@@ -47,6 +47,8 @@ const state = {
 const els = {
   candidateFeed: document.querySelector("#candidateFeed"),
   signalDetail: document.querySelector("#signalDetail"),
+  workspaceView: document.querySelector("#workspaceView"),
+  settingsView: document.querySelector("#settingsView"),
   candidateCount: document.querySelector("#candidateCount"),
   searchInput: document.querySelector("#searchInput"),
   principles: document.querySelector("#principles"),
@@ -59,6 +61,7 @@ const els = {
   metricHighScore: document.querySelector("#metricHighScore"),
   metricReady: document.querySelector("#metricReady"),
   metricWatched: document.querySelector("#metricWatched"),
+  tradeDecisionStatus: document.querySelector("#tradeDecisionStatus"),
   nextSteps: document.querySelector("#nextSteps"),
   marketStatus: document.querySelector("#marketStatus"),
   authStatus: document.querySelector("#authStatus"),
@@ -74,6 +77,8 @@ const els = {
   newsStatus: document.querySelector("#newsStatus"),
   openaiStatus: document.querySelector("#openaiStatus"),
   performanceButton: document.querySelector("#performanceButton"),
+  settingsButton: document.querySelector("#settingsButton"),
+  deskButton: document.querySelector("#deskButton"),
   refreshButton: document.querySelector("#refreshButton")
 };
 
@@ -392,9 +397,56 @@ function selectedCandidate() {
   );
 }
 
+function tradeActionText(item) {
+  const score = Number(item?.totalScore ?? 0);
+  const verdict = String(item?.verdict ?? "");
+  if (score >= 75 && !verdict.includes("회피")) return "조건 확인 후 관찰";
+  if (score >= 55) return "가격대 대기";
+  return "오늘은 제외 우선";
+}
+
+function tradeActionOk(item) {
+  const score = Number(item?.totalScore ?? 0);
+  const verdict = String(item?.verdict ?? "");
+  return score >= 55 && !verdict.includes("회피");
+}
+
+function renderTradeDecisionStatus() {
+  if (!els.tradeDecisionStatus) return;
+  const item = selectedCandidate();
+  if (!item) {
+    els.tradeDecisionStatus.innerHTML = `
+      <div>
+        <span>종목 선택</span>
+        <strong class="warn">대기</strong>
+      </div>
+    `;
+    return;
+  }
+  const rows = [
+    ["선택", true, item.name ?? item.symbol ?? "-"],
+    ["점수", Number(item.totalScore ?? 0) >= 75, `${item.totalScore ?? 0}/100`],
+    ["현재가", Boolean(item.price), `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
+    ["판정", tradeActionOk(item), tradeActionText(item)]
+  ];
+  els.tradeDecisionStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function render() {
+  updateShellView();
   renderMarket();
   renderMetrics();
+  renderTradeDecisionStatus();
   renderAuthStatus();
   renderSchedulerStatus();
   renderReadinessStatus();
@@ -418,6 +470,9 @@ function render() {
 }
 
 function renderCurrentView() {
+  if (state.view === "settings") {
+    return;
+  }
   if (state.view === "performance") {
     renderPerformance();
     return;
@@ -1450,9 +1505,11 @@ function renderFeed() {
   document.querySelectorAll(".feed-item").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = "signals";
+      updateShellView();
       updateViewButtons();
       state.selectedSymbol = button.dataset.symbol;
       renderFeed();
+      renderTradeDecisionStatus();
       renderDetail();
     });
   });
@@ -1914,19 +1971,50 @@ async function toggleWatch(item) {
 }
 
 function updateViewButtons() {
-  if (!els.performanceButton) return;
-  els.performanceButton.classList.toggle("active", state.view === "performance");
-  els.performanceButton.textContent = state.view === "performance" ? "데스크" : "성과";
+  if (els.performanceButton) {
+    els.performanceButton.classList.toggle("active", state.view === "performance");
+    els.performanceButton.textContent = state.view === "performance" ? "데스크" : "성과";
+  }
+  if (els.settingsButton) {
+    els.settingsButton.classList.toggle("active", state.view === "settings");
+  }
+}
+
+function updateShellView() {
+  const settingsOpen = state.view === "settings";
+  if (els.workspaceView) {
+    els.workspaceView.hidden = settingsOpen;
+  }
+  if (els.settingsView) {
+    els.settingsView.hidden = !settingsOpen;
+  }
 }
 
 async function showPerformanceView() {
   state.view = state.view === "performance" ? "signals" : "performance";
   updateViewButtons();
+  updateShellView();
   if (state.view === "performance") {
     await loadPerformance();
   } else {
     renderDetail();
   }
+}
+
+function showSettingsView() {
+  state.view = state.view === "settings" ? "signals" : "settings";
+  updateViewButtons();
+  updateShellView();
+  if (state.view === "signals") {
+    renderDetail();
+  }
+}
+
+function showDeskView() {
+  state.view = "signals";
+  updateViewButtons();
+  updateShellView();
+  renderDetail();
 }
 
 document.querySelectorAll(".mode-button").forEach((button) => {
@@ -1935,6 +2023,7 @@ document.querySelectorAll(".mode-button").forEach((button) => {
     button.classList.add("active");
     state.view = "signals";
     updateViewButtons();
+    updateShellView();
     state.mode = button.dataset.mode;
     state.selectedSymbol = null;
     loadDashboard();
@@ -1957,6 +2046,14 @@ els.searchInput.addEventListener("input", (event) => {
 
 if (els.performanceButton) {
   els.performanceButton.addEventListener("click", showPerformanceView);
+}
+
+if (els.settingsButton) {
+  els.settingsButton.addEventListener("click", showSettingsView);
+}
+
+if (els.deskButton) {
+  els.deskButton.addEventListener("click", showDeskView);
 }
 
 els.refreshButton.addEventListener("click", () => {

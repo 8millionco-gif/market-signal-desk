@@ -20,13 +20,19 @@
             <button class="mode-button" data-mode="intraday">장중</button>
           </div>
           <button class="tool-button" id="performanceButton" type="button">성과</button>
+          <button class="icon-button" id="settingsButton" type="button" title="설정" aria-label="설정">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Z"></path>
+              <path d="M19.4 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.5-2.4 1a8.2 8.2 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A8.2 8.2 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.5 2.4-1a8.2 8.2 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a8.2 8.2 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5Z"></path>
+            </svg>
+          </button>
           <button class="icon-button" id="refreshButton" title="새로고침" aria-label="새로고침">
             <span>↻</span>
           </button>
         </div>
       </header>
 
-      <main class="workspace">
+      <main class="workspace" id="workspaceView">
         <aside class="signal-panel">
           <div class="panel-header">
             <div>
@@ -116,31 +122,36 @@
 
           <section class="compact-section">
             <div class="section-title">
-              <p class="eyebrow">다음 작업</p>
-              <h2>개발 연결</h2>
+              <p class="eyebrow">판단</p>
+              <h2>선택 종목 판단</h2>
             </div>
-            <div class="next-steps" id="nextSteps">
+            <div class="connection-list" id="tradeDecisionStatus">
               <div>
-                <strong>1</strong>
-                <span>해외 뉴스 보강</span>
-              </div>
-              <div>
-                <strong>2</strong>
-                <span>선정 기준 튜닝</span>
-              </div>
-              <div>
-                <strong>3</strong>
-                <span>외부 알림 채널 확장</span>
+                <span>종목 선택</span>
+                <strong>-</strong>
               </div>
             </div>
           </section>
 
           <section class="compact-section">
             <div class="section-title">
-              <p class="eyebrow">접근 보호</p>
-              <h2>관리자 토큰</h2>
+              <p class="eyebrow">내 자산</p>
+              <h2>포트폴리오 상태</h2>
             </div>
-            <div class="connection-list" id="authStatus">
+            <div class="connection-list" id="portfolioStatus">
+              <div>
+                <span>자산 확인 중</span>
+                <strong>-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">알림</p>
+              <h2>브라우저 알림</h2>
+            </div>
+            <div class="connection-list" id="notificationStatus">
               <div>
                 <span>설정 확인 중</span>
                 <strong>-</strong>
@@ -150,10 +161,32 @@
 
           <section class="compact-section">
             <div class="section-title">
-              <p class="eyebrow">알림 연결</p>
-              <h2>브라우저 알림</h2>
+              <p class="eyebrow">히스토리</p>
+              <h2>스냅샷 히스토리</h2>
             </div>
-            <div class="connection-list" id="notificationStatus">
+            <div class="snapshot-history" id="snapshotHistory">
+              <div class="history-empty">저장된 스냅샷 확인 중</div>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <main class="settings-view" id="settingsView" hidden>
+        <section class="settings-header">
+          <div>
+            <p class="eyebrow">설정</p>
+            <h2>연결과 운영 상태</h2>
+          </div>
+          <button class="tool-button" id="deskButton" type="button">데스크로 이동</button>
+        </section>
+
+        <section class="settings-grid">
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">접근 보호</p>
+              <h2>관리자 토큰</h2>
+            </div>
+            <div class="connection-list" id="authStatus">
               <div>
                 <span>설정 확인 중</span>
                 <strong>-</strong>
@@ -197,29 +230,6 @@
                 <span>저장소 확인 중</span>
                 <strong>-</strong>
               </div>
-            </div>
-          </section>
-
-          <section class="compact-section">
-            <div class="section-title">
-              <p class="eyebrow">내 자산</p>
-              <h2>포트폴리오 상태</h2>
-            </div>
-            <div class="connection-list" id="portfolioStatus">
-              <div>
-                <span>자산 확인 중</span>
-                <strong>-</strong>
-              </div>
-            </div>
-          </section>
-
-          <section class="compact-section">
-            <div class="section-title">
-              <p class="eyebrow">히스토리</p>
-              <h2>스냅샷 히스토리</h2>
-            </div>
-            <div class="snapshot-history" id="snapshotHistory">
-              <div class="history-empty">저장된 스냅샷 확인 중</div>
             </div>
           </section>
 
@@ -300,7 +310,28 @@
               </div>
             </div>
           </section>
-        </aside>
+
+          <section class="compact-section">
+            <div class="section-title">
+              <p class="eyebrow">다음 작업</p>
+              <h2>개발 연결</h2>
+            </div>
+            <div class="next-steps" id="nextSteps">
+              <div>
+                <strong>1</strong>
+                <span>가격대 지표</span>
+              </div>
+              <div>
+                <strong>2</strong>
+                <span>보유 종목 판단</span>
+              </div>
+              <div>
+                <strong>3</strong>
+                <span>매매 기록 검증</span>
+              </div>
+            </div>
+          </section>
+        </section>
       </main>
     </div>
 
