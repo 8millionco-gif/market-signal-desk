@@ -742,6 +742,99 @@ h3 {
   line-height: 1.35;
 }
 
+.trade-plan-section {
+  grid-column: 1 / -1;
+}
+
+.trade-plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.trade-plan-head p:not(.eyebrow) {
+  margin-top: 8px;
+  color: var(--soft);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.action-pill {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--soft);
+  background: var(--chip);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.action-pill.buy {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.34);
+}
+
+.action-pill.wait {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.34);
+}
+
+.action-pill.sell,
+.action-pill.risk {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+}
+
+.trade-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trade-plan-grid div {
+  min-height: 70px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #11151d;
+}
+
+.trade-plan-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.trade-plan-grid strong {
+  display: block;
+  margin-top: 7px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.trade-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  margin: 14px 0 0;
+  list-style: none;
+}
+
+.trade-reasons li {
+  padding: 6px 9px;
+  border-radius: 999px;
+  color: var(--soft);
+  background: var(--chip);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .source-list li,
 .related-list li {
   padding: 12px;
@@ -1017,6 +1110,9 @@ h3 {
 
 .connection-list strong {
   flex: 0 0 auto;
+  max-width: 62%;
+  text-align: right;
+  overflow-wrap: anywhere;
   color: var(--soft);
   font-size: 12px;
 }
@@ -1240,6 +1336,10 @@ h3 {
   .market-note {
     grid-column: 1 / -1;
   }
+
+  .trade-plan-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 520px) {
@@ -1249,6 +1349,7 @@ h3 {
 
   .market-strip,
   .stat-grid,
+  .trade-plan-grid,
   .metrics-grid,
   .performance-metrics {
     grid-template-columns: 1fr;

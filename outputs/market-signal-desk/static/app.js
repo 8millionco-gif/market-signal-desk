@@ -489,17 +489,12 @@ function candidateFromSearchResult(item) {
 }
 
 function tradeActionText(item) {
-  const score = Number(item?.totalScore ?? 0);
-  const verdict = String(item?.verdict ?? "");
-  if (score >= 75 && !verdict.includes("회피")) return "조건 확인 후 관찰";
-  if (score >= 55) return "가격대 대기";
-  return "오늘은 제외 우선";
+  return tradePlan(item).action;
 }
 
 function tradeActionOk(item) {
-  const score = Number(item?.totalScore ?? 0);
-  const verdict = String(item?.verdict ?? "");
-  return score >= 55 && !verdict.includes("회피");
+  const plan = tradePlan(item);
+  return plan.tone === "buy" || (plan.tone === "wait" && plan.hasPrice);
 }
 
 function renderTradeDecisionStatus() {
@@ -514,11 +509,15 @@ function renderTradeDecisionStatus() {
     `;
     return;
   }
+  const plan = tradePlan(item);
+  const currentRow = plan.rows.find(([label]) => label === "관찰 매수")?.[1] ?? "-";
+  const holdingRow = plan.holding ? `${plan.holding.judgement ?? "보유"} · ${plan.holding.profitLossRate ?? "-"}` : "미보유";
   const rows = [
     ["선택", true, item.name ?? item.symbol ?? "-"],
-    ["점수", Number(item.totalScore ?? 0) >= 75, `${item.totalScore ?? 0}/100`],
-    ["현재가", Boolean(item.price), `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
-    ["판정", tradeActionOk(item), tradeActionText(item)]
+    ["액션", tradeActionOk(item), plan.action],
+    ["관찰 매수", plan.tone === "buy", currentRow],
+    ["현재가", plan.hasPrice, `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
+    ["보유", Boolean(plan.holding), holdingRow]
   ];
   els.tradeDecisionStatus.innerHTML = rows
     .map(([label, ok, value]) => {
@@ -1148,6 +1147,131 @@ function renderStorageStatus() {
 function isPositiveText(value) {
   const text = String(value ?? "").trim();
   return Boolean(text && text !== "-" && !text.startsWith("-"));
+}
+
+function parseDisplayNumber(value) {
+  const text = String(value ?? "").replace(/,/g, "");
+  if (!text || text.trim() === "-") return null;
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const number = Number(match[0]);
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseDisplayPercent(value) {
+  const match = String(value ?? "").match(/[+-]?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const number = Number(match[0]);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatPriceFromTemplate(number, template = "") {
+  if (!Number.isFinite(number)) return "-";
+  const text = String(template ?? "");
+  if (text.includes("$")) {
+    return `$${number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  if (text.includes("원") || !text.includes(".")) {
+    return `${Math.round(number).toLocaleString("ko-KR")}원`;
+  }
+  return number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatPriceRange(low, high, template = "") {
+  return `${formatPriceFromTemplate(low, template)} ~ ${formatPriceFromTemplate(high, template)}`;
+}
+
+function selectedHoldingFor(item) {
+  const holdings = Array.isArray(state.portfolioStatus?.items) ? state.portfolioStatus.items : [];
+  const symbol = String(item?.symbol ?? "").toUpperCase();
+  const name = String(item?.name ?? "").replace(/\s+/g, "").toLowerCase();
+  return (
+    holdings.find((holding) => String(holding.symbol ?? "").toUpperCase() === symbol) ||
+    holdings.find((holding) => String(holding.name ?? "").replace(/\s+/g, "").toLowerCase() === name) ||
+    null
+  );
+}
+
+function tradePlan(item) {
+  const score = Number(item?.totalScore ?? 0);
+  const current = parseDisplayNumber(item?.price);
+  const change = parseDisplayPercent(item?.change);
+  const holding = selectedHoldingFor(item);
+  const holdingRate = parseDisplayPercent(holding?.profitLossRate);
+  const holdingJudgement = String(holding?.judgement ?? "");
+  const hasPrice = Number.isFinite(current);
+  const isHeld = Boolean(holding);
+  const isAvoid = String(item?.verdict ?? "").includes("회피") || score < 55;
+  const overheated = change != null && change >= 3;
+  const weak = change != null && change <= -2;
+
+  let action = "가격 확인 대기";
+  let tone = "wait";
+  let summary = "현재가가 확인되면 매수·대기·매도 구간을 계산합니다.";
+  if (hasPrice) {
+    if (isHeld && (holdingJudgement.includes("분할매도") || (holdingRate != null && holdingRate >= 12))) {
+      action = "분할매도 검토";
+      tone = "sell";
+      summary = "보유 수익과 후보 점수가 높아 일부 이익 실현 여부를 먼저 점검합니다.";
+    } else if (isHeld && (holdingJudgement.includes("손절") || (holdingRate != null && holdingRate <= -7))) {
+      action = "리스크 축소 점검";
+      tone = "risk";
+      summary = "손실이 커진 보유 종목은 추가 매수보다 기준 이탈 여부를 먼저 봅니다.";
+    } else if (isAvoid) {
+      action = "오늘은 제외";
+      tone = "risk";
+      summary = "점수나 리스크 조건이 부족해 신규 진입보다 관찰 제외가 우선입니다.";
+    } else if (overheated) {
+      action = isHeld ? "보유 유지" : "눌림 대기";
+      tone = "wait";
+      summary = "이미 오른 구간은 추격하지 않고 눌림 또는 재돌파 확인을 기다립니다.";
+    } else if (weak) {
+      action = "반등 확인 대기";
+      tone = "wait";
+      summary = "가격이 약한 구간이라 거래량이 동반된 반등 확인 후 판단합니다.";
+    } else if (score >= 75) {
+      action = isHeld ? "보유 유지" : "관찰 매수 후보";
+      tone = "buy";
+      summary = "점수와 가격대가 무리하지 않아 조건 충족 시 관찰 후보입니다.";
+    } else {
+      action = "가격대 대기";
+      tone = "wait";
+      summary = "후보 점수는 있으나 바로 진입보다 가격 확인이 필요합니다.";
+    }
+  }
+
+  const entryLow = hasPrice ? current * 0.985 : null;
+  const entryHigh = hasPrice ? current * 1.005 : null;
+  const pullback = hasPrice ? current * 0.97 : null;
+  const chaseLimit = hasPrice ? current * 1.03 : null;
+  const stopLine = hasPrice ? current * 0.96 : null;
+  const trimLine = hasPrice ? current * 1.05 : null;
+  const template = item?.price ?? "";
+
+  return {
+    action,
+    tone,
+    summary,
+    holding,
+    hasPrice,
+    rows: [
+      ["관찰 매수", hasPrice ? formatPriceRange(entryLow, entryHigh, template) : "현재가 확인 후 계산"],
+      ["대기", hasPrice ? `${formatPriceFromTemplate(pullback, template)} 부근 눌림 확인` : "-"],
+      ["추격 금지", hasPrice ? `${formatPriceFromTemplate(chaseLimit, template)} 이상` : "-"],
+      ["손절 점검", hasPrice ? `${formatPriceFromTemplate(stopLine, template)} 이탈` : "-"],
+      ["분할매도", hasPrice ? `${formatPriceFromTemplate(trimLine, template)} 이상 또는 과열 신호` : "-"],
+      ["보유 상태", holding ? `${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}` : "미보유"]
+    ],
+    reasons: uniqueTexts(
+      [
+        `후보 점수 ${score}/100`,
+        change != null ? `현재 등락률 ${item.change}` : "",
+        holding ? `내 보유 상태 ${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}` : "내 보유 없음",
+        item.aiAnalysis?.actionBias ? `AI 판단 ${actionBiasLabel(item.aiAnalysis.actionBias)}` : ""
+      ],
+      4
+    )
+  };
 }
 
 function renderPortfolioStatus() {
@@ -1787,6 +1911,8 @@ function renderDetail() {
     </div>
 
     <div class="detail-grid">
+      ${tradePlanSection(item)}
+
       <section class="detail-section">
         <div class="section-title">
           <p class="eyebrow">진입 판단</p>
@@ -2067,6 +2193,37 @@ function statCard(label, value) {
       <span>${escapeHtml(label)}</span>
       <strong>${escapeHtml(value)}</strong>
     </div>
+  `;
+}
+
+function tradePlanSection(item) {
+  const plan = tradePlan(item);
+  return `
+    <section class="detail-section trade-plan-section">
+      <div class="trade-plan-head">
+        <div>
+          <p class="eyebrow">가격 행동</p>
+          <h2>${escapeHtml(plan.action)}</h2>
+          <p>${escapeHtml(plan.summary)}</p>
+        </div>
+        <span class="action-pill ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
+      </div>
+      <div class="trade-plan-grid">
+        ${plan.rows
+          .map(
+            ([label, value]) => `
+              <div>
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+      <ul class="trade-reasons">
+        ${plan.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
+      </ul>
+    </section>
   `;
 }
 
