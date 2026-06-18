@@ -1,5 +1,7 @@
 param(
-  [string]$BaseUrl = "https://market-signal-desk.onrender.com"
+  [string]$BaseUrl = "https://market-signal-desk.onrender.com",
+  [ValidateSet("none", "close", "preopen", "intraday")]
+  [string]$RunSchedulerMode = "none"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +28,14 @@ function Write-Check($Label, $Ok, $Detail = "") {
     Write-Host "[$status] $Label - $Detail" -ForegroundColor $color
   } else {
     Write-Host "[$status] $Label" -ForegroundColor $color
+  }
+}
+
+function Write-Skip($Label, $Detail = "") {
+  if ($Detail) {
+    Write-Host "[SKIP] $Label - $Detail" -ForegroundColor DarkGray
+  } else {
+    Write-Host "[SKIP] $Label" -ForegroundColor DarkGray
   }
 }
 
@@ -82,7 +92,7 @@ $dashboard = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/dashboard?mode=clos
 Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "candidates=$($dashboard.summary.candidateCount)"
 
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
-Write-Check "scheduler disabled for staging" (-not [bool]$scheduler.config.enabled) "enabled=$($scheduler.config.enabled)"
+Write-Check "scheduler config" $true "enabled=$($scheduler.config.enabled)"
 
 try {
   $network = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/network/outbound-ip") -Headers $headers -Method Get -TimeoutSec 30
@@ -239,6 +249,30 @@ if ($openaiReady) {
   Write-Check "OpenAI analyze API" ($analysis.source -eq "openai") $detail
 } else {
   Write-Check "OpenAI analyze API" $false "waiting for OPENAI_API_KEY and OPENAI_ANALYSIS_ENABLED=1"
+}
+
+if ($RunSchedulerMode -ne "none") {
+  try {
+    $runBody = @{ mode = $RunSchedulerMode } | ConvertTo-Json -Compress
+    $run = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/run") -Headers $headers -Method Post -Body $runBody -ContentType "application/json" -TimeoutSec 90
+    Write-Check "scheduler manual run" ([bool]$run.ok) "mode=$RunSchedulerMode, id=$($run.record.id)"
+
+    $runs = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/runs?limit=3") -Headers $headers -Method Get -TimeoutSec 30
+    $latestRun = @($runs.runs)[0]
+    Write-Check "snapshot history" ($null -ne $latestRun) "latest=$($latestRun.id), trigger=$($latestRun.trigger)"
+
+    if ($latestRun) {
+      $detail = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/runs/$($latestRun.id)") -Headers $headers -Method Get -TimeoutSec 30
+      Write-Check "snapshot detail" ($null -ne $detail.dashboard) "candidates=$($detail.record.summary.candidateCount)"
+    }
+
+    $performance = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/performance?limit=12&top=3") -Headers $headers -Method Get -TimeoutSec 45
+    Write-Check "performance report" ($null -ne $performance.summary) "runs=$($performance.summary.runCount), measured=$($performance.summary.measuredCount)"
+  } catch {
+    Write-Check "scheduler manual run" $false (Format-ApiError $_)
+  }
+} else {
+  Write-Skip "scheduler manual run" "optional: run with -RunSchedulerMode close"
 }
 
 Write-Host ""

@@ -57,6 +57,7 @@ const els = {
   metricHighScore: document.querySelector("#metricHighScore"),
   metricReady: document.querySelector("#metricReady"),
   metricWatched: document.querySelector("#metricWatched"),
+  nextSteps: document.querySelector("#nextSteps"),
   marketStatus: document.querySelector("#marketStatus"),
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
@@ -264,6 +265,7 @@ async function loadDashboard() {
     renderSchedulerStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
+    renderNextSteps();
     renderMarketStatus();
     renderNetworkStatus();
     renderTossStatus();
@@ -369,6 +371,7 @@ function render() {
   renderSchedulerStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
+  renderNextSteps();
   renderMarketStatus();
   renderNetworkStatus();
   renderTossStatus();
@@ -691,6 +694,45 @@ function renderMetrics() {
   els.metricHighScore.textContent = summary.highScoreCount ?? 0;
   els.metricReady.textContent = summary.readyCount ?? 0;
   els.metricWatched.textContent = summary.watchedCount ?? 0;
+}
+
+function renderNextSteps() {
+  if (!els.nextSteps) return;
+  const toss = state.dashboard?.integrations?.toss ?? {};
+  const scheduler = state.schedulerStatus ?? {};
+  const schedulerEnabled = Boolean(scheduler.config?.enabled);
+  const recentRuns = Array.isArray(scheduler.recentRuns) ? scheduler.recentRuns : [];
+  const tossReady =
+    toss.prices?.source === "toss" &&
+    toss.candles?.source === "toss" &&
+    toss.orderbook?.source === "toss" &&
+    toss.trades?.source === "toss";
+  const steps = [];
+  if (!tossReady) {
+    steps.push("Toss 출처 확인");
+    steps.push("허용 IP 점검");
+    steps.push("현재가부터 재검증");
+  } else if (!recentRuns.length) {
+    steps.push("장마감 수동 실행");
+    steps.push("스냅샷 저장 확인");
+    steps.push("성과 화면 점검");
+  } else if (!schedulerEnabled) {
+    steps.push("자동 실행 켜기");
+    steps.push("장전·장마감 예약 확인");
+    steps.push("알림 조건 확정");
+  } else {
+    steps.push("성과 리포트 관찰");
+    steps.push("선정 기준 튜닝");
+    steps.push("외부 알림 채널 확장");
+  }
+  els.nextSteps.innerHTML = steps
+    .map((step, index) => `
+      <div>
+        <strong>${index + 1}</strong>
+        <span>${escapeHtml(step)}</span>
+      </div>
+    `)
+    .join("");
 }
 
 function timeLabel(value) {
