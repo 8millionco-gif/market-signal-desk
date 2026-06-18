@@ -706,6 +706,24 @@ h3 {
   background: rgba(255, 100, 115, 0.1);
 }
 
+.feed-title .pool-momentum-up {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.38);
+  background: rgba(123, 216, 143, 0.12);
+}
+
+.feed-title .pool-momentum-down {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
+}
+
+.feed-title .pool-momentum-flat {
+  color: var(--soft);
+  border-color: rgba(180, 193, 216, 0.24);
+  background: rgba(180, 193, 216, 0.08);
+}
+
 .feed-title .evidence-badge {
   color: var(--soft);
   border-color: rgba(180, 193, 216, 0.24);

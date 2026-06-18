@@ -584,6 +584,19 @@ function candidatePoolStateForDisplay(item) {
     reason: pool.stateReason || compression.reason || "봇이 후보 풀에서 계속 관찰합니다.",
     observations: Number(pool.observations ?? 0),
     selectedCount: Number(pool.selectedCount ?? 0),
+    stateChangedAt: pool.stateChangedAt || "",
+    stateChangeCount: Number(pool.stateChangeCount ?? 0),
+    promotionCount: Number(pool.promotionCount ?? 0),
+    demotionCount: Number(pool.demotionCount ?? 0),
+    softDemotionCount: Number(pool.softDemotionCount ?? 0),
+    peakScore: Number(pool.peakScore ?? 0),
+    peakReadiness: Number(pool.peakReadiness ?? 0),
+    peakConfidenceScore: Number(pool.peakConfidenceScore ?? 0),
+    peakReactionScore: Number(pool.peakReactionScore ?? 0),
+    peakEvidenceScore: Number(pool.peakEvidenceScore ?? 0),
+    scoreDelta: Number(pool.scoreDelta ?? 0),
+    momentumLabel: pool.momentumLabel || "",
+    transitionHistory: Array.isArray(pool.transitionHistory) ? pool.transitionHistory : [],
     firstSeenAt: pool.firstSeenAt || "",
     lastSeenAt: pool.lastSeenAt || "",
     lastSelectedAt: pool.lastSelectedAt || ""
@@ -1400,7 +1413,7 @@ function renderMetrics() {
     const poolActive = Number(summary.candidatePoolActiveCount ?? 0);
     const poolText =
       poolTotal || poolActive
-        ? ` · 후보풀 ${poolActive}/${poolTotal} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0}`
+        ? ` · 후보풀 ${poolActive}/${poolTotal} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
         : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
@@ -2622,6 +2635,7 @@ function renderFeed() {
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
               <span class="feed-badge pool-state-badge pool-${escapeHtml(poolState.key)}">${escapeHtml(poolState.label)}</span>
+              ${poolState.momentumLabel ? `<span class="feed-badge pool-momentum pool-momentum-${escapeHtml(poolState.momentumLabel === "개선" ? "up" : poolState.momentumLabel === "약화" ? "down" : "flat")}">${escapeHtml(poolState.momentumLabel)}${poolState.scoreDelta ? ` ${poolState.scoreDelta > 0 ? "+" : ""}${escapeHtml(poolState.scoreDelta)}` : ""}</span>` : ""}
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${evidence.label ? `<span class="feed-badge evidence-badge evidence-${escapeHtml(evidence.grade || "weak")}">${escapeHtml(evidence.label)} ${escapeHtml(evidence.score)}</span>` : ""}
@@ -3430,12 +3444,18 @@ function decisionGroupSection(item) {
 
 function candidatePoolSection(item) {
   const pool = candidatePoolStateForDisplay(item);
+  const deltaText = pool.scoreDelta > 0 ? `+${pool.scoreDelta}` : `${pool.scoreDelta}`;
+  const history = pool.transitionHistory.slice(-3).reverse();
   const rows = [
     ["상태", pool.label],
     ["관측 횟수", pool.observations ? `${pool.observations}회` : "-"],
     ["선정 횟수", pool.selectedCount ? `${pool.selectedCount}회` : "-"],
+    ["최고 점수", pool.peakScore ? `${pool.peakScore}/100` : "-"],
+    ["최고 준비도", pool.peakReadiness ? `${pool.peakReadiness}/100` : "-"],
+    ["상태 변화", `${pool.promotionCount}회 승격 · ${pool.demotionCount}회 강등`],
+    ["최근 변화", pool.momentumLabel ? `${pool.momentumLabel} ${deltaText}` : "-"],
+    ["강등 보류", pool.softDemotionCount ? `${pool.softDemotionCount}회` : "-"],
     ["최근 관측", timeLabel(pool.lastSeenAt)],
-    ["첫 수집", timeLabel(pool.firstSeenAt)],
     ["최근 선정", pool.lastSelectedAt ? timeLabel(pool.lastSelectedAt) : "-"]
   ];
   return `
@@ -3449,7 +3469,23 @@ function candidatePoolSection(item) {
       </div>
       <ul class="bullet-list">
         <li>${escapeHtml(pool.reason)}</li>
+        ${pool.stateChangedAt ? `<li>${escapeHtml(`최근 상태 변경: ${timeLabel(pool.stateChangedAt)}`)}</li>` : ""}
       </ul>
+      ${
+        history.length
+          ? `<div class="selection-notes">
+              <div class="section-title">
+                <p class="eyebrow">상태 이력</p>
+                <h2>최근 승격·강등</h2>
+              </div>
+              <ul class="bullet-list">
+                ${history
+                  .map((entry) => `<li>${escapeHtml(`${timeLabel(entry.at)} · ${entry.fromLabel || entry.from} → ${entry.toLabel || entry.to} · ${entry.reason || ""}`)}</li>`)
+                  .join("")}
+              </ul>
+            </div>`
+          : ""
+      }
     </section>
   `;
 }

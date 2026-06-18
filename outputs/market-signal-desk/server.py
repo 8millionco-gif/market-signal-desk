@@ -161,6 +161,7 @@ SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUAL
 SIGNAL_CANDIDATE_POOL_ENABLED = os.getenv("SIGNAL_CANDIDATE_POOL_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_CANDIDATE_POOL_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS", "500"))
 SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
+SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -4283,6 +4284,10 @@ CANDIDATE_POOL_STATES = {
 }
 
 
+def candidate_pool_rank(state_key: str) -> int:
+    return CANDIDATE_POOL_STATES.get(state_key, {}).get("rank", 0)
+
+
 def candidate_pool_empty() -> dict:
     return {
         "version": 1,
@@ -4300,7 +4305,7 @@ def candidate_pool_data() -> dict:
     return data
 
 
-def candidate_pool_state(candidate: dict, stage: str = "selected") -> tuple[str, str]:
+def candidate_pool_state(candidate: dict, stage: str = "selected", existing: dict | None = None) -> tuple[str, str]:
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
     final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
@@ -4316,6 +4321,7 @@ def candidate_pool_state(candidate: dict, stage: str = "selected") -> tuple[str,
     evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
     quality_tier = str(discovery.get("qualityTier", quality.get("tier", "")))
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    previous_state = str((existing or {}).get("stateKey", ""))
 
     if official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or compression_tier == "exclude" or risk >= 24:
         return "excluded", "리스크 또는 제외 판단으로 신규 진입 대상에서 제외"
@@ -4330,7 +4336,11 @@ def candidate_pool_state(candidate: dict, stage: str = "selected") -> tuple[str,
     if action_key in {"watch", "verify"} or compression_tier in {"review", "wait"}:
         return "watching", "조건은 감지됐지만 진입 전 추가 확인 필요"
     if stage == "discovered" and (quality_tier in {"primary", "reserve"} or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE):
+        if candidate_pool_rank(previous_state) >= candidate_pool_rank("validating"):
+            return previous_state, "이전 검증 상태를 유지하고 정밀 분석 결과로 강등 여부를 확인"
         return "watching", "수집 단계에서 의미 있는 근거가 감지되어 관찰 풀에 유지"
+    if stage == "discovered" and candidate_pool_rank(previous_state) >= candidate_pool_rank("validating"):
+        return previous_state, "수집 단계의 약한 신호만으로 기존 고신뢰 상태를 낮추지 않음"
     return "collected", "봇이 발견했지만 아직 투자 판단 근거는 부족"
 
 
@@ -4344,8 +4354,40 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
     confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
     reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
     previous_state = str(existing.get("stateKey", ""))
-    state_key, state_reason = candidate_pool_state(candidate, stage)
+    desired_state, desired_reason = candidate_pool_state(candidate, stage, existing)
     now_text = now.isoformat(timespec="seconds")
+    previous_rank = candidate_pool_rank(previous_state)
+    desired_rank = candidate_pool_rank(desired_state)
+    soft_demotion_count = bounded_int(existing.get("softDemotionCount", 0), 0, 100_000)
+    demotion_confirmations = max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS)
+    force_state_change = desired_state in {"excluded", "expired"} or desired_rank >= previous_rank or not previous_state
+    if stage == "selected" and previous_rank > desired_rank and not force_state_change:
+        soft_demotion_count += 1
+        if soft_demotion_count < demotion_confirmations:
+            state_key = previous_state
+            state_reason = f"{desired_reason} · {soft_demotion_count}/{demotion_confirmations}회 약화 확인, 급격한 강등 보류"
+        else:
+            state_key = desired_state
+            state_reason = f"{desired_reason} · {soft_demotion_count}회 연속 약화되어 강등"
+            soft_demotion_count = 0
+    else:
+        state_key = desired_state
+        state_reason = desired_reason
+        if desired_rank >= previous_rank or desired_state in {"excluded", "expired"}:
+            soft_demotion_count = 0
+    current_score = bounded_int(candidate.get("totalScore", existing.get("totalScore", 0)), 0, 100)
+    current_readiness = bounded_int(candidate.get("triggerReadiness", existing.get("triggerReadiness", 0)), 0, 100)
+    current_confidence = bounded_int(confidence.get("score", existing.get("confidenceScore", 0)), 0, 100)
+    current_reaction = bounded_int(reaction.get("score", existing.get("reactionScore", 0)), 0, 100)
+    current_evidence = bounded_int(evidence.get("score", discovery.get("evidenceScore", existing.get("evidenceScore", 0))), 0, 100)
+    previous_score = bounded_int(existing.get("totalScore", current_score), 0, 100)
+    score_delta = current_score - previous_score
+    if score_delta >= 5:
+        momentum_label = "개선"
+    elif score_delta <= -5:
+        momentum_label = "약화"
+    else:
+        momentum_label = "유지"
 
     record = dict(existing)
     record.update({
@@ -4363,11 +4405,19 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
         "lastStage": stage,
         "lastSeenAt": now_text,
         "observations": bounded_int(existing.get("observations", 0), 0, 100_000) + 1,
-        "totalScore": bounded_int(candidate.get("totalScore", existing.get("totalScore", 0)), 0, 100),
-        "triggerReadiness": bounded_int(candidate.get("triggerReadiness", existing.get("triggerReadiness", 0)), 0, 100),
-        "confidenceScore": bounded_int(confidence.get("score", existing.get("confidenceScore", 0)), 0, 100),
-        "reactionScore": bounded_int(reaction.get("score", existing.get("reactionScore", 0)), 0, 100),
-        "evidenceScore": bounded_int(evidence.get("score", discovery.get("evidenceScore", existing.get("evidenceScore", 0))), 0, 100),
+        "totalScore": current_score,
+        "triggerReadiness": current_readiness,
+        "confidenceScore": current_confidence,
+        "reactionScore": current_reaction,
+        "evidenceScore": current_evidence,
+        "peakScore": max(bounded_int(existing.get("peakScore", 0), 0, 100), current_score),
+        "peakReadiness": max(bounded_int(existing.get("peakReadiness", 0), 0, 100), current_readiness),
+        "peakConfidenceScore": max(bounded_int(existing.get("peakConfidenceScore", 0), 0, 100), current_confidence),
+        "peakReactionScore": max(bounded_int(existing.get("peakReactionScore", 0), 0, 100), current_reaction),
+        "peakEvidenceScore": max(bounded_int(existing.get("peakEvidenceScore", 0), 0, 100), current_evidence),
+        "scoreDelta": score_delta,
+        "momentumLabel": momentum_label,
+        "softDemotionCount": soft_demotion_count,
         "evidenceGrade": evidence.get("grade", discovery.get("evidenceGrade", existing.get("evidenceGrade", ""))),
         "validationKey": validation.get("key", existing.get("validationKey", "")),
         "validationLabel": validation.get("label", existing.get("validationLabel", "")),
@@ -4386,7 +4436,33 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
         record["lastSelectedAt"] = now_text
         record["selectedCount"] = bounded_int(existing.get("selectedCount", 0), 0, 100_000) + 1
 
-    promoted = previous_state not in {"entry_candidate", "portfolio"} and state_key in {"entry_candidate", "portfolio"}
+    changed = state_key != previous_state
+    if changed:
+        record["stateChangedAt"] = now_text
+        record["stateChangeCount"] = bounded_int(existing.get("stateChangeCount", 0), 0, 100_000) + 1
+        if previous_state and desired_rank > previous_rank:
+            record["promotionCount"] = bounded_int(existing.get("promotionCount", 0), 0, 100_000) + 1
+        elif previous_state and desired_rank < previous_rank:
+            record["demotionCount"] = bounded_int(existing.get("demotionCount", 0), 0, 100_000) + 1
+        history = existing.get("transitionHistory", [])
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "at": now_text,
+            "from": previous_state or "-",
+            "to": state_key,
+            "fromLabel": CANDIDATE_POOL_STATES.get(previous_state, {}).get("label", previous_state or "-"),
+            "toLabel": CANDIDATE_POOL_STATES.get(state_key, {}).get("label", state_key),
+            "mode": mode,
+            "stage": stage,
+            "reason": state_reason,
+            "score": current_score,
+        })
+        record["transitionHistory"] = history[-8:]
+    elif not record.get("stateChangedAt"):
+        record["stateChangedAt"] = now_text
+
+    promoted = bool(previous_state) and previous_state not in {"entry_candidate", "portfolio"} and state_key in {"entry_candidate", "portfolio"}
     return record, promoted
 
 
@@ -4436,6 +4512,11 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     items = payload.get("items", {}) if isinstance(payload.get("items"), dict) else {}
     counts: dict[str, int] = {key: 0 for key in CANDIDATE_POOL_STATES}
     active_count = 0
+    promotion_count = 0
+    demotion_count = 0
+    soft_demotion_count = 0
+    improving_count = 0
+    weakening_count = 0
     for record in items.values():
         if not isinstance(record, dict):
             continue
@@ -4443,15 +4524,29 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         counts[key] = counts.get(key, 0) + 1
         if key not in {"excluded", "expired"}:
             active_count += 1
+        promotion_count += bounded_int(record.get("promotionCount", 0), 0, 100_000)
+        demotion_count += bounded_int(record.get("demotionCount", 0), 0, 100_000)
+        soft_demotion_count += bounded_int(record.get("softDemotionCount", 0), 0, 100_000)
+        momentum = str(record.get("momentumLabel", ""))
+        if momentum == "개선":
+            improving_count += 1
+        elif momentum == "약화":
+            weakening_count += 1
     return {
         "enabled": SIGNAL_CANDIDATE_POOL_ENABLED,
         "file": display_local_path(CANDIDATE_POOL_FILE),
         "totalCount": len(items),
         "activeCount": active_count,
         "statusCounts": counts,
+        "promotionCount": promotion_count,
+        "demotionCount": demotion_count,
+        "softDemotionCount": soft_demotion_count,
+        "improvingCount": improving_count,
+        "weakeningCount": weakening_count,
         "updatedAt": payload.get("updatedAt", ""),
         "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
         "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
+        "demotionConfirmations": max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS),
     }
 
 
@@ -4492,6 +4587,19 @@ def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "
                     "lastSelectedAt",
                     "observations",
                     "selectedCount",
+                    "stateChangedAt",
+                    "stateChangeCount",
+                    "promotionCount",
+                    "demotionCount",
+                    "softDemotionCount",
+                    "peakScore",
+                    "peakReadiness",
+                    "peakConfidenceScore",
+                    "peakReactionScore",
+                    "peakEvidenceScore",
+                    "scoreDelta",
+                    "momentumLabel",
+                    "transitionHistory",
                 ]
                 if key in items[symbol]
             }
@@ -6595,6 +6703,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolUpdatedCount": pool_status.get("updatedCount"),
             "candidatePoolPromotedCount": pool_status.get("promotedCount"),
             "candidatePoolExpiredCount": pool_status.get("expiredCount"),
+            "candidatePoolTotalPromotionCount": pool_status.get("promotionCount"),
+            "candidatePoolTotalDemotionCount": pool_status.get("demotionCount"),
+            "candidatePoolSoftDemotionCount": pool_status.get("softDemotionCount"),
+            "candidatePoolImprovingCount": pool_status.get("improvingCount"),
+            "candidatePoolWeakeningCount": pool_status.get("weakeningCount"),
             "confirmedSignalCount": selection_status.get("confirmedSignalCount"),
             "evidenceWaitSignalCount": selection_status.get("evidenceWaitSignalCount"),
             "reactionOnlySignalCount": selection_status.get("reactionOnlySignalCount"),
@@ -6823,6 +6936,11 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolStatusCounts": summary.get("candidatePoolStatusCounts", {}),
         "candidatePoolNewCount": summary.get("candidatePoolNewCount"),
         "candidatePoolPromotedCount": summary.get("candidatePoolPromotedCount"),
+        "candidatePoolTotalPromotionCount": summary.get("candidatePoolTotalPromotionCount"),
+        "candidatePoolTotalDemotionCount": summary.get("candidatePoolTotalDemotionCount"),
+        "candidatePoolSoftDemotionCount": summary.get("candidatePoolSoftDemotionCount"),
+        "candidatePoolImprovingCount": summary.get("candidatePoolImprovingCount"),
+        "candidatePoolWeakeningCount": summary.get("candidatePoolWeakeningCount"),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
