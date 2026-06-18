@@ -1,7 +1,8 @@
 param(
   [string]$BaseUrl = "https://market-signal-desk.onrender.com",
   [ValidateSet("none", "close", "preopen", "intraday")]
-  [string]$RunSchedulerMode = "none"
+  [string]$RunSchedulerMode = "none",
+  [switch]$RunDatabaseMigration
 )
 
 $ErrorActionPreference = "Stop"
@@ -127,6 +128,21 @@ if ($storage.database) {
       $snapshotCount = [int]$counts.snapshotCount
     }
     Write-Check "database records" ($snapshotCount -ge 0) "kv=$($counts.kvCount), snapshots=$($counts.snapshotCount), pool=$($counts.candidatePoolActiveCount)/$($counts.candidatePoolCount)"
+  }
+}
+
+if ($RunDatabaseMigration) {
+  try {
+    $migrationResult = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/storage/migrate") -Headers $headers -Method Post -TimeoutSec 60
+    $migration = $migrationResult.migration
+    $migratedStorage = $migrationResult.storage
+    Write-Check "manual database migration" ([bool]$migrationResult.ok) "candidatePool=$($migration.candidatePool), discoveryLatest=$($migration.discoveryLatest), snapshots=$($migration.snapshotsInserted)/$($migration.snapshotsScanned)"
+    if ($migratedStorage.database.counts) {
+      $counts = $migratedStorage.database.counts
+      Write-Check "post-migration records" $true "kv=$($counts.kvCount), snapshots=$($counts.snapshotCount), pool=$($counts.candidatePoolActiveCount)/$($counts.candidatePoolCount)"
+    }
+  } catch {
+    Write-Check "manual database migration" $false (Format-ApiError $_)
   }
 }
 

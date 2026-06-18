@@ -1672,7 +1672,8 @@ h3 {
 .connection-list .schedule-actions,
 .connection-list .auth-actions,
 .connection-list .notification-actions,
-.connection-list .readiness-actions {
+.connection-list .readiness-actions,
+.connection-list .storage-actions {
   display: grid;
   gap: 8px;
   min-height: 0;
@@ -1689,6 +1690,10 @@ h3 {
   grid-template-columns: 1fr 1fr;
 }
 
+.connection-list .storage-actions {
+  grid-template-columns: 1fr 1fr;
+}
+
 .connection-list .notification-actions {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -1696,7 +1701,8 @@ h3 {
 .schedule-actions button,
 .auth-actions button,
 .notification-actions button,
-.readiness-actions button {
+.readiness-actions button,
+.storage-actions button {
   min-height: 36px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -1709,13 +1715,15 @@ h3 {
 .schedule-actions button:disabled,
 .auth-actions button:disabled,
 .notification-actions button:disabled,
-.readiness-actions button:disabled {
+.readiness-actions button:disabled,
+.storage-actions button:disabled {
   cursor: wait;
   opacity: 0.6;
 }
 
 .auth-actions button:disabled,
-.notification-actions button:disabled {
+.notification-actions button:disabled,
+.storage-actions button:disabled {
   cursor: not-allowed;
 }
 

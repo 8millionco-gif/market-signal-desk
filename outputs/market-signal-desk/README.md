@@ -353,6 +353,12 @@ $env:SIGNAL_DB_MIGRATE_RUN_LIMIT="200"
 
 앱은 시작 후 첫 저장/조회 시 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 `data/candidate-pool.json`, `data/discovery-latest.json`, `data/runs/*.json` 기록을 DB에 한 번 자동 이관합니다. 운영에서는 이 값을 연결해야 후보 풀과 성과 검증 기록이 재배포 후에도 유지됩니다.
 
+DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실행`을 눌러 파일 저장소 기록을 다시 확인할 수 있습니다. 기존 DB 데이터는 덮어쓰지 않고, 아직 DB에 없는 스냅샷만 추가합니다.
+
+```powershell
+.\test-render-deploy.ps1 -RunDatabaseMigration
+```
+
 ## 상시 발굴 봇 설정
 
 상시 발굴 봇은 장마감/장전 스냅샷과 별도로 최신 후보를 주기적으로 갱신하고 마지막 발굴 결과를 저장합니다. DB가 연결되어 있으면 `signal_kv`에, 없으면 `data/discovery-latest.json`에 저장합니다. 이 봇은 투자 판단 보조용이며 주문이나 자동매매와 연결되지 않습니다.
@@ -475,6 +481,7 @@ GET  /api/scheduler/runs?limit=12
 GET  /api/scheduler/runs/{id}
 GET  /api/performance?limit=12&top=3
 POST /api/scheduler/run
+POST /api/storage/migrate
 POST /api/watchlist
 ```
 

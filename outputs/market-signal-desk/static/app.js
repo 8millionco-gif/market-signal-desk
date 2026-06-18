@@ -1721,7 +1721,9 @@ function renderStorageStatus() {
       : shortText(database.error || "DB 연결 확인", 28)
     : "미연결";
   const migrationText = migration.enabled
-    ? migration.done
+    ? migration.error
+      ? shortText(migration.error, 28)
+      : migration.done
       ? `완료 · 스냅샷 ${migration.snapshotsInserted ?? 0}/${migration.snapshotsScanned ?? 0}`
       : "대기"
     : "꺼짐";
@@ -1738,17 +1740,79 @@ function renderStorageStatus() {
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
     ["다음", status.persistent && status.writable, nextText]
   ];
-  els.storageStatus.innerHTML = rows
-    .map(([label, ok, value]) => {
-      const tone = ok ? "ok" : "warn";
-      return `
-        <div>
-          <span>${escapeHtml(label)}</span>
-          <strong class="${tone}">${escapeHtml(value)}</strong>
-        </div>
-      `;
-    })
-    .join("");
+  const canMigrate = Boolean(database.urlConfigured && database.ready);
+  const actionMarkup = `
+    <div class="storage-actions">
+      <button type="button" data-storage-action="refresh">새로고침</button>
+      <button type="button" data-storage-action="migrate" ${canMigrate ? "" : "disabled"}>DB 이관 실행</button>
+    </div>
+  `;
+  els.storageStatus.innerHTML = `
+    ${rows
+      .map(([label, ok, value]) => {
+        const tone = ok ? "ok" : "warn";
+        return `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <strong class="${tone}">${escapeHtml(value)}</strong>
+          </div>
+        `;
+      })
+      .join("")}
+    ${actionMarkup}
+  `;
+  els.storageStatus.querySelectorAll("[data-storage-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.storageAction;
+      if (action === "refresh") {
+        await refreshStorageStatus();
+      }
+      if (action === "migrate") {
+        await runStorageMigration();
+      }
+    });
+  });
+}
+
+async function refreshStorageStatus() {
+  const buttons = els.storageStatus?.querySelectorAll("[data-storage-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 10000);
+  } finally {
+    renderStorageStatus();
+  }
+}
+
+async function runStorageMigration() {
+  const buttons = els.storageStatus?.querySelectorAll("[data-storage-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  startActivity("DB 이관 실행 중", "파일 저장 후보 풀과 스냅샷을 Postgres에 확인합니다");
+  try {
+    const payload = await postJson("/api/storage/migrate", {}, 60000);
+    state.storageStatus = payload.storage ?? await safeFetchJson("/api/storage/status", statusFallbacks().storage, 10000);
+  } catch (error) {
+    const current = state.storageStatus ?? statusFallbacks().storage;
+    state.storageStatus = {
+      ...current,
+      database: {
+        ...(current.database ?? {}),
+        error: error?.name === "AbortError" ? "DB 이관 응답 지연" : "DB 이관 실패",
+        migration: {
+          ...((current.database ?? {}).migration ?? {}),
+          done: false,
+          error: error?.name === "AbortError" ? "timeout" : "request-failed"
+        }
+      }
+    };
+  } finally {
+    finishActivity();
+    renderStorageStatus();
+  }
 }
 
 function isPositiveText(value) {

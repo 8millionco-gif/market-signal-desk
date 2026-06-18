@@ -395,9 +395,9 @@ def db_storage_counts() -> dict:
         return {}
 
 
-def migrate_files_to_database() -> dict:
+def migrate_files_to_database(force: bool = False) -> dict:
     global DB_MIGRATION_DONE, DB_MIGRATION_STATUS
-    if not SIGNAL_DB_AUTO_MIGRATE:
+    if not SIGNAL_DB_AUTO_MIGRATE and not force:
         DB_MIGRATION_STATUS = {
             **DB_MIGRATION_STATUS,
             "enabled": False,
@@ -410,14 +410,21 @@ def migrate_files_to_database() -> dict:
         DB_MIGRATION_DONE = True
         return DB_MIGRATION_STATUS
     if not database_storage_enabled() or not DB_SCHEMA_READY:
+        DB_MIGRATION_STATUS = {
+            **DB_MIGRATION_STATUS,
+            "enabled": bool(SIGNAL_DB_AUTO_MIGRATE or force),
+            "done": False,
+            "ran": False,
+            "error": DB_LAST_ERROR,
+        }
         return DB_MIGRATION_STATUS
-    if DB_MIGRATION_DONE:
+    if DB_MIGRATION_DONE and not force:
         return DB_MIGRATION_STATUS
     with DB_MIGRATION_LOCK:
-        if DB_MIGRATION_DONE:
+        if DB_MIGRATION_DONE and not force:
             return DB_MIGRATION_STATUS
         status: dict[str, object] = {
-            "enabled": True,
+            "enabled": bool(SIGNAL_DB_AUTO_MIGRATE or force),
             "done": False,
             "ran": True,
             "candidatePool": "missing",
@@ -504,6 +511,37 @@ def migrate_files_to_database() -> dict:
             DB_MIGRATION_STATUS = status
             set_db_error(error)
             return DB_MIGRATION_STATUS
+
+
+def run_database_migration() -> tuple[dict, int]:
+    if not DATABASE_URL:
+        return {
+            "ok": False,
+            "error": "database-not-configured",
+            "message": "DATABASE_URL이 설정되어 있지 않습니다.",
+            "storage": snapshot_storage_status(),
+        }, 400
+    if not database_storage_enabled():
+        return {
+            "ok": False,
+            "error": "database-backend-disabled",
+            "message": "SIGNAL_STORAGE_BACKEND가 DB 사용 모드가 아닙니다.",
+            "storage": snapshot_storage_status(),
+        }, 400
+    if not ensure_database_schema():
+        return {
+            "ok": False,
+            "error": "database-unavailable",
+            "message": "DB 스키마를 준비하지 못했습니다.",
+            "storage": snapshot_storage_status(),
+        }, 503
+    migration = migrate_files_to_database(force=True)
+    ok = not migration.get("error")
+    return {
+        "ok": ok,
+        "migration": migration,
+        "storage": snapshot_storage_status(),
+    }, 200 if ok else 500
 
 
 def db_read_kv(key: str, fallback):
@@ -8650,6 +8688,11 @@ class AppHandler(BaseHTTPRequestHandler):
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/storage/migrate":
+            payload, status = run_database_migration()
+            self.send_json(payload, status)
             return
 
         if parsed.path == "/api/watchlist":
