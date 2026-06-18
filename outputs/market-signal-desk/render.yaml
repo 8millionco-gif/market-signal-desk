@@ -14,9 +14,13 @@ services:
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT
-        value: "6"
+        value: "20"
+      - key: SIGNAL_DOMESTIC_CANDIDATE_LIMIT
+        value: "10"
+      - key: SIGNAL_OVERSEAS_CANDIDATE_LIMIT
+        value: "10"
       - key: SIGNAL_DISCOVERY_MAX_SYMBOLS
-        value: "12"
+        value: "30"
       - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
         value: "3"
       - key: TOSS_LIVE_PRICES

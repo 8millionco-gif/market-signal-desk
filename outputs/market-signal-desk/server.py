@@ -135,8 +135,16 @@ SIGNAL_RUN_HISTORY_LIMIT = int(os.getenv("SIGNAL_RUN_HISTORY_LIMIT", "12"))
 SIGNAL_PERFORMANCE_RUN_LIMIT = int(os.getenv("SIGNAL_PERFORMANCE_RUN_LIMIT", "12"))
 SIGNAL_PERFORMANCE_TOP_CANDIDATES = int(os.getenv("SIGNAL_PERFORMANCE_TOP_CANDIDATES", "3"))
 SIGNAL_AUTO_CANDIDATES_ENABLED = os.getenv("SIGNAL_AUTO_CANDIDATES_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_AUTO_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_AUTO_CANDIDATE_LIMIT", "6"))
-SIGNAL_DISCOVERY_MAX_SYMBOLS = int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "12"))
+SIGNAL_DOMESTIC_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_DOMESTIC_CANDIDATE_LIMIT", "10"))
+SIGNAL_OVERSEAS_CANDIDATE_LIMIT = int(os.getenv("SIGNAL_OVERSEAS_CANDIDATE_LIMIT", "10"))
+SIGNAL_AUTO_CANDIDATE_LIMIT = max(
+    int(os.getenv("SIGNAL_AUTO_CANDIDATE_LIMIT", "20")),
+    SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
+)
+SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
+    int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "30")),
+    SIGNAL_AUTO_CANDIDATE_LIMIT,
+)
 SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
@@ -3778,6 +3786,8 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
         {
             "enabled": SIGNAL_AUTO_CANDIDATES_ENABLED,
             "limit": SIGNAL_AUTO_CANDIDATE_LIMIT,
+            "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
+            "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
             "symbols": SIGNAL_DISCOVERY_SYMBOLS,
@@ -3788,6 +3798,46 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def candidate_bucket(candidate: dict) -> str:
+    category = str(candidate.get("category", "")).lower()
+    market = str(candidate.get("market", "")).upper()
+    symbol = str(candidate.get("symbol", ""))
+    if category == "overseas" or market == "US" or re.fullmatch(r"[A-Z.\-]{1,8}", symbol):
+        return "overseas"
+    return "domestic"
+
+
+def balanced_candidate_selection(discovered: list[dict]) -> tuple[list[dict], dict]:
+    domestic = [item for item in discovered if candidate_bucket(item) == "domestic"]
+    overseas = [item for item in discovered if candidate_bucket(item) == "overseas"]
+    selected = [*domestic[:SIGNAL_DOMESTIC_CANDIDATE_LIMIT], *overseas[:SIGNAL_OVERSEAS_CANDIDATE_LIMIT]]
+    seen = {str(item.get("symbol", "")).upper() for item in selected}
+    for item in discovered:
+        if len(selected) >= SIGNAL_AUTO_CANDIDATE_LIMIT:
+            break
+        symbol = str(item.get("symbol", "")).upper()
+        if symbol in seen:
+            continue
+        selected.append(item)
+        seen.add(symbol)
+    selected.sort(
+        key=lambda item: (
+            bounded_int(item.get("discovery", {}).get("score", 0)),
+            score_candidate(item),
+        ),
+        reverse=True,
+    )
+    final_selected = selected[:SIGNAL_AUTO_CANDIDATE_LIMIT]
+    return final_selected, {
+        "domesticScanned": len(domestic),
+        "overseasScanned": len(overseas),
+        "domesticSelected": len([item for item in final_selected if candidate_bucket(item) == "domestic"]),
+        "overseasSelected": len([item for item in final_selected if candidate_bucket(item) == "overseas"]),
+        "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
+        "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
+    }
 
 
 def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]:
@@ -3836,8 +3886,7 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         ),
         reverse=True,
     )
-    limit = max(1, min(SIGNAL_AUTO_CANDIDATE_LIMIT, len(discovered) or len(seed_candidates)))
-    selected = discovered[:limit] if discovered else seed_candidates[:limit]
+    selected, balance_status = balanced_candidate_selection(discovered) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
     source = (
         "auto-news"
         if any(
@@ -3854,6 +3903,7 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         "universeCount": len(entries),
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
+        **balance_status,
         "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in discovered),
         "selectedNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
         "filteredNewsCount": sum(bounded_int(item.get("discovery", {}).get("filteredNewsItems", 0), 0, 1_000) for item in discovered),
@@ -4037,6 +4087,10 @@ def dashboard(mode: str) -> dict:
             "candidateSource": discovery_status.get("source"),
             "universeCount": discovery_status.get("universeCount"),
             "scannedCount": discovery_status.get("scannedCount"),
+            "domesticSelected": discovery_status.get("domesticSelected"),
+            "overseasSelected": discovery_status.get("overseasSelected"),
+            "domesticLimit": discovery_status.get("domesticLimit"),
+            "overseasLimit": discovery_status.get("overseasLimit"),
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
             "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),

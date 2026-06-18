@@ -51,7 +51,12 @@ const state = {
   notificationsEnabled: readStoredValue("marketSignalNotifications") === "1",
   lastNotifiedKey: readStoredValue("marketSignalLastNotifiedKey", ""),
   lastRunNotifiedId: readStoredValue("marketSignalLastRunNotifiedId", ""),
-  schedulerStatusInitialized: false
+  schedulerStatusInitialized: false,
+  activity: {
+    active: false,
+    title: "",
+    detail: ""
+  }
 };
 
 const els = {
@@ -93,6 +98,11 @@ const els = {
   deskButton: document.querySelector("#deskButton"),
   refreshButton: document.querySelector("#refreshButton")
 };
+
+els.activityBar = document.querySelector("#activityBar");
+els.activityTitle = document.querySelector("#activityTitle");
+els.activityDetail = document.querySelector("#activityDetail");
+els.activityFill = document.querySelector("#activityFill");
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -138,6 +148,33 @@ function uniqueTexts(values = [], limit = 8) {
 function shortText(value, limit = 32) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function renderActivity() {
+  if (!els.activityBar) return;
+  els.activityBar.hidden = !state.activity.active;
+  if (els.activityTitle) els.activityTitle.textContent = state.activity.title || "데이터 갱신 중";
+  if (els.activityDetail) els.activityDetail.textContent = state.activity.detail || "잠시만 기다려주세요";
+  if (els.refreshButton) els.refreshButton.classList.toggle("active", state.activity.active);
+}
+
+function startActivity(title, detail = "") {
+  state.activity = { active: true, title, detail };
+  renderActivity();
+}
+
+function updateActivity(title, detail = "") {
+  if (!state.activity.active) {
+    startActivity(title, detail);
+    return;
+  }
+  state.activity = { active: true, title, detail };
+  renderActivity();
+}
+
+function finishActivity() {
+  state.activity = { active: false, title: "", detail: "" };
+  renderActivity();
 }
 
 function adminHeaders(extra = {}) {
@@ -280,8 +317,10 @@ function statusFallbacks() {
 }
 
 async function loadDashboard() {
+  startActivity("오늘 후보 갱신 중", "국내/해외 후보와 시장 지표를 불러옵니다");
   state.viewingSnapshot = null;
   const fallbacks = statusFallbacks();
+  updateActivity("연결 상태 확인 중", "토스·뉴스·공시·OpenAI 연결 상태를 점검합니다");
   const statusPromise = Promise.all([
     safeFetchJson("/api/auth/status", fallbacks.auth),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
@@ -320,16 +359,20 @@ async function loadDashboard() {
   });
 
   try {
+    updateActivity("후보 분석 중", "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다");
     const dashboard = await fetchJson(`/api/dashboard?mode=${state.mode}`, 30000);
     state.dashboard = dashboard;
     if (!state.selectedSymbol && state.dashboard.selected) {
       state.selectedSymbol = state.dashboard.selected.symbol;
     }
     await statusPromise;
+    updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
     render();
+    finishActivity();
   } catch (error) {
     await statusPromise;
     state.dashboard = null;
+    finishActivity();
     if (isAuthError(error)) {
       renderAuthGate();
       return;
@@ -340,12 +383,14 @@ async function loadDashboard() {
 
 async function loadPerformance() {
   state.performanceLoading = true;
+  startActivity("성과 검증 중", "저장된 후보와 현재 가격을 비교합니다");
   renderPerformance();
   try {
     state.performance = await fetchJson("/api/performance?limit=12&top=3", 30000);
   } catch (error) {
     if (isAuthError(error)) {
       state.performanceLoading = false;
+      finishActivity();
       renderAuthGate();
       return;
     }
@@ -358,6 +403,7 @@ async function loadPerformance() {
     };
   } finally {
     state.performanceLoading = false;
+    finishActivity();
     renderPerformance();
   }
 }
@@ -885,8 +931,11 @@ function renderMetrics() {
     const scanned = summary.scannedCount ?? discovery.scannedCount;
     const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
     const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
+    const domestic = summary.domesticSelected ?? discovery.domesticSelected;
+    const overseas = summary.overseasSelected ?? discovery.overseasSelected;
+    const splitText = domestic || overseas ? ` · 국내 ${domestic ?? 0} · 해외 ${overseas ?? 0}` : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1798,12 +1847,17 @@ async function openSearchResult(symbol) {
   renderTradeDecisionStatus();
   renderDetail();
 
+  startActivity("검색 종목 분석 중", `${item.name || item.symbol}의 가격·뉴스·공시를 확인합니다`);
   const payload = await safeFetchJson(
     `/api/stocks/analyze?symbol=${encodeURIComponent(item.symbol)}`,
     { candidate: null, message: "검색 종목 분석을 불러오지 못했습니다." },
     45000
   );
-  if (state.selectedSymbol !== item.symbol) return;
+  if (state.selectedSymbol !== item.symbol) {
+    finishActivity();
+    return;
+  }
+  updateActivity("분석 결과 정리 중", "가격 행동 지표와 판단 문장을 구성합니다");
   state.stockSearch = { ...state.stockSearch, analyzingSymbol: null };
   if (payload?.candidate) {
     state.selectedLookup = payload.candidate;
@@ -1815,6 +1869,7 @@ async function openSearchResult(symbol) {
   renderFeed();
   renderTradeDecisionStatus();
   renderDetail();
+  finishActivity();
 }
 
 function renderStockSearchResults() {

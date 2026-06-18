@@ -91,6 +91,67 @@ h3 {
   gap: 10px;
 }
 
+.activity-bar {
+  display: grid;
+  gap: 10px;
+  margin: -6px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.96);
+  box-shadow: var(--shadow);
+}
+
+.activity-bar[hidden] {
+  display: none;
+}
+
+.activity-bar > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-bar strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.activity-bar span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.activity-track {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #2a3040;
+}
+
+.activity-track span {
+  position: absolute;
+  top: 0;
+  left: -35%;
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+  animation: activity-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes activity-slide {
+  0% {
+    left: -35%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
 .mode-switch,
 .tabs {
   display: flex;

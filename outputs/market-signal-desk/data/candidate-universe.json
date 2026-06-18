@@ -91,6 +91,16 @@
       "focusWeight": 6
     },
     {
+      "symbol": "091160",
+      "name": "KODEX 반도체",
+      "market": "KR",
+      "category": "domestic",
+      "aliases": ["KODEX 반도체", "코덱스 반도체", "반도체 ETF"],
+      "themes": ["반도체", "ETF", "섹터 수급"],
+      "query": "KODEX 반도체 ETF 수급",
+      "focusWeight": 6
+    },
+    {
       "symbol": "AAPL",
       "name": "Apple",
       "market": "US",
@@ -118,6 +128,76 @@
       "aliases": ["Microsoft", "MSFT", "마이크로소프트", "Azure", "Copilot"],
       "themes": ["AI 클라우드", "Azure", "소프트웨어"],
       "query": "Microsoft AI Azure stock",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "TSLA",
+      "name": "Tesla",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["Tesla", "TSLA", "테슬라", "EV"],
+      "themes": ["전기차", "자율주행", "에너지"],
+      "query": "Tesla EV autonomous driving stock",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "AMD",
+      "name": "AMD",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["AMD", "Advanced Micro Devices", "어드밴스드 마이크로 디바이시스"],
+      "themes": ["AI 반도체", "GPU", "서버"],
+      "query": "AMD AI GPU server stock",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "AVGO",
+      "name": "Broadcom",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["Broadcom", "AVGO", "브로드컴"],
+      "themes": ["AI 네트워크", "반도체", "인프라"],
+      "query": "Broadcom AI networking semiconductor stock",
+      "focusWeight": 7
+    },
+    {
+      "symbol": "AMZN",
+      "name": "Amazon",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["Amazon", "AMZN", "아마존", "AWS"],
+      "themes": ["클라우드", "커머스", "AI"],
+      "query": "Amazon AWS AI stock",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "GOOGL",
+      "name": "Alphabet",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["Alphabet", "GOOGL", "Google", "구글", "알파벳"],
+      "themes": ["AI", "검색", "클라우드"],
+      "query": "Alphabet Google AI cloud stock",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "META",
+      "name": "Meta Platforms",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["Meta", "META", "메타", "Facebook"],
+      "themes": ["AI", "광고", "소셜 플랫폼"],
+      "query": "Meta AI advertising stock",
+      "focusWeight": 6
+    },
+    {
+      "symbol": "TSM",
+      "name": "TSMC",
+      "market": "US",
+      "category": "overseas",
+      "aliases": ["TSMC", "TSM", "Taiwan Semiconductor", "대만반도체"],
+      "themes": ["파운드리", "AI 반도체", "첨단공정"],
+      "query": "TSMC AI foundry stock",
       "focusWeight": 7
     }
   ]
