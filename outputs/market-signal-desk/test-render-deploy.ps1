@@ -63,6 +63,10 @@ Write-Check "authorized dashboard" ($dashboard.summary.candidateCount -gt 0) "ca
 $scheduler = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/scheduler/status") -Headers $headers -Method Get -TimeoutSec 30
 Write-Check "scheduler disabled for staging" (-not [bool]$scheduler.config.enabled) "enabled=$($scheduler.config.enabled)"
 
+$dart = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/dart/status") -Headers $headers -Method Get -TimeoutSec 30
+$dartReady = [bool]$dart.readyForDisclosures
+Write-Check "OpenDART status" $dartReady "ready=$dartReady, cache=$($dart.corpCodeCacheExists)"
+
 $news = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/news/status") -Headers $headers -Method Get -TimeoutSec 30
 $gdeltReady = [bool]$news.gdelt.readyForNews
 $naverReady = [bool]$news.naver.readyForNews
@@ -92,6 +96,24 @@ if ($naverReady) {
   Write-Check "Naver search API" (($naverSearch.items | Measure-Object).Count -gt 0) "items=$(($naverSearch.items | Measure-Object).Count)"
 } else {
   Write-Check "Naver search API" $false "waiting for NAVER_CLIENT_ID/SECRET and NAVER_LIVE_NEWS=1"
+}
+
+$dartDashboardStatus = $dashboard.integrations.dart.disclosures
+if ($dartDashboardStatus) {
+  $detail = "source=$($dartDashboardStatus.source), disclosures=$($dartDashboardStatus.disclosureCount)"
+  if ($dartDashboardStatus.error) {
+    $detail = "$detail, error=$($dartDashboardStatus.error)"
+  }
+  Write-Check "OpenDART dashboard source" ($dartDashboardStatus.source -eq "opendart") $detail
+}
+
+if ($dartReady) {
+  $corp = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/dart/corp-code?symbol=005930") -Headers $headers -Method Get -TimeoutSec 45
+  Write-Check "OpenDART corp code" ($null -ne $corp.corp) "symbol=005930"
+  $disclosures = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/dart/disclosures?symbol=005930&days=7") -Headers $headers -Method Get -TimeoutSec 45
+  Write-Check "OpenDART disclosures API" ($disclosures.source -eq "opendart") "items=$(($disclosures.items | Measure-Object).Count)"
+} else {
+  Write-Check "OpenDART disclosures API" $false "waiting for DART_API_KEY and DART_LIVE_DISCLOSURES=1"
 }
 
 Write-Host ""

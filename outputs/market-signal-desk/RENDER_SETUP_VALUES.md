@@ -155,3 +155,36 @@ Naver news status      ready=True
 Naver dashboard source source=naver
 Naver search API       items=1개 이상
 ```
+
+## OpenDART 공시 활성화
+
+네이버 뉴스까지 확인되면 Render Environment에 아래 값을 추가합니다.
+
+```text
+DART_API_KEY=OpenDART_API_Key
+DART_LIVE_DISCLOSURES=1
+```
+
+선택값은 기본값을 그대로 사용해도 됩니다.
+
+```text
+DART_DISCLOSURE_LOOKBACK_DAYS=7
+DART_DISCLOSURE_MAX_CANDIDATES=2
+DART_REQUEST_TIMEOUT_SECONDS=6
+DART_CORP_CODE_TIMEOUT_SECONDS=10
+```
+
+저장 후 재배포가 끝나면 아래 스크립트를 실행합니다.
+
+```powershell
+.\test-render-deploy.ps1
+```
+
+정상 기준:
+
+```text
+OpenDART status           ready=True
+OpenDART dashboard source source=opendart
+OpenDART corp code        symbol=005930
+OpenDART disclosures API  source=opendart
+```

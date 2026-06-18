@@ -181,6 +181,7 @@ $env:DART_DISCLOSURE_MAX_CANDIDATES="2"
 ```
 
 OpenDART는 종목코드와 DART 고유번호가 다르기 때문에, 서버가 `corpCode.xml`을 받아 `data/dart-corp-codes.json`으로 캐시합니다. 이후 `list.json`으로 최근 공시를 조회합니다.
+Render에서는 `DART_API_KEY`와 `DART_LIVE_DISCLOSURES=1`을 넣은 뒤 `test-render-deploy.ps1`로 고유번호와 공시 조회를 함께 확인합니다.
 
 공시 조회를 잠시 끄려면 다음 값을 설정합니다.
 
