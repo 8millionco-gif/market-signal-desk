@@ -537,6 +537,21 @@ function discoveryQualityLabel(item) {
   return "";
 }
 
+function discoveryEvidenceForDisplay(item) {
+  const evidence = item?.discovery?.evidenceProfile ?? {};
+  return {
+    grade: evidence.grade || item?.discovery?.evidenceGrade || "",
+    label: evidence.label || item?.discovery?.evidenceLabel || "",
+    score: Number(evidence.score ?? item?.discovery?.evidenceScore ?? 0),
+    reasons: Array.isArray(evidence.reasons) ? evidence.reasons : item?.discovery?.evidenceReasons ?? [],
+    blockers: Array.isArray(evidence.blockers) ? evidence.blockers : item?.discovery?.evidenceBlockers ?? [],
+    impactTypes: Array.isArray(evidence.impactTypes) ? evidence.impactTypes : item?.discovery?.newsImpactTypes ?? [],
+    newsItems: Number(evidence.newsItems ?? item?.discovery?.newsItems ?? 0),
+    filteredNewsItems: Number(evidence.filteredNewsItems ?? item?.discovery?.filteredNewsItems ?? 0),
+    averageRelevance: Number(evidence.averageRelevance ?? item?.discovery?.newsRelevanceAverage ?? 0)
+  };
+}
+
 function isActionCandidate(item) {
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return true;
@@ -1339,12 +1354,22 @@ function renderMetrics() {
     const qualityReserve = summary.qualitySelectedReserve ?? discovery.qualitySelectedReserve;
     const qualityFallback = summary.qualitySelectedFallback ?? discovery.qualitySelectedFallback;
     const qualityRejected = summary.qualityRejectedCount ?? discovery.qualityRejectedCount;
+    const evidenceStrong = Number(summary.evidenceStrongCount ?? discovery.evidenceStrongCount ?? 0);
+    const evidenceQualified = Number(summary.evidenceQualifiedCount ?? discovery.evidenceQualifiedCount ?? 0);
+    const evidenceThin = Number(summary.evidenceThinCount ?? discovery.evidenceThinCount ?? 0);
+    const evidenceRisk = Number(summary.evidenceRiskCount ?? discovery.evidenceRiskCount ?? 0);
+    const evidenceWeak = Number(summary.evidenceWeakCount ?? discovery.evidenceWeakCount ?? 0);
+    const evidenceAverage = summary.averageEvidenceScore ?? discovery.averageEvidenceScore;
     const qualityText =
       qualityPrimary != null || qualityReserve != null || qualityFallback != null || qualityRejected != null
         ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
+    const evidenceText =
+      evidenceStrong || evidenceQualified || evidenceThin || evidenceRisk || evidenceWeak
+        ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
+        : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${compressionText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${compressionText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1457,6 +1482,10 @@ function renderDiscoveryBotStatus() {
   const pipelineText = pipeline.length
     ? uniqueTexts(pipeline.map((step) => step.stage || step.label).filter(Boolean), 4).join(" → ")
     : "-";
+  const evidenceText =
+    summary.evidenceStrongCount != null || summary.evidenceQualifiedCount != null || summary.evidenceWeakCount != null
+      ? `강 ${summary.evidenceStrongCount ?? 0} · 검증 ${summary.evidenceQualifiedCount ?? 0} · 약 ${summary.evidenceThinCount ?? 0} · 리스크 ${summary.evidenceRiskCount ?? 0} · 부족 ${summary.evidenceWeakCount ?? 0}`
+      : "-";
   const intervalMinutes = Math.max(1, Math.round(Number(config.intervalSeconds ?? 0) / 60));
   const latestText = latest.createdAt ? `${modeLabel(latest.mode)} · ${timeLabel(latest.createdAt)}` : "아직 없음";
   const rows = [
@@ -1465,6 +1494,7 @@ function renderDiscoveryBotStatus() {
     ["주기", Boolean(config.intervalSeconds), config.enabled ? `${intervalMinutes}분마다` : "수동 실행"],
     ["최신 발굴", Boolean(latest.createdAt), latestText],
     ["파이프라인", pipeline.length >= 4, pipelineText],
+    ["발굴 근거", evidenceText !== "-", evidenceText],
     ["상위 후보", Boolean(summary.topCandidates?.length), topText]
   ];
   const lastError = botState.lastError
@@ -2505,6 +2535,7 @@ function renderFeed() {
       const compression = compressionForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       const qualityLabel = discoveryQualityLabel(item);
+      const evidence = discoveryEvidenceForDisplay(item);
       const actionLabel = feedActionLabel(item, plan);
       const priceGuide = primaryPriceGuide(plan);
       const gate = item.qualityGate ?? {};
@@ -2529,6 +2560,7 @@ function renderFeed() {
               <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
+              ${evidence.label ? `<span class="feed-badge evidence-badge evidence-${escapeHtml(evidence.grade || "weak")}">${escapeHtml(evidence.label)} ${escapeHtml(evidence.score)}</span>` : ""}
               ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
               ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
               ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
@@ -2861,6 +2893,7 @@ function renderDetail() {
     <div class="detail-grid">
       ${tradePlanSection(item)}
       ${decisionGroupSection(item)}
+      ${discoveryEvidenceSection(item)}
       ${hiddenOpportunitySection(item)}
       ${officialSignalSection(item)}
 
@@ -3347,6 +3380,43 @@ function hiddenOpportunitySection(item) {
       ${
         signals.length
           ? `<ul class="bullet-list">${signals.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function discoveryEvidenceSection(item) {
+  const evidence = discoveryEvidenceForDisplay(item);
+  if (!evidence.label && !evidence.score && !evidence.newsItems && !evidence.filteredNewsItems) return "";
+  const reasons = uniqueTexts(evidence.reasons ?? [], 4);
+  const blockers = uniqueTexts(evidence.blockers ?? [], 4);
+  const impactTypes = uniqueTexts(evidence.impactTypes ?? [], 4);
+  return `
+    <section class="detail-section">
+      <div class="section-title">
+        <p class="eyebrow">발굴 검증</p>
+        <h2>${escapeHtml(evidence.label || "발굴 근거 확인")}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("근거 점수", `${evidence.score}/100`)}
+        ${statCard("고관련 뉴스", `${evidence.newsItems}건`)}
+        ${statCard("뉴스 제외", `${evidence.filteredNewsItems}건`)}
+        ${statCard("평균 관련성", evidence.averageRelevance ? `${evidence.averageRelevance}/100` : "-")}
+      </div>
+      ${
+        impactTypes.length
+          ? `<div class="chips">${impactTypes.map((label) => `<span class="chip">${escapeHtml(label)}</span>`).join("")}</div>`
+          : ""
+      }
+      ${
+        reasons.length
+          ? `<ul class="bullet-list entry-list">${reasons.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+      ${
+        blockers.length
+          ? `<ul class="bullet-list risk-list">${blockers.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
           : ""
       }
     </section>

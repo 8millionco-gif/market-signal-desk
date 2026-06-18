@@ -155,6 +155,8 @@ SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS",
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
 SIGNAL_DISCOVERY_QUALITY_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALITY_MIN_SCORE", "55"))
 SIGNAL_DISCOVERY_RESERVE_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_RESERVE_MIN_SCORE", "42"))
+SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE", "68"))
+SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE", "52"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -5212,6 +5214,103 @@ def news_relevance_summary(items: list[dict]) -> dict:
     }
 
 
+def discovery_evidence_profile(
+    entry: dict,
+    news_items: list[dict],
+    news_status: dict,
+    seed_score: int,
+    watched: set[str],
+) -> dict:
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    name = str(entry.get("name", symbol)).strip() or symbol
+    focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
+    relevance_summary = (
+        news_status.get("relevanceSummary", {})
+        if isinstance(news_status.get("relevanceSummary"), dict)
+        else news_relevance_summary(news_items)
+    )
+    high = bounded_int(relevance_summary.get("high", 0), 0, 100)
+    medium = bounded_int(relevance_summary.get("medium", 0), 0, 100)
+    material = bounded_int(relevance_summary.get("material", 0), 0, 100)
+    average = display_number_to_decimal(relevance_summary.get("averageScore")) or Decimal("0")
+    raw_display = bounded_int(news_status.get("rawDisplay", 0), 0, 1_000)
+    filtered = bounded_int(news_status.get("filteredOut", 0), 0, 1_000)
+    source = str(news_status.get("source", "universe"))
+    impact_types = text_list(relevance_summary.get("impactTypes", []), limit=6)
+    risk_impact = "리스크" in impact_types
+    positive_impact = any(label in impact_types for label in ["실적", "수주/계약", "전망/목표가", "주주환원", "제품/기술", "수급", "정책/규제"])
+    reasons: list[str] = []
+    blockers: list[str] = []
+
+    if news_items:
+        reasons.append(f"고관련 뉴스 {len(news_items)}건")
+    if high:
+        reasons.append(f"높은 관련성 뉴스 {high}건")
+    if material:
+        reasons.append(f"투자 재료성 뉴스 {material}건")
+    if impact_types:
+        reasons.append(f"영향 유형: {', '.join(impact_types[:3])}")
+    if symbol in watched:
+        reasons.append("관심 종목으로 추적 중")
+    if focus >= 8:
+        reasons.append("중점 테마 유니버스")
+
+    if source == "naver" and raw_display and not news_items:
+        blockers.append("검색 뉴스는 있었지만 종목 관련성이 낮음")
+    if filtered >= max(2, raw_display // 2) and raw_display:
+        blockers.append(f"뉴스 {filtered}건 관련성 필터 제외")
+    if not news_items and symbol not in watched:
+        blockers.append("최신 고관련 뉴스 없음")
+    if risk_impact and not positive_impact:
+        blockers.append("리스크성 재료가 우세")
+
+    evidence_score = bounded_int(
+        focus * 2
+        + high * 20
+        + medium * 11
+        + material * 18
+        + float(average) * 0.32
+        + min(seed_score, 90) * 0.08
+        + (8 if positive_impact else 0)
+        + (8 if symbol in watched else 0)
+        - (12 if source == "naver" and raw_display and not news_items else 0)
+        - (10 if risk_impact and not positive_impact else 0),
+        0,
+        100,
+    )
+
+    if risk_impact and not positive_impact and evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE:
+        grade, label, priority = "risk", "리스크 검토", 3
+    elif material and evidence_score >= SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE and average >= Decimal("60"):
+        grade, label, priority = "strong", "강한 발굴 근거", 0
+    elif (high or material or positive_impact) and evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE:
+        grade, label, priority = "qualified", "검증된 발굴 근거", 1
+    elif news_items or symbol in watched or focus >= 8:
+        grade, label, priority = "thin", "약한 발굴 근거", 2
+    else:
+        grade, label, priority = "weak", "발굴 근거 부족", 4
+
+    return {
+        "grade": grade,
+        "label": label,
+        "priority": priority,
+        "score": evidence_score,
+        "symbol": symbol,
+        "name": name,
+        "source": source,
+        "newsItems": len(news_items),
+        "rawNewsItems": raw_display,
+        "filteredNewsItems": filtered,
+        "highRelevanceCount": high,
+        "mediumRelevanceCount": medium,
+        "materialNewsCount": material,
+        "averageRelevance": float(average),
+        "impactTypes": impact_types,
+        "reasons": unique_texts(reasons, limit=5),
+        "blockers": unique_texts(blockers, limit=5),
+    }
+
+
 def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
     if not (NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"]):
         return [], {
@@ -5372,6 +5471,7 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
     medium_relevance = bounded_int(relevance_summary.get("medium", 0), 0, 100)
     material_news = bounded_int(relevance_summary.get("material", 0), 0, 100)
     seed_score = score_candidate(base)
+    evidence = discovery_evidence_profile(entry, news_items, news_status, seed_score, watched)
     no_relevant_live_news = (
         news_status.get("source") == "naver"
         and not news_items
@@ -5385,6 +5485,7 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         + material_news * 12
         + min(news_total, 20) * 0.2
         + min(seed_score, 90) * 0.18
+        + bounded_int(evidence.get("score", 0), 0, 100) * 0.22
         + (10 if symbol in watched else 0)
         - relevance_penalty,
         0,
@@ -5404,6 +5505,12 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         "newsTotal": news_total,
         "focusWeight": focus,
         "quality": "matched-news" if news_items else ("filtered-news" if no_relevant_live_news else "universe"),
+        "evidenceProfile": evidence,
+        "evidenceGrade": evidence.get("grade"),
+        "evidenceLabel": evidence.get("label"),
+        "evidenceScore": evidence.get("score"),
+        "evidenceReasons": evidence.get("reasons", []),
+        "evidenceBlockers": evidence.get("blockers", []),
     }
     return base
 
@@ -5419,6 +5526,8 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
             "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
             "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
+            "strongEvidenceScore": SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE,
+            "qualifiedEvidenceScore": SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE,
             "symbols": SIGNAL_DISCOVERY_SYMBOLS,
             "watch": sorted(watched),
             "naverReady": NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"],
@@ -5442,6 +5551,9 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     symbol = str(candidate.get("symbol", "")).strip().upper()
     score = bounded_int(discovery.get("score", 0), 0, 100)
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
+    evidence_grade = str(evidence.get("grade", discovery.get("evidenceGrade", "weak")))
     focus = bounded_int(discovery.get("focusWeight", 0), 0, 15)
     news_items = bounded_int(discovery.get("newsItems", 0), 0, 1_000)
     raw_news = bounded_int(discovery.get("rawNewsItems", 0), 0, 1_000)
@@ -5451,24 +5563,28 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     hidden = is_hidden_discovery_candidate(candidate)
     watched_hit = symbol in watched
 
-    if watched_hit:
-        tier, rank, reason = "primary", 0, "관심 종목이라 우선 검토"
-    elif material_news > 0 and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
+    if evidence_grade == "strong" and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "primary", 0, "강한 발굴 근거와 투자 재료성 뉴스가 확인된 후보"
+    elif evidence_grade == "qualified" and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "primary", 0, "뉴스 관련성과 재료성이 검증된 후보"
+    elif evidence_grade == "risk" and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "reserve", 1, "리스크성 뉴스 후보라 신규 진입 전 확인 필요"
+    elif watched_hit and evidence_grade in {"thin", "qualified", "strong"} and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "reserve", 1, "관심 종목이나 발굴 근거 추가 확인 필요"
+    elif material_news > 0 and score >= max(45, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE) and evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE:
         tier, rank, reason = "primary", 0, "투자 재료성 뉴스가 확인된 후보"
-    elif news_items > 0 and relevance_average is not None and relevance_average >= Decimal("65") and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
+    elif news_items > 0 and relevance_average is not None and relevance_average >= Decimal("65") and evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE:
         tier, rank, reason = "primary", 0, "고관련 뉴스가 확인된 후보"
-    elif news_items > 0 and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+    elif news_items > 0 and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE and evidence_grade != "weak":
         tier, rank, reason = "reserve", 1, "관련 뉴스는 있으나 투자 재료성 추가 확인 필요"
-    elif score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE:
-        tier, rank, reason = "primary", 0, "발굴 점수가 1차 기준을 통과"
-    elif hidden and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
-        tier, rank, reason = "reserve", 1, "숨은 후보이나 추가 확인 필요"
-    elif focus >= 8 and filtered == 0 and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+    elif hidden and score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE and evidence_grade in {"thin", "qualified", "strong"}:
+        tier, rank, reason = "reserve", 1, "숨은 후보이나 뉴스·가격 반응 추가 확인 필요"
+    elif focus >= 8 and filtered == 0 and score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE and evidence_score >= 45:
         tier, rank, reason = "reserve", 1, "테마 가중치가 높아 보조 후보로 유지"
-    elif filtered == 0 and focus >= 5 and score >= 28:
-        tier, rank, reason = "reserve", 1, "유니버스 관심 종목으로 가격 반응 확인"
     elif raw_news and filtered and not news_items:
         tier, rank, reason = "rejected", 3, "검색 뉴스는 있었지만 종목 관련성이 낮음"
+    elif evidence_grade == "weak":
+        tier, rank, reason = "rejected", 3, "발굴 근거 점수가 낮아 후보 제외"
     else:
         tier, rank, reason = "rejected", 3, "뉴스·점수 기준 미달"
 
@@ -5477,16 +5593,21 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
         "rank": rank,
         "reason": reason,
         "score": score,
+        "evidenceScore": evidence_score,
+        "evidenceGrade": evidence_grade,
         "focusWeight": focus,
         "newsItems": news_items,
     }
 
 
-def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int]:
+def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int, int, int]:
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     quality = discovery.get("qualityProfile", {}) if isinstance(discovery.get("qualityProfile"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
     return (
         -bounded_int(quality.get("rank", 9), 0, 9),
+        bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100),
+        bounded_int(discovery.get("materialNewsItems", 0), 0, 1_000),
         bounded_int(quality.get("score", discovery.get("score", 0)), 0, 100),
         bounded_int(discovery.get("newsItems", 0), 0, 1_000),
         score_candidate(candidate),
@@ -5495,18 +5616,46 @@ def discovery_selection_sort_key(candidate: dict) -> tuple[int, int, int, int]:
 
 def prepare_quality_candidates(discovered: list[dict], watched: set[str]) -> tuple[list[dict], dict]:
     prepared = []
-    counts = {"primary": 0, "reserve": 0, "rejected": 0}
+    counts = {
+        "primary": 0,
+        "reserve": 0,
+        "rejected": 0,
+        "evidenceStrong": 0,
+        "evidenceQualified": 0,
+        "evidenceThin": 0,
+        "evidenceRisk": 0,
+        "evidenceWeak": 0,
+        "evidenceScoreTotal": 0,
+        "evidenceScoredCount": 0,
+    }
     for candidate in discovered:
         item = dict(candidate)
         discovery = dict(item.get("discovery", {})) if isinstance(item.get("discovery"), dict) else {}
         profile = discovery_quality_profile(item, watched)
+        evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+        evidence_grade = str(evidence.get("grade", profile.get("evidenceGrade", "weak")))
+        evidence_score = bounded_int(evidence.get("score", profile.get("evidenceScore", 0)), 0, 100)
         discovery["qualityProfile"] = profile
         discovery["qualityTier"] = profile["tier"]
         discovery["qualityReason"] = profile["reason"]
         item["discovery"] = discovery
         counts[profile["tier"]] = counts.get(profile["tier"], 0) + 1
+        evidence_key = {
+            "strong": "evidenceStrong",
+            "qualified": "evidenceQualified",
+            "thin": "evidenceThin",
+            "risk": "evidenceRisk",
+            "weak": "evidenceWeak",
+        }.get(evidence_grade, "evidenceWeak")
+        counts[evidence_key] = counts.get(evidence_key, 0) + 1
+        counts["evidenceScoreTotal"] += evidence_score
+        counts["evidenceScoredCount"] += 1
         prepared.append(item)
     prepared.sort(key=discovery_selection_sort_key, reverse=True)
+    if counts["evidenceScoredCount"]:
+        counts["averageEvidenceScore"] = round(counts["evidenceScoreTotal"] / counts["evidenceScoredCount"], 1)
+    else:
+        counts["averageEvidenceScore"] = 0
     return prepared, counts
 
 
@@ -5599,6 +5748,12 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
         "qualitySelectedReserve": selected_tiers["reserve"],
         "qualitySelectedFallback": selected_tiers["rejected"],
         "qualityFallbackCount": max(fallback_selected, selected_tiers["rejected"]),
+        "evidenceStrongCount": quality_counts.get("evidenceStrong", 0),
+        "evidenceQualifiedCount": quality_counts.get("evidenceQualified", 0),
+        "evidenceThinCount": quality_counts.get("evidenceThin", 0),
+        "evidenceRiskCount": quality_counts.get("evidenceRisk", 0),
+        "evidenceWeakCount": quality_counts.get("evidenceWeak", 0),
+        "averageEvidenceScore": quality_counts.get("averageEvidenceScore", 0),
         "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
         "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
         "targetCandidateCount": SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
@@ -6020,6 +6175,12 @@ def build_dashboard_payload(context: dict) -> dict:
             "qualitySelectedReserve": discovery_status.get("qualitySelectedReserve"),
             "qualitySelectedFallback": discovery_status.get("qualitySelectedFallback"),
             "qualityFallbackCount": discovery_status.get("qualityFallbackCount"),
+            "evidenceStrongCount": discovery_status.get("evidenceStrongCount"),
+            "evidenceQualifiedCount": discovery_status.get("evidenceQualifiedCount"),
+            "evidenceThinCount": discovery_status.get("evidenceThinCount"),
+            "evidenceRiskCount": discovery_status.get("evidenceRiskCount"),
+            "evidenceWeakCount": discovery_status.get("evidenceWeakCount"),
+            "averageEvidenceScore": discovery_status.get("averageEvidenceScore"),
             "targetCandidateCount": discovery_status.get("targetCandidateCount"),
             "domesticShortfall": discovery_status.get("domesticShortfall"),
             "overseasShortfall": discovery_status.get("overseasShortfall"),
@@ -6228,6 +6389,7 @@ def dashboard_summary(payload: dict) -> dict:
             "reaction": item.get("priceReaction", {}).get("score") if isinstance(item.get("priceReaction"), dict) else None,
             "finalDecision": item.get("finalDecision", {}).get("action", "") if isinstance(item.get("finalDecision"), dict) else "",
             "compression": item.get("candidateCompression", {}).get("label", "") if isinstance(item.get("candidateCompression"), dict) else "",
+            "evidence": item.get("discovery", {}).get("evidenceLabel", "") if isinstance(item.get("discovery"), dict) else "",
         })
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
@@ -6257,6 +6419,12 @@ def dashboard_summary(payload: dict) -> dict:
         "coreCandidateCount": summary.get("coreCandidateCount"),
         "reviewCandidateCount": summary.get("reviewCandidateCount"),
         "compressedTopCandidates": summary.get("compressedTopCandidates", []),
+        "evidenceStrongCount": summary.get("evidenceStrongCount"),
+        "evidenceQualifiedCount": summary.get("evidenceQualifiedCount"),
+        "evidenceThinCount": summary.get("evidenceThinCount"),
+        "evidenceRiskCount": summary.get("evidenceRiskCount"),
+        "evidenceWeakCount": summary.get("evidenceWeakCount"),
+        "averageEvidenceScore": summary.get("averageEvidenceScore"),
         "buyDecisionCount": summary.get("buyDecisionCount"),
         "addDecisionCount": summary.get("addDecisionCount"),
         "holdDecisionCount": summary.get("holdDecisionCount"),

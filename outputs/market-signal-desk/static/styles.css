@@ -673,6 +673,37 @@ h3 {
   background: rgba(255, 100, 115, 0.1);
 }
 
+.feed-title .evidence-badge {
+  color: var(--soft);
+  border-color: rgba(180, 193, 216, 0.24);
+  background: rgba(180, 193, 216, 0.08);
+}
+
+.feed-title .evidence-strong {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.36);
+  background: rgba(123, 216, 143, 0.12);
+}
+
+.feed-title .evidence-qualified {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.34);
+  background: rgba(105, 210, 231, 0.1);
+}
+
+.feed-title .evidence-thin {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.32);
+  background: rgba(244, 201, 93, 0.1);
+}
+
+.feed-title .evidence-risk,
+.feed-title .evidence-weak {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
+}
+
 .feed-title .gate-badge {
   color: var(--green);
   border-color: rgba(123, 216, 143, 0.34);
