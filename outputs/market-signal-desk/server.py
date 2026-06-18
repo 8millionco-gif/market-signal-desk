@@ -3211,12 +3211,177 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     }
 
 
+def server_price_from_template(value: Decimal, template: str = "") -> str:
+    text = str(template or "")
+    if "$" in text:
+        return f"${value.quantize(Decimal('0.01')):,.2f}"
+    if "원" in text or "." not in text:
+        return f"{int(value.quantize(Decimal('1'))):,}원"
+    return f"{value.quantize(Decimal('0.01')):,.2f}"
+
+
+def server_price_range(low: Decimal, high: Decimal, template: str = "") -> str:
+    return f"{server_price_from_template(low, template)} ~ {server_price_from_template(high, template)}"
+
+
+def final_price_band(candidate: dict, score_detail: dict, total: int, readiness: int, action_key: str) -> dict | None:
+    current = display_number_to_decimal(candidate.get("price"))
+    if current is None or current <= 0:
+        return None
+
+    change = display_percent_to_decimal(candidate.get("change"))
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    opportunity = bounded_int(score_detail.get("opportunity", 0), 0, 18)
+    strength = bounded_int((total * 0.45) + (readiness * 0.35) + (opportunity * 1.2), 0, 100)
+    hot = change is not None and change >= Decimal("3")
+    weak = change is not None and change <= Decimal("-2")
+
+    entry_low_pct = Decimal("0.014")
+    entry_high_pct = Decimal("0.002")
+    pullback_pct = Decimal("0.028")
+    chase_pct = Decimal("0.020")
+    stop_pct = Decimal("0.040")
+    trim_pct = Decimal("0.052")
+
+    if action_key == "buy":
+        entry_low_pct = Decimal("0.006") if strength >= 78 else Decimal("0.010")
+        entry_high_pct = Decimal("0.005") if strength >= 78 else Decimal("0.003")
+        pullback_pct = Decimal("0.018")
+        stop_pct = Decimal("0.032")
+        trim_pct = Decimal("0.058")
+    elif action_key == "pullback":
+        entry_low_pct = Decimal("0.030")
+        entry_high_pct = Decimal("-0.004")
+        pullback_pct = Decimal("0.035")
+        chase_pct = Decimal("0.012")
+        stop_pct = Decimal("0.040")
+    elif action_key == "exclude":
+        entry_low_pct = Decimal("0.040")
+        entry_high_pct = Decimal("0.020")
+        pullback_pct = Decimal("0.055")
+        stop_pct = Decimal("0.030")
+        trim_pct = Decimal("0.025")
+    elif action_key == "verify":
+        entry_low_pct = Decimal("0.020")
+        entry_high_pct = Decimal("-0.002")
+        pullback_pct = Decimal("0.035")
+        stop_pct = Decimal("0.038")
+
+    if hot:
+        entry_low_pct = max(entry_low_pct, Decimal("0.030") + min(Decimal("0.025"), (change - Decimal("2")) / Decimal("100")))
+        entry_high_pct = min(entry_high_pct, Decimal("-0.004"))
+        pullback_pct = max(pullback_pct, Decimal("0.036"))
+        chase_pct = min(chase_pct, Decimal("0.012"))
+        stop_pct = max(stop_pct, Decimal("0.040"))
+    elif weak:
+        entry_low_pct = max(entry_low_pct, Decimal("0.020"))
+        entry_high_pct = min(entry_high_pct, Decimal("-0.002"))
+        pullback_pct = max(pullback_pct, Decimal("0.035"))
+        stop_pct = min(stop_pct, Decimal("0.032"))
+
+    entry_low = current * (Decimal("1") - entry_low_pct)
+    entry_high = current * (Decimal("1") + entry_high_pct)
+    low = min(entry_low, entry_high)
+    high = max(entry_low, entry_high)
+    return {
+        "strength": strength,
+        "current": server_price_from_template(current, str(candidate.get("price", ""))),
+        "entryLow": server_price_from_template(low, str(candidate.get("price", ""))),
+        "entryHigh": server_price_from_template(high, str(candidate.get("price", ""))),
+        "entryRange": server_price_range(low, high, str(candidate.get("price", ""))),
+        "pullback": server_price_from_template(current * (Decimal("1") - pullback_pct), str(candidate.get("price", ""))),
+        "chaseLimit": server_price_from_template(current * (Decimal("1") + chase_pct), str(candidate.get("price", ""))),
+        "stopLine": server_price_from_template(low * (Decimal("1") - stop_pct), str(candidate.get("price", ""))),
+        "trimLine": server_price_from_template(current * (Decimal("1") + trim_pct), str(candidate.get("price", ""))),
+        "reboundLine": server_price_from_template(current * Decimal("1.012"), str(candidate.get("price", ""))) if weak else "",
+    }
+
+
+def candidate_final_decision(candidate: dict, score_detail: dict, total: int, readiness: int, confidence: dict, gate: dict) -> dict:
+    group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
+    group_key = str(group.get("key", "wait"))
+    gate_key = str(gate.get("key", "defer"))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    change = display_percent_to_decimal(candidate.get("change"))
+    has_price = display_number_to_decimal(candidate.get("price")) is not None
+    confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    hot = change is not None and change >= Decimal("3")
+    weak = change is not None and change <= Decimal("-2")
+
+    if not has_price:
+        action_key, action, tone = "verify", "확인 대기", "wait"
+        summary = "현재가가 확인되지 않아 매수·대기·손절 기준을 확정하지 않습니다."
+    elif gate_key == "exclude" or risk >= 24 or total < 45:
+        action_key, action, tone = "exclude", "오늘 제외", "risk"
+        summary = "리스크 또는 점수 기준이 부족해 신규 진입 대상에서 제외합니다."
+    elif gate_key == "defer" or confidence_score < 45:
+        action_key, action, tone = "verify", "확인 대기", "wait"
+        summary = "실시간 가격·공시·뉴스 근거가 부족해 추가 검증 전까지 대기합니다."
+    elif hot or heat >= 10:
+        action_key, action, tone = "pullback", "눌림 대기", "wait"
+        summary = "가격이 이미 반응했거나 과열 신호가 있어 추격보다 눌림 확인이 우선입니다."
+    elif weak:
+        action_key, action, tone = "watch", "관찰", "wait"
+        summary = "가격이 약한 구간이라 거래량을 동반한 반등 회복 전까지 관찰합니다."
+    elif gate_key == "actionable" and readiness >= 70 and total >= 72:
+        action_key, action, tone = "buy", "매수 가능", "buy"
+        summary = "신뢰도·가격·리스크 기준을 통과했습니다. 단, 분할 관찰 기준으로만 접근합니다."
+    elif group_key in {"hidden", "momentum"} or gate_key == "watch":
+        action_key, action, tone = "watch", "관찰", "wait"
+        summary = "재료는 있으나 가격·거래량 반응을 한 번 더 확인해야 합니다."
+    else:
+        action_key, action, tone = "pullback", "눌림 대기", "wait"
+        summary = "후보 신호는 있으나 현재 가격에서는 즉시 진입보다 가격대 확인이 우선입니다."
+
+    band = final_price_band(candidate, score_detail, total, readiness, action_key)
+    signal_cards = [
+        ["현재 판단", action],
+        ["매수 구간", band["entryRange"] if band else "현재가 확인 후 계산"],
+        ["위험 기준", f"{band['stopLine']} 이탈" if band else "-"],
+    ]
+    rows = [
+        ["관찰 매수", band["entryRange"] if band else "현재가 확인 후 계산"],
+        ["눌림 대기", f"{band['pullback']} 부근 확인" if band else "-"],
+        ["반등 확인", f"{band['reboundLine']} 회복" if band and band.get("reboundLine") else "약세 전환 시 확인"],
+        ["추격 금지", f"{band['chaseLimit']} 이상" if band else "-"],
+        ["손절 점검", f"{band['stopLine']} 이탈" if band else "-"],
+        ["분할매도", f"{band['trimLine']} 이상 또는 과열 신호" if band else "-"],
+    ]
+    reasons = [
+        f"최종 게이트: {gate.get('label', '미분류')}",
+        f"데이터 신뢰도: {confidence_score}/100",
+        f"후보 점수: {total}/100",
+        f"진입 준비도: {readiness}/100",
+    ]
+    if change is not None:
+        reasons.append(f"현재 등락률: {candidate.get('change')}")
+    if group.get("reason"):
+        reasons.append(str(group.get("reason")))
+
+    return {
+        "actionKey": action_key,
+        "action": action,
+        "tone": tone,
+        "summary": summary,
+        "tradeAllowed": action_key == "buy",
+        "gateKey": gate_key,
+        "confidenceScore": confidence_score,
+        "priceLevels": band or {},
+        "signalCards": signal_cards,
+        "rows": rows,
+        "reasons": unique_texts(reasons, limit=6),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
     opportunity_scores = []
     confidence_scores = []
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
+    final_decision_counts = {"buy": 0, "pullback": 0, "watch": 0, "verify": 0, "exclude": 0}
     for candidate in candidates:
         item = dict(candidate)
         base_score = item.get("score", {})
@@ -3284,6 +3449,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
                 "priority": 3 if gate["key"] == "defer" else 4,
                 "reason": "신뢰도 게이트에서 실전 진입 후보로 인정하지 않았습니다.",
             }
+        final_decision = candidate_final_decision(item, score_detail, total, readiness, confidence, gate)
+        final_decision_counts[final_decision["actionKey"]] = final_decision_counts.get(final_decision["actionKey"], 0) + 1
         item["hiddenOpportunity"] = {
             "score": opportunity,
             "maxScore": 18,
@@ -3302,6 +3469,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         }
         item["dataConfidence"] = confidence
         item["qualityGate"] = gate
+        item["finalDecision"] = final_decision
         enriched.append(item)
 
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
@@ -3321,6 +3489,11 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "decisionGroups": groups,
         "actionCandidateCount": groups.get("action", 0),
         "qualityGateCounts": gate_counts,
+        "finalDecisionCounts": final_decision_counts,
+        "buyDecisionCount": final_decision_counts.get("buy", 0),
+        "pullbackDecisionCount": final_decision_counts.get("pullback", 0),
+        "watchDecisionCount": final_decision_counts.get("watch", 0),
+        "verifyDecisionCount": final_decision_counts.get("verify", 0),
         "investableCandidateCount": gate_counts.get("actionable", 0),
         "watchCandidateCount": gate_counts.get("watch", 0),
         "deferCandidateCount": gate_counts.get("defer", 0),
@@ -4668,6 +4841,17 @@ def score_signal_context(context: dict) -> dict:
 
 
 def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
+    def final_rank(item: dict) -> int:
+        decision = item.get("finalDecision", {}) if isinstance(item, dict) else {}
+        key = str(decision.get("actionKey", "")) if isinstance(decision, dict) else ""
+        return {
+            "buy": 100,
+            "watch": 82,
+            "pullback": 72,
+            "verify": 45,
+            "exclude": 10,
+        }.get(key, 50)
+
     def group_rank(item: dict) -> int:
         group = item.get("decisionGroup", {}) if isinstance(item, dict) else {}
         priority = bounded_int(group.get("priority", 9), 0, 9) if isinstance(group, dict) else 9
@@ -4678,11 +4862,11 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
 
     if mode == "preopen":
-        candidates.sort(key=lambda item: (group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
     elif mode == "intraday":
-        candidates.sort(key=lambda item: (group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
     else:
-        candidates.sort(key=lambda item: (group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
+        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
     return candidates
 
 
@@ -4750,6 +4934,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
             "decisionGroups": selection_status.get("decisionGroups", {}),
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
+            "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
+            "buyDecisionCount": selection_status.get("buyDecisionCount"),
+            "pullbackDecisionCount": selection_status.get("pullbackDecisionCount"),
+            "watchDecisionCount": selection_status.get("watchDecisionCount"),
+            "verifyDecisionCount": selection_status.get("verifyDecisionCount"),
             "investableCandidateCount": selection_status.get("investableCandidateCount"),
             "watchCandidateCount": selection_status.get("watchCandidateCount"),
             "deferCandidateCount": selection_status.get("deferCandidateCount"),
@@ -4916,6 +5105,7 @@ def dashboard_summary(payload: dict) -> dict:
             "change": item.get("change", ""),
             "gate": item.get("qualityGate", {}).get("label", "") if isinstance(item.get("qualityGate"), dict) else "",
             "confidence": item.get("dataConfidence", {}).get("score") if isinstance(item.get("dataConfidence"), dict) else None,
+            "finalDecision": item.get("finalDecision", {}).get("action", "") if isinstance(item.get("finalDecision"), dict) else "",
         })
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
@@ -4935,6 +5125,11 @@ def dashboard_summary(payload: dict) -> dict:
         "averageScoreShift": summary.get("averageScoreShift"),
         "averageDataConfidence": summary.get("averageDataConfidence"),
         "qualityGateCounts": summary.get("qualityGateCounts", {}),
+        "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
+        "buyDecisionCount": summary.get("buyDecisionCount"),
+        "pullbackDecisionCount": summary.get("pullbackDecisionCount"),
+        "watchDecisionCount": summary.get("watchDecisionCount"),
+        "verifyDecisionCount": summary.get("verifyDecisionCount"),
         "investableCandidateCount": summary.get("investableCandidateCount"),
         "watchCandidateCount": summary.get("watchCandidateCount"),
         "deferCandidateCount": summary.get("deferCandidateCount"),
@@ -5236,6 +5431,7 @@ def performance_summary(observations: list[dict], run_count: int, price_status: 
     negative = [item for item in measured if item.get("outcome") == "하락"]
     neutral = [item for item in measured if item.get("outcome") == "중립"]
     actionable = [item for item in measured if item.get("gateKey") == "actionable"]
+    buy_decisions = [item for item in measured if item.get("finalActionKey") == "buy"]
     average = decimal_average(changes)
     best = max(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
     worst = min(measured, key=lambda item: Decimal(str(item["changeRate"])), default=None)
@@ -5252,6 +5448,9 @@ def performance_summary(observations: list[dict], run_count: int, price_status: 
         "actionableMeasuredCount": len(actionable),
         "actionableHitRate": performance_hit_rate(actionable),
         "actionableAverageChange": performance_average_change(actionable),
+        "buyDecisionMeasuredCount": len(buy_decisions),
+        "buyDecisionHitRate": performance_hit_rate(buy_decisions),
+        "buyDecisionAverageChange": performance_average_change(buy_decisions),
         "best": best,
         "worst": worst,
         "priceSource": price_status.get("source", "-"),
@@ -5332,6 +5531,15 @@ def performance_by_horizon(observations: list[dict]) -> list[dict]:
     )
 
 
+def performance_by_final_action(observations: list[dict]) -> list[dict]:
+    return performance_group_rows(
+        observations,
+        "finalActionKey",
+        "finalAction",
+        ["buy", "watch", "pullback", "verify", "exclude", "unknown"],
+    )
+
+
 def performance_report(limit: int | None = None, top_n: int | None = None) -> dict:
     limit = SIGNAL_PERFORMANCE_RUN_LIMIT if limit is None else max(1, min(int(limit), 50))
     top_n = SIGNAL_PERFORMANCE_TOP_CANDIDATES if top_n is None else max(1, min(int(top_n), 10))
@@ -5370,6 +5578,14 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             confidence,
         )
         decision_group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
+        final_decision = candidate.get("finalDecision") if isinstance(candidate.get("finalDecision"), dict) else candidate_final_decision(
+            candidate,
+            score_detail,
+            total_score,
+            readiness,
+            confidence,
+            gate,
+        )
         horizon = performance_horizon(str(run.get("createdAt", "")))
         measured = start_price is not None and start_price > 0 and isinstance(current_price, Decimal)
         change_rate = Decimal("0")
@@ -5397,6 +5613,8 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
             "readiness": candidate.get("triggerReadiness", 0),
             "verdict": candidate.get("verdict", ""),
             "decisionGroup": decision_group.get("label", ""),
+            "finalActionKey": final_decision.get("actionKey", ""),
+            "finalAction": final_decision.get("action", ""),
             "gateKey": gate.get("key", "unknown"),
             "gateLabel": gate.get("label", "미분류"),
             "confidenceScore": confidence.get("score"),
@@ -5427,6 +5645,7 @@ def performance_report(limit: int | None = None, top_n: int | None = None) -> di
         "summary": performance_summary(observations, len(runs), price_status),
         "bySymbol": performance_by_symbol(observations),
         "byGate": performance_by_gate(observations),
+        "byFinalAction": performance_by_final_action(observations),
         "byHorizon": performance_by_horizon(observations),
         "observations": observations,
     }

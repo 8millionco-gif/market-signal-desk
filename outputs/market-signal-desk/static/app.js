@@ -1711,12 +1711,52 @@ function priceBandFor(item, current, group, change, score) {
   };
 }
 
+function tradePlanFromFinalDecision(item, decision) {
+  const signalCards = Array.isArray(decision.signalCards) ? decision.signalCards : [];
+  const rows = Array.isArray(decision.rows) ? decision.rows : [];
+  const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+  return {
+    action: decision.action || "확인 대기",
+    tone: decision.tone || "wait",
+    summary: decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.",
+    holding: null,
+    hasPrice: Boolean(item?.price),
+    signalCards: signalCards.length
+      ? signalCards
+      : [
+          ["현재 판단", decision.action || "확인 대기"],
+          ["매수 구간", decision.priceLevels?.entryRange || "현재가 확인 후 계산"],
+          ["위험 기준", decision.priceLevels?.stopLine ? `${decision.priceLevels.stopLine} 이탈` : "-"]
+        ],
+    rows: rows.length
+      ? rows
+      : [
+          ["관찰 매수", decision.priceLevels?.entryRange || "현재가 확인 후 계산"],
+          ["눌림 대기", decision.priceLevels?.pullback ? `${decision.priceLevels.pullback} 부근 확인` : "-"],
+          ["반등 확인", decision.priceLevels?.reboundLine ? `${decision.priceLevels.reboundLine} 회복` : "약세 전환 시 확인"],
+          ["추격 금지", decision.priceLevels?.chaseLimit ? `${decision.priceLevels.chaseLimit} 이상` : "-"],
+          ["손절 점검", decision.priceLevels?.stopLine ? `${decision.priceLevels.stopLine} 이탈` : "-"],
+          ["분할매도", decision.priceLevels?.trimLine ? `${decision.priceLevels.trimLine} 이상 또는 과열 신호` : "-"]
+        ],
+    reasons: uniqueTexts(
+      [
+        ...reasons,
+        decision.tradeAllowed ? "서버 최종 판단: 조건부 매수 가능" : "서버 최종 판단: 추가 확인 우선"
+      ],
+      5
+    )
+  };
+}
+
 function tradePlan(item) {
   const score = Number(item?.totalScore ?? 0);
   const current = parseDisplayNumber(item?.price);
   const change = parseDisplayPercent(item?.change);
   const group = decisionGroupForDisplay(item);
   const holding = selectedHoldingFor(item);
+  if (!holding && item?.finalDecision) {
+    return tradePlanFromFinalDecision(item, item.finalDecision);
+  }
   const holdingRate = parseDisplayPercent(holding?.profitLossRate);
   const holdingJudgement = String(holding?.judgement ?? "");
   const hasPrice = Number.isFinite(current);
@@ -2828,6 +2868,7 @@ function renderPerformance() {
   const observations = Array.isArray(payload.observations) ? payload.observations : [];
   const bySymbol = Array.isArray(payload.bySymbol) ? payload.bySymbol : [];
   const byGate = Array.isArray(payload.byGate) ? payload.byGate : [];
+  const byFinalAction = Array.isArray(payload.byFinalAction) ? payload.byFinalAction : [];
   const byHorizon = Array.isArray(payload.byHorizon) ? payload.byHorizon : [];
   const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : "샘플 가격";
   const threshold = payload.config?.successThreshold ?? "+1.0%";
@@ -2856,6 +2897,8 @@ function renderPerformance() {
         ${performanceMetric("평균 변화", summary.averageChange ?? "-", changeClass(summary.averageChange ?? ""))}
         ${performanceMetric("실전 관측", summary.actionableMeasuredCount ?? 0)}
         ${performanceMetric("실전 승률", summary.actionableHitRate ?? "-")}
+        ${performanceMetric("매수 판단", summary.buyDecisionMeasuredCount ?? 0)}
+        ${performanceMetric("매수 승률", summary.buyDecisionHitRate ?? "-")}
         ${performanceMetric("상승", summary.positiveCount ?? 0)}
         ${performanceMetric("하락", summary.negativeCount ?? 0)}
       </div>
@@ -2885,6 +2928,20 @@ function renderPerformance() {
               byGate.length
                 ? byGate.map(renderPerformanceGroup).join("")
                 : `<div class="history-empty">게이트별 관측값이 아직 없습니다</div>`
+            }
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">
+            <p class="eyebrow">판단</p>
+            <h2>최종 판단별 성과</h2>
+          </div>
+          <div class="performance-list">
+            ${
+              byFinalAction.length
+                ? byFinalAction.map(renderPerformanceGroup).join("")
+                : `<div class="history-empty">최종 판단별 관측값이 아직 없습니다</div>`
             }
           </div>
         </section>
@@ -3069,13 +3126,15 @@ function decisionGroupSection(item) {
   const qualityLabel = discoveryQualityLabel(item);
   const confidence = item.dataConfidence ?? {};
   const gate = item.qualityGate ?? {};
+  const finalDecision = item.finalDecision ?? {};
   return `
     <section class="detail-section">
       <div class="section-title">
         <p class="eyebrow">후보 분류</p>
-        <h2>${escapeHtml(group.label)}</h2>
+        <h2>${escapeHtml(finalDecision.action || group.label)}</h2>
       </div>
       <div class="stat-grid">
+        ${finalDecision.action ? statCard("최종 판단", finalDecision.action) : ""}
         ${statCard("판단 점수", `${Math.round(Number(group.score ?? 0))}/100`)}
         ${statCard("분류", group.label)}
         ${qualityLabel ? statCard("품질", qualityLabel) : ""}
@@ -3083,6 +3142,7 @@ function decisionGroupSection(item) {
         ${gate.label ? statCard("게이트", gate.label) : ""}
       </div>
       <ul class="bullet-list">
+        ${finalDecision.summary ? `<li>${escapeHtml(`최종 판단: ${finalDecision.summary}`)}</li>` : ""}
         <li>${escapeHtml(group.reason)}</li>
         ${qualityReason ? `<li>${escapeHtml(`후보 품질: ${qualityReason}`)}</li>` : ""}
         ${(confidence.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`신뢰 근거: ${text}`)}</li>`).join("")}
