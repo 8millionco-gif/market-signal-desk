@@ -29,6 +29,27 @@ function Write-Check($Label, $Ok, $Detail = "") {
   }
 }
 
+function Format-ApiError($ErrorRecord) {
+  $message = $ErrorRecord.Exception.Message
+  $body = $ErrorRecord.ErrorDetails.Message
+  if ($body) {
+    try {
+      $payload = $body | ConvertFrom-Json
+      $parts = @()
+      if ($payload.status) { $parts += "status=$($payload.status)" }
+      if ($payload.error) { $parts += "error=$($payload.error)" }
+      if ($payload.message) { $parts += "message=$($payload.message)" }
+      if ($payload.detail) { $parts += "detail=$($payload.detail)" }
+      if ($parts.Count -gt 0) {
+        return ($parts -join ", ")
+      }
+    } catch {
+      return $body
+    }
+  }
+  return $message
+}
+
 $adminToken = Read-SecretText "Render ADMIN_TOKEN"
 if ([string]::IsNullOrWhiteSpace($adminToken)) {
   throw "ADMIN_TOKEN is required."
@@ -110,7 +131,7 @@ $tossPriceStatus = $dashboard.integrations.toss.prices
 if ($tossPriceStatus) {
   $detail = "source=$($tossPriceStatus.source), prices=$($tossPriceStatus.priceCount)"
   if ($tossPriceStatus.error) {
-    $detail = "$detail, error=$($tossPriceStatus.error)"
+    $detail = "$detail, status=$($tossPriceStatus.status), error=$($tossPriceStatus.error), detail=$($tossPriceStatus.detail)"
   }
   Write-Check "Toss dashboard prices" ($tossPriceStatus.source -eq "toss") $detail
 }
@@ -119,7 +140,7 @@ $tossCandleStatus = $dashboard.integrations.toss.candles
 if ($tossCandleStatus) {
   $detail = "source=$($tossCandleStatus.source), candles=$($tossCandleStatus.candleCount), stale=$($tossCandleStatus.staleCount)"
   if ($tossCandleStatus.error) {
-    $detail = "$detail, error=$($tossCandleStatus.error)"
+    $detail = "$detail, status=$($tossCandleStatus.status), error=$($tossCandleStatus.error), detail=$($tossCandleStatus.detail)"
   }
   Write-Check "Toss dashboard candles" ($tossCandleStatus.source -eq "toss") $detail
 }
@@ -128,7 +149,7 @@ $tossOrderbookStatus = $dashboard.integrations.toss.orderbook
 if ($tossOrderbookStatus) {
   $detail = "source=$($tossOrderbookStatus.source), orderbooks=$($tossOrderbookStatus.orderbookCount)"
   if ($tossOrderbookStatus.error) {
-    $detail = "$detail, error=$($tossOrderbookStatus.error)"
+    $detail = "$detail, status=$($tossOrderbookStatus.status), error=$($tossOrderbookStatus.error), detail=$($tossOrderbookStatus.detail)"
   }
   Write-Check "Toss dashboard orderbook" ($tossOrderbookStatus.source -eq "toss") $detail
 }
@@ -137,7 +158,7 @@ $tossTradesStatus = $dashboard.integrations.toss.trades
 if ($tossTradesStatus) {
   $detail = "source=$($tossTradesStatus.source), trades=$($tossTradesStatus.tradeCount)"
   if ($tossTradesStatus.error) {
-    $detail = "$detail, error=$($tossTradesStatus.error)"
+    $detail = "$detail, status=$($tossTradesStatus.status), error=$($tossTradesStatus.error), detail=$($tossTradesStatus.detail)"
   }
   Write-Check "Toss dashboard trades" ($tossTradesStatus.source -eq "toss") $detail
 }
@@ -147,25 +168,25 @@ if ($tossReady) {
     $prices = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/prices?symbols=005930") -Headers $headers -Method Get -TimeoutSec 45
     Write-Check "Toss prices API" (($prices.result | Measure-Object).Count -gt 0) "items=$(($prices.result | Measure-Object).Count)"
   } catch {
-    Write-Check "Toss prices API" $false $_.Exception.Message
+    Write-Check "Toss prices API" $false (Format-ApiError $_)
   }
   try {
     $candles = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/candles?symbol=005930&interval=1d&count=5") -Headers $headers -Method Get -TimeoutSec 45
     Write-Check "Toss candles API" (($candles.result.candles | Measure-Object).Count -gt 0) "items=$(($candles.result.candles | Measure-Object).Count)"
   } catch {
-    Write-Check "Toss candles API" $false $_.Exception.Message
+    Write-Check "Toss candles API" $false (Format-ApiError $_)
   }
   try {
     $orderbook = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/orderbook?symbol=005930") -Headers $headers -Method Get -TimeoutSec 45
     Write-Check "Toss orderbook API" ($null -ne $orderbook.result) "symbol=005930"
   } catch {
-    Write-Check "Toss orderbook API" $false $_.Exception.Message
+    Write-Check "Toss orderbook API" $false (Format-ApiError $_)
   }
   try {
     $trades = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/trades?symbol=005930&count=5") -Headers $headers -Method Get -TimeoutSec 45
     Write-Check "Toss trades API" (($trades.result | Measure-Object).Count -gt 0) "items=$(($trades.result | Measure-Object).Count)"
   } catch {
-    Write-Check "Toss trades API" $false $_.Exception.Message
+    Write-Check "Toss trades API" $false (Format-ApiError $_)
   }
 } else {
   Write-Check "Toss prices API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_PRICES=1"

@@ -895,6 +895,7 @@ function renderTossStatus() {
   const orderbookStatus = state.dashboard?.integrations?.toss?.orderbook;
   const tradesStatus = state.dashboard?.integrations?.toss?.trades;
   const baselineDriftCount = priceStatus?.baselineDriftCount ?? 0;
+  const tossIssue = firstTossIssue([priceStatus, candleStatus, orderbookStatus, tradesStatus]);
   const priceSourceValue =
     priceStatus?.source === "toss"
       ? `토스 ${priceStatus.priceCount ?? 0}건${baselineDriftCount > 0 ? ` · 기준가 차이 ${baselineDriftCount}건` : ""}`
@@ -904,6 +905,7 @@ function renderTossStatus() {
     ["Client Secret", status.clientSecretConfigured, status.clientSecretConfigured ? "설정됨" : "미설정"],
     ["토큰 발급", status.readyForTokenIssue, status.readyForTokenIssue ? "준비됨" : "대기"],
     ["시세 조회", status.readyForMarketData, status.readyForMarketData ? "가능" : "대기"],
+    ["오류 사유", !tossIssue, tossIssue || "없음"],
     ["가격 live", status.livePricesEnabled, status.livePricesEnabled ? "켜짐" : "꺼짐"],
     [
       "가격 출처",
@@ -953,11 +955,35 @@ function renderTossStatus() {
 function tossSourceLabel(status, liveEnabled, countKey) {
   if (!liveEnabled || status?.enabled === false) return "라이브 꺼짐";
   if (!status) return "확인 중";
-  if (status.error) return "오류";
+  if (status.error) return status.status ? `오류 ${status.status}` : "오류";
   if (status.source === "skipped") return "제한";
   if (status.source === "stale") return "오래됨";
   if (status.source === "toss") return `토스 ${status[countKey] ?? 0}건`;
   return "샘플";
+}
+
+function firstTossIssue(statuses) {
+  const failed = statuses.find((status) => status?.error);
+  if (!failed) return "";
+  const detail = String(failed.detail ?? failed.message ?? failed.error ?? "");
+  const lower = detail.toLowerCase();
+  if (failed.status === 401 || lower.includes("unauthorized") || lower.includes("invalid_token")) {
+    return "토큰/키 확인";
+  }
+  if (
+    failed.status === 403 ||
+    lower.includes("forbidden") ||
+    lower.includes("ip") ||
+    detail.includes("허용") ||
+    detail.includes("권한")
+  ) {
+    return "IP/권한 확인";
+  }
+  if (failed.status === 404 || lower.includes("not found")) {
+    return "경로 확인";
+  }
+  if (failed.status) return `HTTP ${failed.status}`;
+  return String(failed.error ?? "오류");
 }
 
 function renderDartStatus() {

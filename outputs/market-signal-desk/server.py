@@ -2684,6 +2684,8 @@ def dashboard(mode: str) -> dict:
             "source": "sample",
             "enabled": TOSS_LIVE_PRICES,
             "error": payload.get("error", "unknown"),
+            "status": payload.get("status"),
+            "detail": payload.get("detail", ""),
             "message": payload.get("message", "토스 현재가 반영에 실패해 샘플 가격을 사용합니다."),
         }
     try:
@@ -2694,6 +2696,8 @@ def dashboard(mode: str) -> dict:
             "source": "sample",
             "enabled": TOSS_LIVE_CANDLES,
             "error": payload.get("error", "unknown"),
+            "status": payload.get("status"),
+            "detail": payload.get("detail", ""),
             "message": payload.get("message", "토스 캔들 반영에 실패해 샘플 차트를 사용합니다."),
         }
     try:
@@ -2704,6 +2708,8 @@ def dashboard(mode: str) -> dict:
             "source": "sample",
             "enabled": TOSS_LIVE_ORDERBOOK,
             "error": payload.get("error", "unknown"),
+            "status": payload.get("status"),
+            "detail": payload.get("detail", ""),
             "message": payload.get("message", "토스 호가 반영에 실패해 샘플 호가 지표를 사용합니다."),
         }
     try:
@@ -2714,6 +2720,8 @@ def dashboard(mode: str) -> dict:
             "source": "sample",
             "enabled": TOSS_LIVE_TRADES,
             "error": payload.get("error", "unknown"),
+            "status": payload.get("status"),
+            "detail": payload.get("detail", ""),
             "message": payload.get("message", "토스 체결 반영에 실패해 샘플 체결 지표를 사용합니다."),
         }
     try:
