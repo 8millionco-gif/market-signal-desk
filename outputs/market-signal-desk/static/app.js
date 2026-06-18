@@ -81,7 +81,6 @@ const els = {
   metricReady: document.querySelector("#metricReady"),
   metricWatched: document.querySelector("#metricWatched"),
   tradeDecisionStatus: document.querySelector("#tradeDecisionStatus"),
-  nextSteps: document.querySelector("#nextSteps"),
   marketStatus: document.querySelector("#marketStatus"),
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
@@ -360,7 +359,6 @@ async function loadDashboard() {
     renderPortfolioStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
-    renderNextSteps();
     renderMarketStatus();
     renderNetworkStatus();
     renderTossStatus();
@@ -772,7 +770,6 @@ function render() {
   renderPortfolioStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
-  renderNextSteps();
   renderMarketStatus();
   renderNetworkStatus();
   renderTossStatus();
@@ -1265,41 +1262,6 @@ function renderMetrics() {
   els.metricHighScore.textContent = summary.highScoreCount ?? 0;
   els.metricReady.textContent = summary.readyCount ?? 0;
   els.metricWatched.textContent = summary.watchedCount ?? 0;
-}
-
-function renderNextSteps() {
-  if (!els.nextSteps) return;
-  const readiness = readinessState();
-  const steps = [];
-  if (!readiness.tossReady) {
-    steps.push("Toss 출처 확인");
-    steps.push("허용 IP 점검");
-    steps.push("현재가부터 재검증");
-  } else if (!readiness.contextReady) {
-    steps.push("뉴스·공시·AI 점검");
-    steps.push("분석 출처 확인");
-    steps.push("후보 점수 재확인");
-  } else if (!readiness.manualRunReady) {
-    steps.push("장마감 수동 실행");
-    steps.push("스냅샷 저장 확인");
-    steps.push("성과 화면 점검");
-  } else if (!readiness.autoEnabled) {
-    steps.push("자동 실행 켜기");
-    steps.push("장전·장마감 예약 확인");
-    steps.push("알림 조건 확정");
-  } else {
-    steps.push("성과 리포트 관찰");
-    steps.push("선정 기준 튜닝");
-    steps.push("외부 알림 채널 확장");
-  }
-  els.nextSteps.innerHTML = steps
-    .map((step, index) => `
-      <div>
-        <strong>${index + 1}</strong>
-        <span>${escapeHtml(step)}</span>
-      </div>
-    `)
-    .join("");
 }
 
 function timeLabel(value) {

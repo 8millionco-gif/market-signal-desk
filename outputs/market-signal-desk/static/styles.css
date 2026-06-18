@@ -1313,7 +1313,6 @@ h3 {
 }
 
 .metrics-grid span,
-.next-steps span,
 .connection-list span {
   display: block;
   color: var(--muted);
@@ -1325,11 +1324,6 @@ h3 {
   display: block;
   margin-top: 5px;
   font-size: 24px;
-}
-
-.next-steps {
-  display: grid;
-  gap: 10px;
 }
 
 .connection-list {
@@ -1475,24 +1469,6 @@ h3 {
 
 .history-top {
   color: var(--soft);
-}
-
-.next-steps div {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-}
-
-.next-steps strong {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  color: #10141c;
-  background: var(--amber);
-  font-size: 12px;
 }
 
 .empty-state {
