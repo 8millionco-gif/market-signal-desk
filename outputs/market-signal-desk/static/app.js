@@ -28,6 +28,15 @@ const state = {
   filter: "all",
   query: "",
   dashboard: null,
+  stockSearch: {
+    query: "",
+    loading: false,
+    items: [],
+    message: "",
+    status: null
+  },
+  selectedLookup: null,
+  searchTimer: null,
   performance: null,
   performanceLoading: false,
   authEnabled: false,
@@ -51,6 +60,7 @@ const els = {
   settingsView: document.querySelector("#settingsView"),
   candidateCount: document.querySelector("#candidateCount"),
   searchInput: document.querySelector("#searchInput"),
+  stockSearchResults: document.querySelector("#stockSearchResults"),
   principles: document.querySelector("#principles"),
   kospiValue: document.querySelector("#kospiValue"),
   kosdaqValue: document.querySelector("#kosdaqValue"),
@@ -389,12 +399,91 @@ function filteredCandidates() {
 }
 
 function selectedCandidate() {
+  if (state.selectedLookup?.symbol === state.selectedSymbol) {
+    return state.selectedLookup;
+  }
   const candidates = state.dashboard?.candidates ?? [];
   return (
     candidates.find((item) => item.symbol === state.selectedSymbol) ||
     candidates[0] ||
     null
   );
+}
+
+function candidateFromSearchResult(item) {
+  const tags = uniqueTexts([
+    "종목 검색",
+    item.market,
+    item.securityType,
+    item.currency,
+    item.status
+  ], 5);
+  return {
+    symbol: item.symbol,
+    name: item.name || item.symbol,
+    market: item.market || "",
+    category: item.category || "domestic",
+    price: item.price || "-",
+    change: item.change || "",
+    updated: item.updated || "직접 조회",
+    headline: item.headline || "후보 편입 전 종목 조회",
+    verdict: "후보 편입 전",
+    stage: "lookup",
+    totalScore: 0,
+    triggerReadiness: 0,
+    preopenPriority: 0,
+    score: {},
+    tags,
+    thesis: "오늘 후보로 점수화되기 전의 직접 조회 결과입니다. 뉴스, 공시, 가격 반응을 확인한 뒤 후보 편입 여부를 먼저 판단해야 합니다.",
+    why: [
+      `${item.name || item.symbol} 기본정보를 조회했습니다.`,
+      item.price && item.price !== "-" ? `현재가 ${item.price} 기준으로 추가 분석을 시작할 수 있습니다.` : "현재가는 아직 연결되지 않았습니다.",
+      "후보 점수화 전에는 신규 매수 판단보다 관찰 목록 편입 여부를 먼저 봅니다."
+    ],
+    entryConditions: [
+      "뉴스와 공시 재료가 최근 가격 반응과 같은 방향인지 확인",
+      "거래대금과 섹터 흐름이 후보 기준을 충족하는지 확인",
+      "손절 기준이 진입가에서 3% 안쪽으로 관리되는 가격대인지 확인"
+    ],
+    noEntry: [
+      "후보 점수와 매수 가격대가 계산되기 전",
+      "현재가나 거래량 데이터가 연결되지 않은 상태",
+      "뉴스만 있고 실제 수급 반응이 확인되지 않은 경우"
+    ],
+    stopRules: [
+      "후보 편입 후 기준 가격 재이탈",
+      "섹터 동반 약세 전환",
+      "거래량 없는 상승만 이어지는 경우"
+    ],
+    trend: {
+      newsCount: 0,
+      globalNewsCount: null,
+      newsSpike: "-",
+      volumeSpike: "-",
+      dailyVolume: "-",
+      tradePressure: "-",
+      orderbookPressure: "-",
+      spread: "-",
+      sentiment: "-"
+    },
+    sources: [
+      {
+        title: item.sourceLabel || "종목 기본정보 조회",
+        publisher: item.source === "toss" ? "Toss Open API" : "후보 목록",
+        time: item.updated || "검색"
+      }
+    ],
+    disclosures: [
+      "직접 조회 종목은 아직 뉴스/공시/시세 점수화가 완료되지 않았습니다.",
+      "후보 편입 전 매수/매도 판단에는 사용하지 않는 것이 좋습니다."
+    ],
+    related: [],
+    chart: [50, 50, 50, 50, 50, 50],
+    livePrice: item.livePrice || { source: "lookup", message: "종목 검색 결과입니다." },
+    liveCandles: { source: "lookup" },
+    isWatched: Boolean(item.isWatched),
+    lookupOnly: true
+  };
 }
 
 function tradeActionText(item) {
@@ -1470,11 +1559,12 @@ function renderPrinciples() {
 
 function renderFeed() {
   const candidates = filteredCandidates();
+  renderStockSearchResults();
   if (!candidates.length) {
     els.candidateFeed.innerHTML = `
       <div class="empty-state">
         <h2>조건에 맞는 후보가 없습니다</h2>
-        <p>필터나 검색어를 조정해보세요.</p>
+        <p>후보 밖 종목은 코드나 티커로 직접 조회할 수 있습니다.</p>
       </div>
     `;
     return;
@@ -1513,6 +1603,123 @@ function renderFeed() {
       renderDetail();
     });
   });
+}
+
+function stockSearchSubtitle(item) {
+  const parts = [
+    item.sourceLabel,
+    item.market,
+    item.securityType,
+    item.status,
+    item.price && item.price !== "-" ? item.price : ""
+  ].filter(Boolean);
+  return parts.join(" · ") || "종목 검색 결과";
+}
+
+function openSearchResult(symbol) {
+  const item = (state.stockSearch.items ?? []).find((entry) => entry.symbol === symbol);
+  if (!item) return;
+  const candidate = (state.dashboard?.candidates ?? []).find((entry) => entry.symbol === symbol);
+  state.view = "signals";
+  updateShellView();
+  updateViewButtons();
+  if (candidate) {
+    state.selectedLookup = null;
+    state.selectedSymbol = candidate.symbol;
+  } else {
+    state.selectedLookup = candidateFromSearchResult(item);
+    state.selectedSymbol = item.symbol;
+  }
+  renderFeed();
+  renderTradeDecisionStatus();
+  renderDetail();
+}
+
+function renderStockSearchResults() {
+  if (!els.stockSearchResults) return;
+  const query = state.query.trim();
+  const payload = state.stockSearch;
+  if (query.length < 2) {
+    els.stockSearchResults.hidden = true;
+    els.stockSearchResults.innerHTML = "";
+    return;
+  }
+
+  const items = payload.items ?? [];
+  const stale = payload.query !== query;
+  const loading = payload.loading || stale;
+  const message = payload.message || payload.status?.message || "";
+  els.stockSearchResults.hidden = false;
+  els.stockSearchResults.innerHTML = `
+    <div class="stock-search-head">
+      <strong>종목 검색</strong>
+      <span>${loading ? "조회 중" : items.length ? `${items.length}건` : "결과 없음"}</span>
+    </div>
+    ${
+      items.length
+        ? `<div class="stock-search-list">
+            ${items
+              .slice(0, 5)
+              .map(
+                (item) => `
+                  <button class="stock-result" type="button" data-search-symbol="${escapeHtml(item.symbol)}">
+                    <span class="logo-mark">${escapeHtml(initials(item.name || item.symbol))}</span>
+                    <span>
+                      <strong>${escapeHtml(item.name || item.symbol)}</strong>
+                      <em>${escapeHtml(stockSearchSubtitle(item))}</em>
+                    </span>
+                    <span>${escapeHtml(item.inCandidates ? "후보 열기" : "조회")}</span>
+                  </button>
+                `
+              )
+              .join("")}
+          </div>`
+        : `<p>${escapeHtml(message || "후보 밖 종목은 005930, AAPL처럼 코드로 입력하세요.")}</p>`
+    }
+    ${message && items.length ? `<p>${escapeHtml(message)}</p>` : ""}
+  `;
+
+  els.stockSearchResults.querySelectorAll("[data-search-symbol]").forEach((button) => {
+    button.addEventListener("click", () => openSearchResult(button.dataset.searchSymbol));
+  });
+}
+
+async function loadStockSearch() {
+  const query = state.query.trim();
+  if (query.length < 2) {
+    state.stockSearch = {
+      query,
+      loading: false,
+      items: [],
+      message: "",
+      status: null
+    };
+    renderStockSearchResults();
+    return;
+  }
+
+  state.stockSearch = {
+    ...state.stockSearch,
+    query,
+    loading: true,
+    message: ""
+  };
+  renderStockSearchResults();
+
+  const payload = await safeFetchJson(
+    `/api/stocks/search?query=${encodeURIComponent(query)}&limit=8`,
+    { query, items: [], message: "종목 검색을 불러오지 못했습니다.", status: null },
+    10000
+  );
+  if (state.query.trim() !== query) return;
+  state.stockSearch = {
+    query,
+    loading: false,
+    items: Array.isArray(payload.items) ? payload.items : [],
+    message: payload.message || "",
+    status: payload.status || null
+  };
+  renderStockSearchResults();
 }
 
 function renderDetail() {
@@ -2026,6 +2233,7 @@ document.querySelectorAll(".mode-button").forEach((button) => {
     updateShellView();
     state.mode = button.dataset.mode;
     state.selectedSymbol = null;
+    state.selectedLookup = null;
     loadDashboard();
   });
 });
@@ -2041,6 +2249,12 @@ document.querySelectorAll(".tab").forEach((button) => {
 
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
+  if (state.searchTimer) {
+    window.clearTimeout(state.searchTimer);
+  }
+  state.searchTimer = window.setTimeout(() => {
+    loadStockSearch();
+  }, 280);
   renderFeed();
 });
 

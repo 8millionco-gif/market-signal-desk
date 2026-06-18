@@ -202,6 +202,13 @@ if ($tossReady) {
     Write-Check "Toss prices API" $false (Format-ApiError $_)
   }
   try {
+    $stockSearch = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/stocks/search?query=005930&limit=3") -Headers $headers -Method Get -TimeoutSec 45
+    $stockCount = ($stockSearch.items | Measure-Object).Count
+    Write-Check "stock search API" ($stockCount -gt 0) "items=$stockCount, source=$($stockSearch.status.source)"
+  } catch {
+    Write-Check "stock search API" $false (Format-ApiError $_)
+  }
+  try {
     $candles = Invoke-RestMethod -Uri (Join-Url $BaseUrl "/api/integrations/toss/candles?symbol=005930&interval=1d&count=5") -Headers $headers -Method Get -TimeoutSec 45
     Write-Check "Toss candles API" (($candles.result.candles | Measure-Object).Count -gt 0) "items=$(($candles.result.candles | Measure-Object).Count)"
   } catch {
@@ -221,6 +228,7 @@ if ($tossReady) {
   }
 } else {
   Write-Check "Toss prices API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_PRICES=1"
+  Write-Check "stock search API" $false "waiting for TOSS_CLIENT_ID/SECRET"
   Write-Check "Toss candles API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_CANDLES=1"
   Write-Check "Toss orderbook API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_ORDERBOOK=1"
   Write-Check "Toss trades API" $false "waiting for TOSS_CLIENT_ID/SECRET and TOSS_LIVE_TRADES=1"

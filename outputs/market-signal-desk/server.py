@@ -47,6 +47,7 @@ TOSS_CANDLE_CACHE_SECONDS = int(os.getenv("TOSS_CANDLE_CACHE_SECONDS", "60"))
 TOSS_ORDERBOOK_CACHE_SECONDS = int(os.getenv("TOSS_ORDERBOOK_CACHE_SECONDS", "5"))
 TOSS_TRADES_CACHE_SECONDS = int(os.getenv("TOSS_TRADES_CACHE_SECONDS", "5"))
 TOSS_PORTFOLIO_CACHE_SECONDS = int(os.getenv("TOSS_PORTFOLIO_CACHE_SECONDS", "30"))
+TOSS_STOCK_CACHE_SECONDS = int(os.getenv("TOSS_STOCK_CACHE_SECONDS", "86400"))
 TOSS_REQUEST_TIMEOUT_SECONDS = int(os.getenv("TOSS_REQUEST_TIMEOUT_SECONDS", "5"))
 TOSS_CANDLE_MAX_CANDIDATES = int(os.getenv("TOSS_CANDLE_MAX_CANDIDATES", "2"))
 TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "2"))
@@ -141,6 +142,7 @@ PRICE_CACHE: dict[str, object] = {"symbols": (), "payload": None, "expires_at": 
 CANDLE_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 ORDERBOOK_CACHE: dict[str, dict[str, object]] = {}
 TRADES_CACHE: dict[tuple[str, int], dict[str, object]] = {}
+STOCK_CACHE: dict[tuple[str, ...], dict[str, object]] = {}
 ACCOUNT_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 HOLDINGS_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 BUYING_POWER_CACHE: dict[tuple[str, str], dict[str, object]] = {}
@@ -527,6 +529,31 @@ def toss_api_get(path: str, query: dict | None = None, account_seq: str = "") ->
     )
     with urlopen(request, timeout=TOSS_REQUEST_TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_toss_stocks(symbols: list[str]) -> dict:
+    normalized = [
+        symbol.strip().upper()
+        for symbol in symbols
+        if re.fullmatch(r"[A-Za-z0-9.\-]{1,20}", symbol.strip())
+    ]
+    normalized = unique_symbols(normalized)[:200]
+    if not normalized:
+        return {"result": []}
+
+    cache_key = tuple(sorted(normalized))
+    cached = STOCK_CACHE.get(cache_key)
+    if cached:
+        expires_at = cached.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
+            return cached["payload"]  # type: ignore[return-value]
+
+    payload = toss_api_get("/api/v1/stocks", query={"symbols": ",".join(normalized)})
+    STOCK_CACHE[cache_key] = {
+        "payload": payload,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_STOCK_CACHE_SECONDS),
+    }
+    return payload
 
 
 def fetch_toss_accounts() -> dict:
@@ -1012,6 +1039,11 @@ def price_by_symbol(payload: dict) -> dict[str, dict]:
         for item in price_rows(payload)
         if item.get("symbol") and item.get("lastPrice") and item.get("currency")
     }
+
+
+def stock_rows(payload: dict) -> list[dict]:
+    result = payload.get("result", [])
+    return result if isinstance(result, list) else []
 
 
 def candle_rows(payload: dict) -> list[dict]:
@@ -2954,6 +2986,169 @@ def decorate_candidate(candidate: dict, watched: set[str]) -> dict:
     return decorated
 
 
+def normalized_search_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def search_query_looks_symbol(query: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9.\-]{2,20}", query.strip()))
+
+
+def candidate_search_result(candidate: dict) -> dict:
+    return {
+        "symbol": candidate.get("symbol", ""),
+        "name": candidate.get("name", candidate.get("symbol", "")),
+        "market": candidate.get("market", ""),
+        "category": candidate.get("category", ""),
+        "price": candidate.get("price", "-"),
+        "change": candidate.get("change", ""),
+        "headline": candidate.get("headline", ""),
+        "score": candidate.get("totalScore", score_candidate(candidate)),
+        "updated": candidate.get("updated", ""),
+        "isWatched": bool(candidate.get("isWatched")),
+        "inCandidates": True,
+        "source": "candidate",
+        "sourceLabel": "오늘 후보",
+    }
+
+
+def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list[dict]:
+    normalized_query = normalized_search_text(query)
+    if not normalized_query:
+        return []
+    matches = []
+    for candidate in seed_data().get("candidates", []):
+        haystack = normalized_search_text(
+            " ".join(
+                [
+                    str(candidate.get("name", "")),
+                    str(candidate.get("symbol", "")),
+                    str(candidate.get("headline", "")),
+                    " ".join(str(tag) for tag in candidate.get("tags", []) if tag),
+                ]
+            )
+        )
+        if normalized_query not in haystack:
+            continue
+        decorated = decorate_candidate(candidate, watched)
+        matches.append(candidate_search_result(decorated))
+    matches.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+    return matches[:limit]
+
+
+def stock_category(stock: dict) -> str:
+    market = str(stock.get("market", "")).upper()
+    currency = str(stock.get("currency", "")).upper()
+    if currency == "USD" or market in {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}:
+        return "overseas"
+    return "domestic"
+
+
+def stock_search_result(stock: dict, price: dict | None, watched: set[str]) -> dict:
+    symbol = str(stock.get("symbol", "")).strip().upper()
+    stock_currency = str(stock.get("currency", "")).strip().upper()
+    price_currency = str(price.get("currency", "")).strip().upper() if price else ""
+    currency = stock_currency or price_currency
+    price_text = "-"
+    if price and price.get("lastPrice") and price.get("currency"):
+        price_text = display_price(str(price.get("lastPrice")), str(price.get("currency")))
+    return {
+        "symbol": symbol,
+        "name": stock.get("name") or stock.get("englishName") or symbol,
+        "englishName": stock.get("englishName", ""),
+        "market": stock.get("market", ""),
+        "category": stock_category(stock),
+        "securityType": stock.get("securityType", ""),
+        "status": stock.get("status", ""),
+        "currency": currency,
+        "price": price_text,
+        "change": "",
+        "headline": "토스증권 종목 기본정보 조회 결과",
+        "score": None,
+        "updated": "직접 조회",
+        "isWatched": symbol in watched,
+        "inCandidates": False,
+        "source": "toss",
+        "sourceLabel": "토스 종목정보",
+        "livePrice": {
+            "source": "toss" if price_text != "-" else "unavailable",
+            "lastPrice": str(price.get("lastPrice")) if price else "",
+            "currency": str(price.get("currency")) if price else currency,
+            "timestamp": price.get("timestamp") if price else "",
+        },
+    }
+
+
+def stock_search(query: str, limit: int = 8) -> dict:
+    query = query.strip()
+    limit = max(1, min(int(limit), 20))
+    watched = set(watchlist())
+    candidate_items = seed_candidate_search(query, watched, limit=limit)
+    items = list(candidate_items)
+    messages = []
+    toss_status = {
+        "source": "skipped",
+        "enabled": False,
+        "message": "종목 코드를 입력하면 토스 종목 기본정보를 직접 조회합니다.",
+    }
+
+    if query and search_query_looks_symbol(query):
+        if toss_config_status()["readyForMarketData"]:
+            try:
+                stock_payload = fetch_toss_stocks([query])
+                stocks = stock_rows(stock_payload)
+                prices = {}
+                if TOSS_LIVE_PRICES and stocks:
+                    symbols = [str(stock.get("symbol", "")) for stock in stocks if stock.get("symbol")]
+                    prices = price_by_symbol(fetch_toss_prices(symbols))
+                existing_symbols = {str(item.get("symbol", "")).upper() for item in items}
+                for stock in stocks:
+                    symbol = str(stock.get("symbol", "")).upper()
+                    if not symbol or symbol in existing_symbols:
+                        continue
+                    items.append(stock_search_result(stock, prices.get(symbol), watched))
+                toss_status = {
+                    "source": "toss",
+                    "enabled": True,
+                    "message": "토스증권 종목 기본정보를 조회했습니다.",
+                    "stockCount": len(stocks),
+                    "priceCount": len(prices),
+                }
+            except Exception as error:
+                payload, _ = integration_error_payload(error)
+                toss_status = {
+                    "source": "error",
+                    "enabled": True,
+                    "error": payload.get("error", "unknown"),
+                    "status": payload.get("status"),
+                    "detail": payload.get("detail", ""),
+                    "message": payload.get("message", "토스 종목 조회에 실패했습니다."),
+                }
+                if not items:
+                    messages.append(toss_status["message"])
+        else:
+            toss_status = {
+                "source": "disabled",
+                "enabled": False,
+                "message": "토스증권 키/토큰 또는 허용 IP 설정 후 종목 코드 직접 조회가 가능합니다.",
+            }
+            if not items:
+                messages.append(toss_status["message"])
+    elif query and not items:
+        messages.append("후보 밖 종목은 현재 종목코드나 티커로 직접 조회할 수 있습니다.")
+
+    if not items and not messages:
+        messages.append("검색 결과가 없습니다.")
+
+    return {
+        "query": query,
+        "items": items[:limit],
+        "status": toss_status,
+        "message": " ".join(unique_texts(messages, limit=3)),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
 def dashboard(mode: str) -> dict:
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
@@ -3706,6 +3901,17 @@ class AppHandler(BaseHTTPRequestHandler):
             symbols = [symbol.strip() for symbol in query.get("symbols", ["005930"])[0].split(",") if symbol.strip()]
             try:
                 self.send_json(fetch_toss_prices(symbols))
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/stocks/search":
+            query = parse_qs(parsed.query)
+            search_query = query.get("query", [""])[0].strip()
+            limit = int(query.get("limit", ["8"])[0])
+            try:
+                self.send_json(stock_search(search_query, limit=limit))
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)
