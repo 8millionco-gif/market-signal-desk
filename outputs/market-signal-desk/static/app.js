@@ -552,6 +552,21 @@ function discoveryEvidenceForDisplay(item) {
   };
 }
 
+function signalValidationForDisplay(item) {
+  const validation = item?.signalValidation ?? {};
+  return {
+    key: validation.key || "insufficient",
+    label: validation.label || "근거·반응 부족",
+    score: Number(validation.score ?? 0),
+    entryReady: Boolean(validation.entryReady),
+    evidenceScore: Number(validation.evidenceScore ?? item?.discovery?.evidenceScore ?? 0),
+    reactionScore: Number(validation.reactionScore ?? item?.priceReaction?.score ?? 0),
+    confidenceScore: Number(validation.confidenceScore ?? item?.dataConfidence?.score ?? 0),
+    reasons: Array.isArray(validation.reasons) ? validation.reasons : [],
+    blockers: Array.isArray(validation.blockers) ? validation.blockers : []
+  };
+}
+
 function isActionCandidate(item) {
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return true;
@@ -803,11 +818,13 @@ function renderTradeDecisionStatus() {
   }
   const plan = tradePlan(item);
   const compression = compressionForDisplay(item);
+  const validation = signalValidationForDisplay(item);
   const currentRow = plan.rows.find(([label]) => label === "관찰 매수")?.[1] ?? "-";
   const holdingRow = plan.holding ? `${plan.holding.judgement ?? "보유"} · ${plan.holding.profitLossRate ?? "-"}` : "미보유";
   const rows = [
     ["선택", true, item.name ?? item.symbol ?? "-"],
     ["압축", compression.tier === "core", `${compression.label} · ${compression.score}/100`],
+    ["검증", validation.entryReady, `${validation.label} · ${validation.score}/100`],
     ["액션", tradeActionOk(item), plan.action],
     ["관찰 매수", plan.tone === "buy", currentRow],
     ["현재가", plan.hasPrice, `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
@@ -1320,6 +1337,11 @@ function renderMetrics() {
     const waitCompressionCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
     const portfolioCompressionCount = Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
     const excludeCompressionCount = Number(summary.excludeCandidateCompressionCount ?? compressionCounts.exclude ?? 0);
+    const validationCounts = summary.signalValidationCounts ?? {};
+    const confirmedSignals = Number(summary.confirmedSignalCount ?? validationCounts.confirmed ?? 0);
+    const evidenceWaitSignals = Number(summary.evidenceWaitSignalCount ?? validationCounts.evidence_wait ?? 0);
+    const reactionOnlySignals = Number(summary.reactionOnlySignalCount ?? validationCounts.reaction_only ?? 0);
+    const blockedSignals = Number(summary.blockedSignalCount ?? validationCounts.blocked ?? 0);
     const confidence = summary.averageDataConfidence;
     const averageReaction = summary.averagePriceReaction;
     const officialCounts = summary.officialEventCounts ?? {};
@@ -1346,6 +1368,10 @@ function renderMetrics() {
       coreCount || reviewCount || waitCompressionCount || portfolioCompressionCount || excludeCompressionCount
         ? ` · 압축 핵심 ${coreCount}/${summary.coreCandidateLimit ?? 3} · 검토 ${reviewCount} · 대기 ${waitCompressionCount} · 보유 ${portfolioCompressionCount} · 제외 ${excludeCompressionCount}`
         : "";
+    const validationText =
+      confirmedSignals || evidenceWaitSignals || reactionOnlySignals || blockedSignals
+        ? ` · 검증 확인 ${confirmedSignals} · 반응대기 ${evidenceWaitSignals} · 가격선행 ${reactionOnlySignals} · 차단 ${blockedSignals}`
+        : "";
     const groupText =
       groups.action || groups.hidden || groups.momentum
         ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
@@ -1369,7 +1395,7 @@ function renderMetrics() {
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${compressionText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1486,6 +1512,10 @@ function renderDiscoveryBotStatus() {
     summary.evidenceStrongCount != null || summary.evidenceQualifiedCount != null || summary.evidenceWeakCount != null
       ? `강 ${summary.evidenceStrongCount ?? 0} · 검증 ${summary.evidenceQualifiedCount ?? 0} · 약 ${summary.evidenceThinCount ?? 0} · 리스크 ${summary.evidenceRiskCount ?? 0} · 부족 ${summary.evidenceWeakCount ?? 0}`
       : "-";
+  const validationText =
+    summary.confirmedSignalCount != null || summary.evidenceWaitSignalCount != null || summary.reactionOnlySignalCount != null
+      ? `확인 ${summary.confirmedSignalCount ?? 0} · 반응대기 ${summary.evidenceWaitSignalCount ?? 0} · 가격선행 ${summary.reactionOnlySignalCount ?? 0}`
+      : "-";
   const intervalMinutes = Math.max(1, Math.round(Number(config.intervalSeconds ?? 0) / 60));
   const latestText = latest.createdAt ? `${modeLabel(latest.mode)} · ${timeLabel(latest.createdAt)}` : "아직 없음";
   const rows = [
@@ -1495,6 +1525,7 @@ function renderDiscoveryBotStatus() {
     ["최신 발굴", Boolean(latest.createdAt), latestText],
     ["파이프라인", pipeline.length >= 4, pipelineText],
     ["발굴 근거", evidenceText !== "-", evidenceText],
+    ["검증 신호", validationText !== "-", validationText],
     ["상위 후보", Boolean(summary.topCandidates?.length), topText]
   ];
   const lastError = botState.lastError
@@ -2533,6 +2564,7 @@ function renderFeed() {
       const plan = tradePlan(item);
       const group = decisionGroupForDisplay(item);
       const compression = compressionForDisplay(item);
+      const validation = signalValidationForDisplay(item);
       const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       const qualityLabel = discoveryQualityLabel(item);
       const evidence = discoveryEvidenceForDisplay(item);
@@ -2561,6 +2593,7 @@ function renderFeed() {
               <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${evidence.label ? `<span class="feed-badge evidence-badge evidence-${escapeHtml(evidence.grade || "weak")}">${escapeHtml(evidence.label)} ${escapeHtml(evidence.score)}</span>` : ""}
+              ${validation.label ? `<span class="feed-badge validation-badge validation-${escapeHtml(validation.key)}">${escapeHtml(validation.label)} ${escapeHtml(validation.score)}</span>` : ""}
               ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
               ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
               ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
@@ -2893,6 +2926,7 @@ function renderDetail() {
     <div class="detail-grid">
       ${tradePlanSection(item)}
       ${decisionGroupSection(item)}
+      ${signalValidationSection(item)}
       ${discoveryEvidenceSection(item)}
       ${hiddenOpportunitySection(item)}
       ${officialSignalSection(item)}
@@ -3380,6 +3414,37 @@ function hiddenOpportunitySection(item) {
       ${
         signals.length
           ? `<ul class="bullet-list">${signals.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function signalValidationSection(item) {
+  const validation = signalValidationForDisplay(item);
+  if (!validation.label && !validation.score) return "";
+  const reasons = uniqueTexts(validation.reasons ?? [], 4);
+  const blockers = uniqueTexts(validation.blockers ?? [], 5);
+  return `
+    <section class="detail-section">
+      <div class="section-title">
+        <p class="eyebrow">근거와 가격 검증</p>
+        <h2>${escapeHtml(validation.label)}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("검증 점수", `${validation.score}/100`)}
+        ${statCard("발굴 근거", `${validation.evidenceScore}/100`)}
+        ${statCard("가격 반응", `${validation.reactionScore}/100`)}
+        ${statCard("데이터 신뢰", `${validation.confidenceScore}/100`)}
+      </div>
+      ${
+        reasons.length
+          ? `<ul class="bullet-list entry-list">${reasons.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+      ${
+        blockers.length
+          ? `<ul class="bullet-list risk-list">${blockers.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
           : ""
       }
     </section>
