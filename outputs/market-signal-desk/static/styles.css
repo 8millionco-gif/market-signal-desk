@@ -91,37 +91,49 @@ h3 {
   gap: 10px;
 }
 
-.activity-bar {
+.activity-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
   display: grid;
-  gap: 10px;
-  margin: -6px 0 18px;
-  padding: 12px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: rgba(23, 26, 34, 0.96);
-  box-shadow: var(--shadow);
+  place-items: center;
+  padding: 18px;
+  background: rgba(8, 10, 15, 0.38);
+  backdrop-filter: blur(2px);
 }
 
-.activity-bar[hidden] {
+.activity-overlay[hidden] {
   display: none;
 }
 
-.activity-bar > div:first-child {
+.activity-modal {
+  display: grid;
+  gap: 12px;
+  width: min(360px, 100%);
+  padding: 18px;
+  border: 1px solid rgba(108, 166, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.97);
+  box-shadow: var(--shadow);
+}
+
+.activity-modal > div:first-child {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: flex-start;
+  flex-direction: column;
   gap: 12px;
 }
 
-.activity-bar strong {
+.activity-modal strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 16px;
 }
 
-.activity-bar span {
+.activity-modal span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
+  line-height: 1.45;
 }
 
 .activity-track {
@@ -273,10 +285,6 @@ h3 {
 
 .signal-panel {
   padding: 16px;
-  position: sticky;
-  top: 18px;
-  max-height: calc(100vh - 36px);
-  overflow: auto;
 }
 
 .panel-header {
@@ -495,6 +503,31 @@ h3 {
   display: grid;
   justify-items: end;
   gap: 4px;
+}
+
+.feed-action {
+  max-width: 104px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--amber);
+  background: rgba(244, 201, 93, 0.1);
+  font-size: 11px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.feed-action.buy {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.34);
+  background: rgba(123, 216, 143, 0.12);
+}
+
+.feed-action.sell,
+.feed-action.risk {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
 }
 
 .score-pill {
@@ -1435,6 +1468,10 @@ h3 {
   .feed-meta {
     grid-column: 2;
     justify-items: start;
-    grid-auto-flow: column;
+    grid-auto-flow: row;
+  }
+
+  .feed-action {
+    max-width: 100%;
   }
 }

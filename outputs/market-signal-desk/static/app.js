@@ -361,11 +361,12 @@ async function loadDashboard() {
   try {
     updateActivity("후보 분석 중", "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다");
     const dashboard = await fetchJson(`/api/dashboard?mode=${state.mode}`, 30000);
-    state.dashboard = dashboard;
-    if (!state.selectedSymbol && state.dashboard.selected) {
-      state.selectedSymbol = state.dashboard.selected.symbol;
-    }
     await statusPromise;
+    state.dashboard = dashboard;
+    if (!state.selectedSymbol) {
+      const defaultCandidate = bestCandidate(state.dashboard.candidates ?? []);
+      state.selectedSymbol = defaultCandidate?.symbol ?? state.dashboard.selected?.symbol ?? null;
+    }
     updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
     render();
     finishActivity();
@@ -433,7 +434,7 @@ function renderLoadError(error) {
 
 function filteredCandidates() {
   const candidates = state.dashboard?.candidates ?? [];
-  return candidates.filter((item) => {
+  return sortCandidatesForAction(candidates.filter((item) => {
     const matchesFilter =
       state.filter === "all" ||
       item.category === state.filter ||
@@ -444,7 +445,44 @@ function filteredCandidates() {
       item.name.toLowerCase().includes(query) ||
       item.symbol.toLowerCase().includes(query);
     return matchesFilter && matchesQuery;
+  }));
+}
+
+function actionPriority(item) {
+  const plan = tradePlan(item);
+  if (plan.tone === "buy") return 0;
+  if (plan.tone === "sell") return 1;
+  if (plan.action.includes("보유") || plan.action.includes("반등")) return 2;
+  if (plan.tone === "wait") return 3;
+  if (plan.tone === "risk") return 4;
+  return 5;
+}
+
+function sortCandidatesForAction(candidates = []) {
+  return [...candidates].sort((a, b) => {
+    const priorityDiff = actionPriority(a) - actionPriority(b);
+    if (priorityDiff !== 0) return priorityDiff;
+    const readyDiff = Number(b.triggerReadiness ?? 0) - Number(a.triggerReadiness ?? 0);
+    if (readyDiff !== 0) return readyDiff;
+    return Number(b.totalScore ?? 0) - Number(a.totalScore ?? 0);
   });
+}
+
+function bestCandidate(candidates = []) {
+  return sortCandidatesForAction(candidates)[0] ?? null;
+}
+
+function candidateActionSummary(candidates = []) {
+  return candidates.reduce(
+    (summary, item) => {
+      const plan = tradePlan(item);
+      if (plan.tone === "buy") summary.buy += 1;
+      else if (plan.tone === "risk") summary.exclude += 1;
+      else summary.wait += 1;
+      return summary;
+    },
+    { buy: 0, wait: 0, exclude: 0 }
+  );
 }
 
 function selectedCandidate() {
@@ -920,6 +958,7 @@ function renderMarket() {
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
   const discovery = state.dashboard?.integrations?.discovery ?? {};
+  const actions = candidateActionSummary(state.dashboard?.candidates ?? []);
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
   if (els.candidateSource) {
     const sourceLabel =
@@ -934,8 +973,9 @@ function renderMetrics() {
     const domestic = summary.domesticSelected ?? discovery.domesticSelected;
     const overseas = summary.overseasSelected ?? discovery.overseasSelected;
     const splitText = domestic || overseas ? ` · 국내 ${domestic ?? 0} · 해외 ${overseas ?? 0}` : "";
+    const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1772,6 +1812,7 @@ function renderFeed() {
   els.candidateFeed.innerHTML = candidates
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
+      const plan = tradePlan(item);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -1783,6 +1824,7 @@ function renderFeed() {
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
           </span>
           <span class="feed-meta">
+            <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
             <span class="score-pill ${scoreClass(item.totalScore)}">${item.totalScore}</span>
             <span class="feed-time">${escapeHtml(item.updated)}</span>
           </span>
