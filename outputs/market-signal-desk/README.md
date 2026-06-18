@@ -330,6 +330,24 @@ $env:SIGNAL_DISCOVERY_SYMBOLS="TSLA,AMD,064350"
 
 화면의 `오늘의 후보` 아래에는 `자동 뉴스 선정`, `자동 유니버스 선정`, `샘플 후보` 중 어떤 기준으로 후보가 만들어졌는지 표시됩니다. 후보 자동 생성은 주문이나 자동매매와 연결되지 않고, 이후 기존 시세·뉴스·공시·AI 분석 단계로 넘겨지는 시작 목록만 바꿉니다.
 
+## 상시 발굴 봇 설정
+
+상시 발굴 봇은 장마감/장전 스냅샷과 별도로 최신 후보를 주기적으로 갱신하고 `data/discovery-latest.json`에 마지막 발굴 결과를 저장합니다. 이 봇은 투자 판단 보조용이며 주문이나 자동매매와 연결되지 않습니다.
+
+```powershell
+$env:SIGNAL_DISCOVERY_BOT_ENABLED="1"
+$env:SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS="600"
+$env:SIGNAL_DISCOVERY_BOT_MODE="intraday"
+```
+
+상태 확인과 수동 실행 API는 다음과 같습니다.
+
+```text
+GET  /api/discovery/status
+GET  /api/discovery/latest
+POST /api/discovery/run
+```
+
 ## 스케줄러 설정
 
 서버가 켜져 있으면 장전과 장마감에 후보 분석을 자동 실행하고 `data/runs` 폴더에 JSON 스냅샷을 저장합니다. 이 기능은 분석 저장용이며 주문이나 매매 실행과 연결되지 않습니다.

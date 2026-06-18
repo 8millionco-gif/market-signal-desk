@@ -11,6 +11,12 @@ services:
         value: 0.0.0.0
       - key: SIGNAL_SCHEDULER_ENABLED
         value: "0"
+      - key: SIGNAL_DISCOVERY_BOT_ENABLED
+        value: "1"
+      - key: SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS
+        value: "600"
+      - key: SIGNAL_DISCOVERY_BOT_MODE
+        value: "intraday"
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT

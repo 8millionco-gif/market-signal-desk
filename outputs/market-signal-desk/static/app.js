@@ -45,6 +45,7 @@ const state = {
   authRequired: false,
   adminToken: readStoredValue("marketSignalAdminToken", ""),
   schedulerStatus: null,
+  discoveryBotStatus: null,
   storageStatus: null,
   portfolioStatus: null,
   viewingSnapshot: null,
@@ -85,6 +86,7 @@ const els = {
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
   schedulerStatus: document.querySelector("#schedulerStatus"),
+  discoveryBotStatus: document.querySelector("#discoveryBotStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
   storageStatus: document.querySelector("#storageStatus"),
   portfolioStatus: document.querySelector("#portfolioStatus"),
@@ -265,6 +267,11 @@ function statusFallbacks() {
       state: { started: false, running: false, lastError: "" },
       recentRuns: []
     },
+    discoveryBot: {
+      config: { enabled: false, intervalSeconds: 0, mode: "intraday" },
+      state: { started: false, running: false, lastError: "", lastRun: {} },
+      latest: {}
+    },
     storage: {
       mode: "filesystem",
       implementation: "filesystem",
@@ -325,6 +332,7 @@ async function loadDashboard() {
   const statusPromise = Promise.all([
     safeFetchJson("/api/auth/status", fallbacks.auth),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
+    safeFetchJson("/api/discovery/status", fallbacks.discoveryBot),
     safeFetchJson("/api/storage/status", fallbacks.storage),
     safeFetchJson("/api/portfolio/status", fallbacks.portfolio),
     safeFetchJson("/api/network/outbound-ip", fallbacks.network),
@@ -332,9 +340,10 @@ async function loadDashboard() {
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, storageStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.schedulerStatus = schedulerStatus;
+    state.discoveryBotStatus = discoveryBotStatus;
     state.storageStatus = storageStatus;
     state.portfolioStatus = portfolioStatus;
     state.networkStatus = networkStatus;
@@ -345,6 +354,7 @@ async function loadDashboard() {
     maybeNotifySchedulerRun(schedulerStatus);
     renderAuthStatus();
     renderSchedulerStatus();
+    renderDiscoveryBotStatus();
     renderReadinessStatus();
     renderStorageStatus();
     renderPortfolioStatus();
@@ -682,6 +692,7 @@ function render() {
   renderTradeDecisionStatus();
   renderAuthStatus();
   renderSchedulerStatus();
+  renderDiscoveryBotStatus();
   renderReadinessStatus();
   renderStorageStatus();
   renderPortfolioStatus();
@@ -1164,6 +1175,50 @@ function renderSchedulerStatus() {
   });
 }
 
+function renderDiscoveryBotStatus() {
+  if (!els.discoveryBotStatus) return;
+  const status = state.discoveryBotStatus;
+  if (!status) return;
+  const config = status.config ?? {};
+  const botState = status.state ?? {};
+  const latest = status.latest && Object.keys(status.latest).length ? status.latest : botState.lastRun ?? {};
+  const summary = latest.summary ?? {};
+  const topText = snapshotTopText({ summary });
+  const intervalMinutes = Math.max(1, Math.round(Number(config.intervalSeconds ?? 0) / 60));
+  const latestText = latest.createdAt ? `${modeLabel(latest.mode)} · ${timeLabel(latest.createdAt)}` : "아직 없음";
+  const rows = [
+    ["자동 발굴", config.enabled, config.enabled ? "켜짐" : "꺼짐"],
+    ["실행 상태", !botState.running && !botState.lastError, botState.running ? "실행 중" : botState.lastError ? "확인 필요" : "대기"],
+    ["주기", Boolean(config.intervalSeconds), config.enabled ? `${intervalMinutes}분마다` : "수동 실행"],
+    ["최신 발굴", Boolean(latest.createdAt), latestText],
+    ["상위 후보", Boolean(summary.topCandidates?.length), topText]
+  ];
+  const lastError = botState.lastError
+    ? `<div><span>최근 오류</span><strong class="warn">${escapeHtml(botState.lastError)}</strong></div>`
+    : "";
+  els.discoveryBotStatus.innerHTML = `
+    ${rows
+      .map(([label, ok, value]) => {
+        const tone = ok ? "ok" : "warn";
+        return `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <strong class="${tone}">${escapeHtml(value)}</strong>
+          </div>
+        `;
+      })
+      .join("")}
+    ${lastError}
+    <div class="schedule-actions">
+      <button type="button" data-discovery-action="run">지금 발굴</button>
+    </div>
+  `;
+  const button = els.discoveryBotStatus.querySelector("[data-discovery-action='run']");
+  if (button) {
+    button.addEventListener("click", runDiscoveryBot);
+  }
+}
+
 function readinessState() {
   const integrations = state.dashboard?.integrations ?? {};
   const toss = integrations.toss ?? {};
@@ -1554,6 +1609,33 @@ async function runSchedulerMode(mode) {
     };
     renderSchedulerStatus();
   } finally {
+    buttons.forEach((button) => {
+      button.disabled = false;
+    });
+  }
+}
+
+async function runDiscoveryBot() {
+  const buttons = els.discoveryBotStatus?.querySelectorAll("[data-discovery-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  startActivity("발굴 봇 실행 중", "최신 뉴스, 가격, 공시 신호로 후보를 다시 점검합니다");
+  try {
+    const payload = await postJson("/api/discovery/run", { mode: state.mode }, 70000);
+    state.discoveryBotStatus = payload.status ?? state.discoveryBotStatus;
+    renderDiscoveryBotStatus();
+  } catch (error) {
+    state.discoveryBotStatus = {
+      ...(state.discoveryBotStatus ?? {}),
+      state: {
+        ...((state.discoveryBotStatus ?? {}).state ?? {}),
+        lastError: error?.name === "AbortError" ? "발굴 실행 시간이 지연되었습니다." : "발굴 봇 실행에 실패했습니다."
+      }
+    };
+    renderDiscoveryBotStatus();
+  } finally {
+    finishActivity();
     buttons.forEach((button) => {
       button.disabled = false;
     });

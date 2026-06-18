@@ -31,6 +31,7 @@ UNIVERSE_FILE = DATA_DIR / "candidate-universe.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
+DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
@@ -127,6 +128,9 @@ OUTBOUND_IP_CACHE_SECONDS = int(os.getenv("OUTBOUND_IP_CACHE_SECONDS", "300"))
 OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS", "5"))
 SIGNAL_SCHEDULER_ENABLED = os.getenv("SIGNAL_SCHEDULER_ENABLED", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SECONDS", "30"))
+SIGNAL_DISCOVERY_BOT_ENABLED = os.getenv("SIGNAL_DISCOVERY_BOT_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS", "600"))
+SIGNAL_DISCOVERY_BOT_MODE = os.getenv("SIGNAL_DISCOVERY_BOT_MODE", "intraday").strip().lower() or "intraday"
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
 SIGNAL_CLOSE_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_CLOSE_RUN_WINDOW_MINUTES", "360"))
 SIGNAL_PREOPEN_RUN_TIME = os.getenv("SIGNAL_PREOPEN_RUN_TIME", "08:40")
@@ -176,12 +180,20 @@ DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.mi
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
+DISCOVERY_BOT_LOCK = threading.Lock()
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
     "running": False,
     "lastError": "",
     "lastCheckedAt": "",
     "lastRuns": {},
+}
+DISCOVERY_BOT_STATE: dict[str, object] = {
+    "started": False,
+    "running": False,
+    "lastError": "",
+    "lastCheckedAt": "",
+    "lastRun": {},
 }
 
 
@@ -4264,6 +4276,86 @@ def dashboard_summary(payload: dict) -> dict:
     }
 
 
+def discovery_bot_mode(mode: str | None = None) -> str:
+    normalized = str(mode or SIGNAL_DISCOVERY_BOT_MODE or "intraday").strip().lower()
+    return normalized if normalized in {"close", "preopen", "intraday"} else "intraday"
+
+
+def discovery_bot_config_status() -> dict:
+    return {
+        "enabled": SIGNAL_DISCOVERY_BOT_ENABLED,
+        "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
+        "mode": discovery_bot_mode(),
+        "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
+    }
+
+
+def discovery_latest_record(include_dashboard: bool = False) -> dict:
+    record = read_json(DISCOVERY_LATEST_FILE, {})
+    if not isinstance(record, dict):
+        return {}
+    if include_dashboard:
+        return record
+    return {key: value for key, value in record.items() if key != "dashboard"}
+
+
+def discovery_bot_status() -> dict:
+    with DISCOVERY_BOT_LOCK:
+        state = {
+            "started": bool(DISCOVERY_BOT_STATE.get("started")),
+            "running": bool(DISCOVERY_BOT_STATE.get("running")),
+            "lastError": DISCOVERY_BOT_STATE.get("lastError", ""),
+            "lastCheckedAt": DISCOVERY_BOT_STATE.get("lastCheckedAt", ""),
+            "lastRun": DISCOVERY_BOT_STATE.get("lastRun") or discovery_latest_record(False),
+        }
+    return {
+        "config": discovery_bot_config_status(),
+        "state": state,
+        "latest": discovery_latest_record(False),
+    }
+
+
+def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") -> dict:
+    selected_mode = discovery_bot_mode(mode)
+    with DISCOVERY_BOT_LOCK:
+        if DISCOVERY_BOT_STATE.get("running"):
+            latest = discovery_latest_record(False)
+            return {
+                "ok": False,
+                "skipped": True,
+                "message": "발굴 봇이 이미 실행 중입니다.",
+                "latest": latest,
+            }
+        DISCOVERY_BOT_STATE["running"] = True
+        DISCOVERY_BOT_STATE["lastCheckedAt"] = datetime.now(KST).isoformat(timespec="seconds")
+
+    try:
+        now = datetime.now(KST)
+        payload = dashboard(selected_mode)
+        run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{selected_mode}-discovery-{trigger}"
+        record = {
+            "id": run_id,
+            "mode": selected_mode,
+            "trigger": trigger,
+            "createdAt": now.isoformat(timespec="seconds"),
+            "summary": dashboard_summary(payload),
+            "dashboard": payload,
+        }
+        write_json(DISCOVERY_LATEST_FILE, record)
+        public_record = {key: value for key, value in record.items() if key != "dashboard"}
+        with DISCOVERY_BOT_LOCK:
+            DISCOVERY_BOT_STATE["lastRun"] = public_record
+            DISCOVERY_BOT_STATE["lastError"] = ""
+        return record
+    except Exception as error:
+        with DISCOVERY_BOT_LOCK:
+            DISCOVERY_BOT_STATE["lastError"] = str(error)[:240]
+        raise
+    finally:
+        with DISCOVERY_BOT_LOCK:
+            DISCOVERY_BOT_STATE["running"] = False
+
+
 def scheduler_record_from_snapshot(path: Path, snapshot: dict) -> dict:
     return {
         "id": snapshot.get("id", path.stem),
@@ -4618,6 +4710,27 @@ def start_scheduler_thread() -> None:
     thread.start()
 
 
+def discovery_bot_loop() -> None:
+    with DISCOVERY_BOT_LOCK:
+        DISCOVERY_BOT_STATE["started"] = True
+    while True:
+        now = datetime.now(KST)
+        with DISCOVERY_BOT_LOCK:
+            DISCOVERY_BOT_STATE["lastCheckedAt"] = now.isoformat(timespec="seconds")
+        if SIGNAL_DISCOVERY_BOT_ENABLED:
+            try:
+                run_discovery_bot_cycle(discovery_bot_mode(), trigger="bot")
+            except Exception as error:
+                with DISCOVERY_BOT_LOCK:
+                    DISCOVERY_BOT_STATE["lastError"] = str(error)[:240]
+        time.sleep(max(60, SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS))
+
+
+def start_discovery_bot_thread() -> None:
+    thread = threading.Thread(target=discovery_bot_loop, name="market-signal-discovery-bot", daemon=True)
+    thread.start()
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "MarketSignalDesk/0.1"
 
@@ -4811,6 +4924,20 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(scheduler_status())
             return
 
+        if parsed.path == "/api/discovery/status":
+            self.send_json(discovery_bot_status())
+            return
+
+        if parsed.path == "/api/discovery/latest":
+            query = parse_qs(parsed.query)
+            include_dashboard = query.get("includeDashboard", ["0"])[0].lower() in {"1", "true", "yes", "on"}
+            latest = discovery_latest_record(include_dashboard)
+            if not latest:
+                self.send_json({"error": "not-found", "message": "아직 저장된 발굴 결과가 없습니다."}, 404)
+                return
+            self.send_json(latest)
+            return
+
         if parsed.path == "/api/storage/status":
             self.send_json(snapshot_storage_status())
             return
@@ -4898,6 +5025,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json(payload, status)
             return
 
+        if parsed.path == "/api/discovery/run":
+            body = self.read_body()
+            mode = str(body.get("mode", SIGNAL_DISCOVERY_BOT_MODE)).strip()
+            try:
+                record = run_discovery_bot_cycle(mode, trigger="manual")
+                self.send_json({"ok": True, "latest": {key: value for key, value in record.items() if key != "dashboard"}, "status": discovery_bot_status()})
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
         if parsed.path == "/api/watchlist":
             body = self.read_body()
             symbol = str(body.get("symbol", "")).strip()
@@ -4956,6 +5094,7 @@ def main() -> None:
     port = int(os.getenv("PORT", "8787"))
     server = ThreadingHTTPServer((host, port), AppHandler)
     start_scheduler_thread()
+    start_discovery_bot_thread()
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"Market Signal Desk is running at http://{display_host}:{port}")
     server.serve_forever()
