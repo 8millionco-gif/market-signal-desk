@@ -2281,11 +2281,15 @@ def source_from_news_item(item: dict) -> dict:
     host = item.get("sourceHost") or "뉴스"
     published = item.get("publishedAt") or ""
     time_text = published[11:16] if len(published) >= 16 else ""
+    relevance = item.get("relevance", {}) if isinstance(item.get("relevance"), dict) else {}
     return {
         "title": item.get("title", ""),
         "publisher": host,
         "time": time_text,
         "url": item.get("newsUrl") or item.get("naverUrl") or item.get("originalUrl") or "",
+        "relevanceScore": relevance.get("score"),
+        "relevanceLabel": relevance.get("label", ""),
+        "impactTypes": relevance.get("impactTypes", []),
     }
 
 
@@ -2411,6 +2415,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
 
     enriched = []
     news_count = 0
+    filtered_count = 0
+    material_count = 0
     queried_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
@@ -2427,13 +2433,22 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
             articles = []
         normalized = [normalize_gdelt_news_item(news_item) for news_item in articles if isinstance(news_item, dict)]
         normalized = [news_item for news_item in normalized if news_item.get("title")]
+        relevant = filter_relevant_news_items(item, normalized)
+        filtered_out = max(0, len(normalized) - len(relevant))
+        filtered_count += filtered_out
+        relevance_summary = news_relevance_summary(relevant)
+        material_count += bounded_int(relevance_summary.get("material", 0), 0, 100)
+        normalized = relevant
         news_count += len(normalized)
         item["globalNews"] = {
             "source": "gdelt",
             "query": query,
-            "display": payload.get("display", len(normalized)),
+            "display": len(normalized),
+            "rawDisplay": payload.get("display", len(normalized)),
+            "filteredOut": filtered_out,
             "timespan": payload.get("timespan", GDELT_NEWS_TIMESPAN),
             "items": normalized,
+            "relevanceSummary": relevance_summary,
         }
         if normalized:
             live_sources = [source_from_news_item(news_item) for news_item in normalized[:3]]
@@ -2453,6 +2468,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
         "message": "GDELT 글로벌 뉴스 결과를 반영했습니다.",
         "queriedCount": queried_count,
         "newsCount": news_count,
+        "filteredNewsCount": filtered_count,
+        "materialNewsCount": material_count,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -2475,6 +2492,7 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
     enriched = []
     news_count = 0
     filtered_count = 0
+    material_count = 0
     queried_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
@@ -2492,6 +2510,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         relevant = filter_relevant_news_items(item, normalized)
         filtered_out = max(0, len(normalized) - len(relevant))
         filtered_count += filtered_out
+        relevance_summary = news_relevance_summary(relevant)
+        material_count += bounded_int(relevance_summary.get("material", 0), 0, 100)
         normalized = relevant
         news_count += len(normalized)
         item["liveNews"] = {
@@ -2503,6 +2523,7 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
             "rawDisplay": payload.get("display", len(normalized)),
             "filteredOut": filtered_out,
             "items": normalized,
+            "relevanceSummary": relevance_summary,
         }
         if normalized:
             live_sources = [source_from_news_item(news_item) for news_item in normalized[:3]]
@@ -2522,6 +2543,7 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         "queriedCount": queried_count,
         "newsCount": news_count,
         "filteredNewsCount": filtered_count,
+        "materialNewsCount": material_count,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -2600,6 +2622,7 @@ def compact_live_news(candidate: dict) -> list[dict]:
                     "sourceHost": clean_news_text(str(item.get("sourceHost", ""))),
                     "publishedAt": clean_news_text(str(item.get("publishedAt", ""))),
                     "provider": news_key,
+                    "relevance": item.get("relevance", {}),
                 }
             )
             if len(compacted) >= 6:
@@ -3123,9 +3146,14 @@ def dynamic_news_score(candidate: dict, base_score: dict, notes: list[str]) -> i
         display_count = bounded_int(live_news.get("display", 0), 0, 100)
         item_count = len(live_news.get("items", [])) if isinstance(live_news.get("items"), list) else 0
         filtered_count = bounded_int(live_news.get("filteredOut", 0), 0, 100)
+        relevance_summary = live_news.get("relevanceSummary", {}) if isinstance(live_news.get("relevanceSummary"), dict) else {}
+        high = bounded_int(relevance_summary.get("high", 0), 0, 100)
+        medium = bounded_int(relevance_summary.get("medium", 0), 0, 100)
+        material = bounded_int(relevance_summary.get("material", 0), 0, 100)
         if item_count:
-            score = max(score, bounded_int(8 + min(display_count, 10) * 2 + min(item_count, 5), 0, 22))
-            notes.append(f"네이버 최신 뉴스 {item_count}건을 후보 점수에 반영")
+            relevant_score = bounded_int(6 + high * 5 + medium * 3 + material * 4 + min(display_count, 5), 0, 22)
+            score = max(score, relevant_score)
+            notes.append(f"네이버 고관련 뉴스 {item_count}건, 재료성 뉴스 {material}건 반영")
         elif filtered_count:
             score = min(score, 8)
             notes.append("뉴스 검색 결과가 있었지만 종목명/티커와 맞지 않아 점수 반영 제외")
@@ -3136,11 +3164,19 @@ def dynamic_news_score(candidate: dict, base_score: dict, notes: list[str]) -> i
     if isinstance(global_news, dict) and global_news.get("source") == "gdelt":
         display_count = bounded_int(global_news.get("display", 0), 0, 250)
         item_count = len(global_news.get("items", [])) if isinstance(global_news.get("items"), list) else 0
-        gdelt_score = bounded_int(7 + min(display_count, 10) * 2 + min(item_count, 5), 0, 20)
-        score = max(score, gdelt_score)
-        if isinstance(live_news, dict) and live_news.get("source") == "naver" and item_count:
-            score += 2
-        notes.append(f"GDELT 글로벌 뉴스 {item_count}건을 후보 점수에 반영")
+        filtered_count = bounded_int(global_news.get("filteredOut", 0), 0, 250)
+        relevance_summary = global_news.get("relevanceSummary", {}) if isinstance(global_news.get("relevanceSummary"), dict) else {}
+        high = bounded_int(relevance_summary.get("high", 0), 0, 250)
+        medium = bounded_int(relevance_summary.get("medium", 0), 0, 250)
+        material = bounded_int(relevance_summary.get("material", 0), 0, 250)
+        if item_count:
+            gdelt_score = bounded_int(5 + high * 5 + medium * 3 + material * 4 + min(display_count, 5), 0, 20)
+            score = max(score, gdelt_score)
+            if isinstance(live_news, dict) and live_news.get("source") == "naver":
+                score += 2
+            notes.append(f"GDELT 고관련 뉴스 {item_count}건, 재료성 뉴스 {material}건 반영")
+        elif filtered_count:
+            notes.append(f"GDELT 관련성 낮은 뉴스 {filtered_count}건 제외")
 
     return bounded_int(score, 0, 22)
 
@@ -3590,8 +3626,13 @@ def candidate_data_confidence(candidate: dict) -> dict:
     live_news = candidate.get("liveNews", {})
     news_items = len(live_news.get("items", [])) if isinstance(live_news, dict) and isinstance(live_news.get("items"), list) else 0
     if news_items:
-        score += min(18, 8 + news_items * 3)
-        reasons.append(f"관련 뉴스 {news_items}건")
+        relevance_summary = live_news.get("relevanceSummary", {}) if isinstance(live_news.get("relevanceSummary"), dict) else {}
+        material = bounded_int(relevance_summary.get("material", 0), 0, 100)
+        high = bounded_int(relevance_summary.get("high", 0), 0, 100)
+        score += min(18, 8 + news_items * 2 + material * 2 + high)
+        reasons.append(f"고관련 뉴스 {news_items}건")
+        if material:
+            reasons.append(f"투자 재료 뉴스 {material}건")
     elif isinstance(live_news, dict) and live_news.get("filteredOut"):
         warnings.append("뉴스 검색 결과의 종목 관련성 낮음")
 
@@ -4772,6 +4813,71 @@ def compact_match_text(value: str) -> str:
     return re.sub(r"[\s·\-_.,'\"()\[\]{}:;|/\\]+", "", clean_news_text(value)).lower()
 
 
+NEWS_MATERIAL_KEYWORDS = {
+    "earnings": {
+        "label": "실적",
+        "keywords": ["실적", "매출", "영업이익", "순이익", "어닝", "guidance", "earnings", "revenue", "profit"],
+        "weight": 12,
+    },
+    "contract": {
+        "label": "수주/계약",
+        "keywords": ["수주", "공급계약", "계약", "납품", "order", "contract", "deal", "supply agreement"],
+        "weight": 13,
+    },
+    "guidance": {
+        "label": "전망/목표가",
+        "keywords": ["전망", "목표가", "상향", "하향", "투자의견", "가이던스", "upgrade", "downgrade", "price target", "outlook"],
+        "weight": 9,
+    },
+    "capital": {
+        "label": "자본/희석",
+        "keywords": ["유상증자", "전환사채", "cb", "bw", "증자", "감자", "offering", "convertible", "dilution"],
+        "weight": 10,
+    },
+    "policy": {
+        "label": "정책/규제",
+        "keywords": ["정책", "규제", "금리", "관세", "보조금", "제재", "policy", "regulation", "tariff", "rate cut"],
+        "weight": 8,
+    },
+    "shareholder": {
+        "label": "주주환원",
+        "keywords": ["배당", "자사주", "주주환원", "buyback", "dividend", "shareholder return"],
+        "weight": 10,
+    },
+    "product": {
+        "label": "제품/기술",
+        "keywords": ["출시", "신제품", "인증", "hbm", "ai", "gpu", "chip", "launch", "product", "approval"],
+        "weight": 7,
+    },
+    "supply_demand": {
+        "label": "수급",
+        "keywords": ["순매수", "외국인", "기관", "거래대금", "수급", "inflow", "outflow", "volume"],
+        "weight": 7,
+    },
+    "risk": {
+        "label": "리스크",
+        "keywords": ["소송", "조사", "리콜", "횡령", "거래정지", "상장폐지", "lawsuit", "probe", "recall", "fraud", "halt"],
+        "weight": 12,
+    },
+}
+
+
+NEWS_NOISE_KEYWORDS = [
+    "채용",
+    "인사",
+    "사회공헌",
+    "봉사",
+    "기부",
+    "이벤트",
+    "프로모션",
+    "블로그",
+    "맛집",
+    "부동산",
+    "날씨",
+    "스포츠",
+]
+
+
 def news_relevance_terms(entry: dict) -> list[str]:
     terms = [
         str(entry.get("symbol", "")),
@@ -4784,29 +4890,153 @@ def news_relevance_terms(entry: dict) -> list[str]:
     return unique_texts([term for term in terms if len(str(term).strip()) >= 2], limit=12)
 
 
-def news_matches_entry(entry: dict, item: dict) -> bool:
-    text = compact_match_text(
-        " ".join(
-            [
-                str(item.get("title", "")),
-                str(item.get("summary", "")),
-            ]
-        )
-    )
-    if not text:
-        return False
+def news_theme_terms(entry: dict) -> list[str]:
+    terms = []
+    for key in ("themes", "tags"):
+        values = entry.get(key, [])
+        if isinstance(values, list):
+            terms.extend(str(value) for value in values)
+    return unique_texts([term for term in terms if len(str(term).strip()) >= 2], limit=10)
+
+
+def news_relevance_score(entry: dict, item: dict) -> dict:
+    title = clean_news_text(str(item.get("title", "")))
+    summary = clean_news_text(str(item.get("summary", "")))
+    host = clean_news_text(str(item.get("sourceHost", "")))
+    title_compact = compact_match_text(title)
+    body_compact = compact_match_text(f"{title} {summary}")
+    lower_text = f"{title} {summary}".lower()
+    score = 0
+    matched_terms: list[str] = []
+    material_labels: list[str] = []
+    impact_types: list[str] = []
+    penalties: list[str] = []
+
+    symbol = compact_match_text(str(entry.get("symbol", "")))
+    name = compact_match_text(str(entry.get("name", "")))
+    if symbol and len(symbol) >= 2 and symbol in body_compact:
+        score += 28 if symbol in title_compact else 18
+        matched_terms.append(str(entry.get("symbol", "")))
+    if name and len(name) >= 2 and name in body_compact:
+        score += 34 if name in title_compact else 24
+        matched_terms.append(str(entry.get("name", "")))
+
     for term in news_relevance_terms(entry):
         normalized = compact_match_text(term)
-        if len(normalized) >= 2 and normalized in text:
-            return True
-    return False
+        if not normalized or normalized in {symbol, name}:
+            continue
+        if len(normalized) <= 2 and normalized not in {symbol, name}:
+            continue
+        if normalized in body_compact:
+            weight = 18 if normalized in title_compact else 10
+            if len(normalized) <= 3:
+                weight = min(weight, 8)
+            score += weight
+            matched_terms.append(term)
+
+    for term in news_theme_terms(entry):
+        normalized = compact_match_text(term)
+        if normalized and normalized in body_compact:
+            score += 5
+            material_labels.append(term)
+
+    for key, config in NEWS_MATERIAL_KEYWORDS.items():
+        keywords = config["keywords"]
+        if any(str(keyword).lower() in lower_text for keyword in keywords):
+            score += int(config["weight"])
+            impact_types.append(str(config["label"]))
+
+    if host:
+        if any(source in host for source in ["dart.fss.or.kr", "fss.or.kr", "sec.gov"]):
+            score += 16
+            material_labels.append("공식 출처")
+        elif any(source in host for source in ["naver.com", "youtube.com", "blog", "cafe"]):
+            score -= 4
+            penalties.append("투자 판단 신뢰도가 낮은 출처")
+
+    if any(keyword in lower_text for keyword in NEWS_NOISE_KEYWORDS):
+        score -= 10
+        penalties.append("주가 영향이 낮은 일반 기사")
+
+    if not matched_terms:
+        score -= 25
+        penalties.append("종목명/티커 직접 언급 없음")
+    elif len(set(compact_match_text(term) for term in matched_terms if term)) == 1 and matched_terms[0] in {"삼성", "애플", "현대", "우리"}:
+        score -= 10
+        penalties.append("광범위한 브랜드명만 일치")
+
+    score = bounded_int(score, 0, 100)
+    if score >= 70:
+        level, label = "high", "높은 관련성"
+    elif score >= 50:
+        level, label = "medium", "관련성 확인"
+    elif score >= 35:
+        level, label = "low", "약한 관련성"
+    else:
+        level, label = "reject", "관련성 낮음"
+
+    return {
+        "score": score,
+        "level": level,
+        "label": label,
+        "accepted": score >= 50,
+        "material": bool(impact_types) and score >= 50,
+        "matchedTerms": unique_texts(matched_terms, limit=5),
+        "materialTerms": unique_texts(material_labels, limit=5),
+        "impactTypes": unique_texts(impact_types, limit=4),
+        "penalties": unique_texts(penalties, limit=3),
+    }
+
+
+def annotate_news_item_relevance(entry: dict, item: dict) -> dict:
+    return {**item, "relevance": news_relevance_score(entry, item)}
+
+
+def news_matches_entry(entry: dict, item: dict) -> bool:
+    relevance = item.get("relevance") if isinstance(item, dict) else None
+    if not isinstance(relevance, dict):
+        relevance = news_relevance_score(entry, item)
+    return bool(relevance.get("accepted"))
 
 
 def filter_relevant_news_items(entry: dict, items: list[dict]) -> list[dict]:
-    relevant = [item for item in items if news_matches_entry(entry, item)]
-    if relevant:
-        return relevant
-    return []
+    annotated = [annotate_news_item_relevance(entry, item) for item in items]
+    relevant = [item for item in annotated if news_matches_entry(entry, item)]
+    relevant.sort(key=lambda item: item.get("relevance", {}).get("score", 0), reverse=True)
+    return relevant
+
+
+def news_relevance_summary(items: list[dict]) -> dict:
+    high = 0
+    medium = 0
+    low = 0
+    material = 0
+    impact_types: list[str] = []
+    scores = []
+    for item in items:
+        relevance = item.get("relevance", {}) if isinstance(item, dict) else {}
+        score = relevance.get("score")
+        if score is not None:
+            scores.append(bounded_int(score, 0, 100))
+        level = relevance.get("level")
+        if level == "high":
+            high += 1
+        elif level == "medium":
+            medium += 1
+        elif level == "low":
+            low += 1
+        if relevance.get("material"):
+            material += 1
+        impact_types.extend(text_list(relevance.get("impactTypes", []), limit=4))
+    average = round(sum(scores) / len(scores), 1) if scores else 0
+    return {
+        "high": high,
+        "medium": medium,
+        "low": low,
+        "material": material,
+        "averageScore": average,
+        "impactTypes": unique_texts(impact_types, limit=5),
+    }
 
 
 def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
@@ -4821,6 +5051,7 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
     normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
     normalized = [news_item for news_item in normalized if news_item.get("title")]
     relevant = filter_relevant_news_items(entry, normalized)
+    relevance_summary = news_relevance_summary(relevant)
     return relevant, {
         "source": "naver",
         "query": query,
@@ -4829,6 +5060,8 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
         "display": len(relevant),
         "rawDisplay": payload.get("display", len(normalized)),
         "filteredOut": max(0, len(normalized) - len(relevant)),
+        "relevanceSummary": relevance_summary,
+        "materialNewsCount": relevance_summary.get("material", 0),
     }
 
 
@@ -4839,6 +5072,10 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
     headline = news_items[0].get("title") if news_items else f"{name} 관련 신호 점검"
     source_items = [source_from_news_item(item) for item in news_items[:3]]
     news_total = bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000)
+    relevance_summary = news_status.get("relevanceSummary", {}) if isinstance(news_status.get("relevanceSummary"), dict) else news_relevance_summary(news_items)
+    high_relevance = bounded_int(relevance_summary.get("high", 0), 0, 100)
+    medium_relevance = bounded_int(relevance_summary.get("medium", 0), 0, 100)
+    material_news = bounded_int(relevance_summary.get("material", 0), 0, 100)
     focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
     return {
         "symbol": symbol,
@@ -4857,8 +5094,8 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
         "preopenPriority": 0,
         "triggerReadiness": 0,
         "score": {
-            "event": bounded_int(9 + focus + min(len(news_items), 3) * 2, 0, 25),
-            "news": bounded_int(6 + min(len(news_items), 5) * 3 + min(news_total, 30) // 10, 0, 22),
+            "event": bounded_int(8 + focus + high_relevance * 3 + material_news * 4, 0, 25),
+            "news": bounded_int(5 + high_relevance * 5 + medium_relevance * 3 + material_news * 4, 0, 22),
             "volume": 8,
             "price": 8,
             "market": 6,
@@ -4893,6 +5130,8 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
         ],
         "trend": {
             "newsCount": news_total or len(news_items),
+            "materialNewsCount": material_news,
+            "newsRelevance": relevance_summary.get("averageScore", 0),
             "newsSpike": "-",
             "volumeSpike": "-",
             "sentiment": "뉴스 확인 필요",
@@ -4935,6 +5174,7 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         )
         base["trend"] = trend
     if news_status.get("source") == "naver":
+        relevance_summary = news_status.get("relevanceSummary", {}) if isinstance(news_status.get("relevanceSummary"), dict) else news_relevance_summary(news_items)
         base["liveNews"] = {
             "source": "naver",
             "query": news_status.get("query", universe_query(entry)),
@@ -4944,11 +5184,20 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
             "rawDisplay": news_status.get("rawDisplay", news_status.get("display", len(news_items))),
             "filteredOut": news_status.get("filteredOut", 0),
             "items": news_items,
+            "relevanceSummary": relevance_summary,
             "discovery": True,
         }
+        trend = dict(base.get("trend", {}))
+        trend["materialNewsCount"] = relevance_summary.get("material", 0)
+        trend["newsRelevance"] = relevance_summary.get("averageScore", 0)
+        base["trend"] = trend
 
     focus = bounded_int(entry.get("focusWeight", 5), 0, 15)
     news_total = bounded_int(news_status.get("total", len(news_items)), 0, 10_000_000)
+    relevance_summary = news_status.get("relevanceSummary", {}) if isinstance(news_status.get("relevanceSummary"), dict) else news_relevance_summary(news_items)
+    high_relevance = bounded_int(relevance_summary.get("high", 0), 0, 100)
+    medium_relevance = bounded_int(relevance_summary.get("medium", 0), 0, 100)
+    material_news = bounded_int(relevance_summary.get("material", 0), 0, 100)
     seed_score = score_candidate(base)
     no_relevant_live_news = (
         news_status.get("source") == "naver"
@@ -4958,8 +5207,10 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
     relevance_penalty = 16 if no_relevant_live_news else 0
     discovery_score = bounded_int(
         focus * 3
-        + len(news_items) * 12
-        + min(news_total, 50) * 0.25
+        + high_relevance * 18
+        + medium_relevance * 10
+        + material_news * 12
+        + min(news_total, 20) * 0.2
         + min(seed_score, 90) * 0.18
         + (10 if symbol in watched else 0)
         - relevance_penalty,
@@ -4974,6 +5225,9 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         "newsItems": len(news_items),
         "rawNewsItems": bounded_int(news_status.get("rawDisplay", 0), 0, 100),
         "filteredNewsItems": bounded_int(news_status.get("filteredOut", 0), 0, 100),
+        "materialNewsItems": material_news,
+        "newsRelevanceAverage": relevance_summary.get("averageScore", 0),
+        "newsImpactTypes": relevance_summary.get("impactTypes", []),
         "newsTotal": news_total,
         "focusWeight": focus,
         "quality": "matched-news" if news_items else ("filtered-news" if no_relevant_live_news else "universe"),
@@ -5019,13 +5273,19 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     news_items = bounded_int(discovery.get("newsItems", 0), 0, 1_000)
     raw_news = bounded_int(discovery.get("rawNewsItems", 0), 0, 1_000)
     filtered = bounded_int(discovery.get("filteredNewsItems", 0), 0, 1_000)
+    material_news = bounded_int(discovery.get("materialNewsItems", 0), 0, 1_000)
+    relevance_average = display_number_to_decimal(discovery.get("newsRelevanceAverage"))
     hidden = is_hidden_discovery_candidate(candidate)
     watched_hit = symbol in watched
 
     if watched_hit:
         tier, rank, reason = "primary", 0, "관심 종목이라 우선 검토"
-    elif news_items > 0 and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
-        tier, rank, reason = "primary", 0, "관련 뉴스가 확인된 후보"
+    elif material_news > 0 and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
+        tier, rank, reason = "primary", 0, "투자 재료성 뉴스가 확인된 후보"
+    elif news_items > 0 and relevance_average is not None and relevance_average >= Decimal("65") and score >= max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE):
+        tier, rank, reason = "primary", 0, "고관련 뉴스가 확인된 후보"
+    elif news_items > 0 and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
+        tier, rank, reason = "reserve", 1, "관련 뉴스는 있으나 투자 재료성 추가 확인 필요"
     elif score >= SIGNAL_DISCOVERY_QUALITY_MIN_SCORE:
         tier, rank, reason = "primary", 0, "발굴 점수가 1차 기준을 통과"
     elif hidden and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
@@ -5253,6 +5513,8 @@ def initial_candidates(data: dict, watched: set[str]) -> tuple[list[dict], dict]
         **balance_status,
         "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in discovered),
         "selectedNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
+        "materialNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1_000) for item in discovered),
+        "selectedMaterialNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1_000) for item in selected),
         "filteredNewsCount": sum(bounded_int(item.get("discovery", {}).get("filteredNewsItems", 0), 0, 1_000) for item in discovered),
         "errorCount": len(errors),
         "errors": errors[:3],
@@ -5578,6 +5840,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "domesticShortfall": discovery_status.get("domesticShortfall"),
             "overseasShortfall": discovery_status.get("overseasShortfall"),
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
+            "materialNewsCount": discovery_status.get("materialNewsItemCount"),
+            "selectedMaterialNewsCount": discovery_status.get("selectedMaterialNewsItemCount"),
             "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
             "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
@@ -5790,6 +6054,9 @@ def dashboard_summary(payload: dict) -> dict:
         "averageScoreShift": summary.get("averageScoreShift"),
         "averageDataConfidence": summary.get("averageDataConfidence"),
         "averagePriceReaction": summary.get("averagePriceReaction"),
+        "materialNewsCount": summary.get("materialNewsCount"),
+        "selectedMaterialNewsCount": summary.get("selectedMaterialNewsCount"),
+        "filteredNewsCount": summary.get("filteredNewsCount"),
         "qualityGateCounts": summary.get("qualityGateCounts", {}),
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),

@@ -1237,6 +1237,7 @@ function renderMetrics() {
           : "샘플 후보";
     const scanned = summary.scannedCount ?? discovery.scannedCount;
     const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
+    const materialNews = summary.selectedMaterialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? summary.materialNewsCount ?? discovery.materialNewsItemCount;
     const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
     const domestic = summary.domesticSelected ?? discovery.domesticSelected;
     const overseas = summary.overseasSelected ?? discovery.overseasSelected;
@@ -1293,7 +1294,7 @@ function renderMetrics() {
         ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2457,6 +2458,7 @@ function renderFeed() {
       const confidence = item.dataConfidence ?? {};
       const reaction = item.priceReaction ?? {};
       const official = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
+      const materialNews = Number(item.trend?.materialNewsCount ?? item.discovery?.materialNewsItems ?? 0);
       const officialBadge = official.count
         ? official.riskLevel === "high"
           ? "공시위험"
@@ -2475,6 +2477,7 @@ function renderFeed() {
               ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
               ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
               ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
+              ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
               ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
               ${reaction.score != null ? `<span class="feed-badge reaction-badge">반응 ${escapeHtml(reaction.score)}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
@@ -2844,6 +2847,8 @@ function renderDetail() {
             ${statCard("뉴스", `${item.trend?.newsCount ?? 0}건`)}
             ${statCard("해외 뉴스", item.trend?.globalNewsCount != null ? `${item.trend.globalNewsCount}건` : "-")}
             ${statCard("공식 이벤트", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
+            ${statCard("재료 뉴스", item.trend?.materialNewsCount != null ? `${item.trend.materialNewsCount}건` : "-")}
+            ${statCard("뉴스 관련성", item.trend?.newsRelevance != null ? `${item.trend.newsRelevance}/100` : "-")}
             ${statCard("뉴스 증가", item.trend?.newsSpike ?? "-")}
             ${statCard("거래량", item.trend?.volumeSpike ?? "-")}
             ${statCard("일 거래량", item.trend?.dailyVolume ?? "-")}
@@ -2877,7 +2882,7 @@ function renderDetail() {
               (source) => `
                 <li>
                   <strong>${escapeHtml(source.title)}</strong>
-                  <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
+                  <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}${source.relevanceScore != null ? ` · 관련성 ${escapeHtml(source.relevanceScore)}` : ""}${source.impactTypes?.length ? ` · ${escapeHtml(source.impactTypes.slice(0, 2).join(","))}` : ""}</span>
                 </li>
               `
             )

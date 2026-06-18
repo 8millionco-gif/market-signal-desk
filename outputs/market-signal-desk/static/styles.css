@@ -691,6 +691,12 @@ h3 {
   background: rgba(244, 201, 93, 0.1);
 }
 
+.feed-title .news-badge {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.32);
+  background: rgba(105, 210, 231, 0.1);
+}
+
 .feed-subtitle {
   display: block;
   margin-top: 4px;
