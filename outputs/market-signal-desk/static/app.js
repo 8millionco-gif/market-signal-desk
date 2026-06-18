@@ -444,8 +444,12 @@ function renderLoadError(error) {
 }
 
 function filteredCandidates() {
+  return sortCandidatesForStrategy(applyStrategyFilter(baseFilteredCandidates()), state.strategy);
+}
+
+function baseFilteredCandidates() {
   const candidates = state.dashboard?.candidates ?? [];
-  const baseCandidates = candidates.filter((item) => {
+  return candidates.filter((item) => {
     const matchesFilter =
       state.filter === "all" ||
       item.category === state.filter ||
@@ -457,13 +461,15 @@ function filteredCandidates() {
       item.symbol.toLowerCase().includes(query);
     return matchesFilter && matchesQuery;
   });
-  return sortCandidatesForStrategy(applyStrategyFilter(baseCandidates), state.strategy);
 }
 
 function applyStrategyFilter(candidates = []) {
   if (state.strategy === "all") return candidates;
+  if (state.strategy === "pullback") return candidates.filter(isPullbackCandidate);
   if (state.strategy === "hidden") return candidates.filter(isHiddenOpportunity);
   if (state.strategy === "momentum") return candidates.filter(hasMomentumSignal);
+  if (state.strategy === "holding") return candidates.filter(isHoldingCandidate);
+  if (state.strategy === "exclude") return candidates.filter(isExcludeCandidate);
   if (state.strategy === "action") return candidates.filter(isActionCandidate);
   return candidates;
 }
@@ -515,6 +521,29 @@ function isActionCandidate(item) {
   return score >= 78 && readiness >= 74 && risk < 18 && heat < 10;
 }
 
+function isPullbackCandidate(item) {
+  const group = decisionGroupForDisplay(item);
+  const plan = tradePlan(item);
+  const change = parseDisplayPercent(item?.change);
+  if (!plan.hasPrice || plan.tone === "risk") return false;
+  return (
+    plan.action.includes("눌림") ||
+    plan.action.includes("반등") ||
+    (plan.tone === "wait" && group.key === "momentum" && change != null && change >= 1.2)
+  );
+}
+
+function isHoldingCandidate(item) {
+  const group = decisionGroupForDisplay(item);
+  return group.key === "holding" || Boolean(selectedHoldingFor(item));
+}
+
+function isExcludeCandidate(item) {
+  const group = decisionGroupForDisplay(item);
+  const plan = tradePlan(item);
+  return group.key === "exclude" || plan.tone === "risk" || plan.action.includes("제외");
+}
+
 function actionPriority(item) {
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
@@ -532,6 +561,9 @@ function strategyPriority(item, strategy) {
   if (strategy === "hidden" && isHiddenOpportunity(item)) return 0;
   if (strategy === "momentum" && hasMomentumSignal(item)) return 0;
   if (strategy === "action" && isActionCandidate(item)) return 0;
+  if (strategy === "pullback" && isPullbackCandidate(item)) return 0;
+  if (strategy === "holding" && isHoldingCandidate(item)) return 0;
+  if (strategy === "exclude" && isExcludeCandidate(item)) return 0;
   return 1;
 }
 
@@ -572,6 +604,18 @@ function candidateActionSummary(candidates = []) {
     },
     { buy: 0, wait: 0, exclude: 0 }
   );
+}
+
+function candidateStrategyCounts(candidates = []) {
+  return {
+    action: candidates.filter(isActionCandidate).length,
+    pullback: candidates.filter(isPullbackCandidate).length,
+    hidden: candidates.filter(isHiddenOpportunity).length,
+    momentum: candidates.filter(hasMomentumSignal).length,
+    holding: candidates.filter(isHoldingCandidate).length,
+    exclude: candidates.filter(isExcludeCandidate).length,
+    all: candidates.length
+  };
 }
 
 function selectedCandidate() {
@@ -2247,6 +2291,7 @@ function renderPrinciples() {
 }
 
 function renderFeed() {
+  renderStrategyCounts();
   const candidates = filteredCandidates();
   renderStockSearchResults();
   if (!candidates.length) {
@@ -2254,7 +2299,7 @@ function renderFeed() {
     els.candidateFeed.innerHTML = `
       <div class="empty-state">
         <h2>${escapeHtml(label)} 후보가 없습니다</h2>
-        <p>현재 조건에서는 무리한 진입보다 대기가 우선입니다. 전체나 검색으로 후보 밖 종목을 확인할 수 있습니다.</p>
+        <p>${escapeHtml(strategyEmptyMessage(state.strategy))}</p>
       </div>
     `;
     return;
@@ -2305,10 +2350,35 @@ function renderFeed() {
 }
 
 function strategyLabel(value) {
+  if (value === "action") return "진입 가능";
+  if (value === "pullback") return "눌림 대기";
   if (value === "hidden") return "숨은 기회";
   if (value === "momentum") return "모멘텀";
+  if (value === "holding") return "보유 대응";
+  if (value === "exclude") return "오늘 제외";
   if (value === "all") return "전체";
-  return "진입";
+  return "진입 가능";
+}
+
+function strategyEmptyMessage(value) {
+  if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 무리한 진입보다 눌림이나 전체 후보를 확인하세요.";
+  if (value === "pullback") return "눌림이나 반등 확인 구간에 있는 후보가 없습니다. 추격보다 다음 갱신을 기다리는 편이 낫습니다.";
+  if (value === "hidden") return "뉴스 대비 가격 반영이 덜 된 숨은 후보가 없습니다. 전체 후보에서 테마 변화를 확인할 수 있습니다.";
+  if (value === "momentum") return "뉴스, 가격, 수급 모멘텀이 동시에 살아 있는 후보가 없습니다.";
+  if (value === "holding") return "현재 불러온 포트폴리오와 연결되는 후보가 없습니다.";
+  if (value === "exclude") return "제외 후보가 없습니다. 좋은 신호입니다.";
+  return "현재 필터 조건에 맞는 후보가 없습니다. 검색어나 국내/해외 필터를 조정해 보세요.";
+}
+
+function renderStrategyCounts() {
+  const counts = candidateStrategyCounts(baseFilteredCandidates());
+  document.querySelectorAll(".strategy-button").forEach((button) => {
+    const strategy = button.dataset.strategy || "action";
+    const label = button.dataset.label || strategyLabel(strategy);
+    const count = counts[strategy] ?? 0;
+    button.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(count)}</strong>`;
+    button.title = `${strategyLabel(strategy)} ${count}개`;
+  });
 }
 
 function stockSearchMatchText(item) {
