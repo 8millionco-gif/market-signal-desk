@@ -26,6 +26,7 @@ const state = {
   view: "signals",
   mode: "close",
   filter: "all",
+  strategy: "action",
   query: "",
   dashboard: null,
   stockSearch: {
@@ -434,7 +435,7 @@ function renderLoadError(error) {
 
 function filteredCandidates() {
   const candidates = state.dashboard?.candidates ?? [];
-  return sortCandidatesForAction(candidates.filter((item) => {
+  const baseCandidates = candidates.filter((item) => {
     const matchesFilter =
       state.filter === "all" ||
       item.category === state.filter ||
@@ -445,7 +446,41 @@ function filteredCandidates() {
       item.name.toLowerCase().includes(query) ||
       item.symbol.toLowerCase().includes(query);
     return matchesFilter && matchesQuery;
-  }));
+  });
+  return sortCandidatesForStrategy(applyStrategyFilter(baseCandidates), state.strategy);
+}
+
+function applyStrategyFilter(candidates = []) {
+  if (state.strategy === "all") return candidates;
+  if (state.strategy === "hidden") return candidates.filter(isHiddenOpportunity);
+  if (state.strategy === "momentum") return candidates.filter(hasMomentumSignal);
+  if (state.strategy === "action") return candidates.filter(isActionCandidate);
+  return candidates;
+}
+
+function isHiddenOpportunity(item) {
+  return item?.discoveryTier === "hidden" || item?.opportunityType === "hidden";
+}
+
+function hasMomentumSignal(item) {
+  const score = item?.score ?? {};
+  const discoveryNews = Number(item?.discovery?.newsItems ?? item?.liveNews?.items?.length ?? 0);
+  const change = parseDisplayPercent(item?.change);
+  return (
+    discoveryNews > 0 ||
+    Number(score.news ?? 0) >= 12 ||
+    Number(score.price ?? 0) >= 12 ||
+    Number(score.volume ?? 0) >= 12 ||
+    (change != null && change > 0.8)
+  );
+}
+
+function isActionCandidate(item) {
+  const plan = tradePlan(item);
+  const score = Number(item?.totalScore ?? 0);
+  const readiness = Number(item?.triggerReadiness ?? 0);
+  if (plan.tone === "risk") return false;
+  return plan.tone === "buy" || score >= 75 || readiness >= 72;
 }
 
 function actionPriority(item) {
@@ -458,14 +493,31 @@ function actionPriority(item) {
   return 5;
 }
 
-function sortCandidatesForAction(candidates = []) {
+function strategyPriority(item, strategy) {
+  if (strategy === "hidden" && isHiddenOpportunity(item)) return 0;
+  if (strategy === "momentum" && hasMomentumSignal(item)) return 0;
+  if (strategy === "action" && isActionCandidate(item)) return 0;
+  return 1;
+}
+
+function sortCandidatesForStrategy(candidates = [], strategy = "action") {
   return [...candidates].sort((a, b) => {
-    const priorityDiff = actionPriority(a) - actionPriority(b);
-    if (priorityDiff !== 0) return priorityDiff;
-    const readyDiff = Number(b.triggerReadiness ?? 0) - Number(a.triggerReadiness ?? 0);
-    if (readyDiff !== 0) return readyDiff;
-    return Number(b.totalScore ?? 0) - Number(a.totalScore ?? 0);
+    const strategyDiff = strategyPriority(a, strategy) - strategyPriority(b, strategy);
+    if (strategyDiff !== 0) return strategyDiff;
+    return compareCandidatesForAction(a, b);
   });
+}
+
+function compareCandidatesForAction(a, b) {
+  const priorityDiff = actionPriority(a) - actionPriority(b);
+  if (priorityDiff !== 0) return priorityDiff;
+  const readyDiff = Number(b.triggerReadiness ?? 0) - Number(a.triggerReadiness ?? 0);
+  if (readyDiff !== 0) return readyDiff;
+  return Number(b.totalScore ?? 0) - Number(a.totalScore ?? 0);
+}
+
+function sortCandidatesForAction(candidates = []) {
+  return [...candidates].sort(compareCandidatesForAction);
 }
 
 function bestCandidate(candidates = []) {
@@ -959,6 +1011,7 @@ function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
   const discovery = state.dashboard?.integrations?.discovery ?? {};
   const actions = candidateActionSummary(state.dashboard?.candidates ?? []);
+  const hiddenCount = (state.dashboard?.candidates ?? []).filter(isHiddenOpportunity).length;
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
   if (els.candidateSource) {
     const sourceLabel =
@@ -974,8 +1027,9 @@ function renderMetrics() {
     const overseas = summary.overseasSelected ?? discovery.overseasSelected;
     const splitText = domestic || overseas ? ` · 국내 ${domestic ?? 0} · 해외 ${overseas ?? 0}` : "";
     const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
+    const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1800,10 +1854,11 @@ function renderFeed() {
   const candidates = filteredCandidates();
   renderStockSearchResults();
   if (!candidates.length) {
+    const label = strategyLabel(state.strategy);
     els.candidateFeed.innerHTML = `
       <div class="empty-state">
-        <h2>조건에 맞는 후보가 없습니다</h2>
-        <p>후보 밖 종목은 코드나 티커로 직접 조회할 수 있습니다.</p>
+        <h2>${escapeHtml(label)} 후보가 없습니다</h2>
+        <p>현재 조건에서는 무리한 진입보다 대기가 우선입니다. 전체나 검색으로 후보 밖 종목을 확인할 수 있습니다.</p>
       </div>
     `;
     return;
@@ -1820,6 +1875,7 @@ function renderFeed() {
             <span class="feed-title">
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
+              ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
           </span>
@@ -1844,6 +1900,13 @@ function renderFeed() {
       renderDetail();
     });
   });
+}
+
+function strategyLabel(value) {
+  if (value === "hidden") return "숨은 기회";
+  if (value === "momentum") return "모멘텀";
+  if (value === "all") return "전체";
+  return "진입";
 }
 
 function stockSearchSubtitle(item) {
@@ -2559,6 +2622,15 @@ document.querySelectorAll(".tab").forEach((button) => {
     document.querySelectorAll(".tab").forEach((target) => target.classList.remove("active"));
     button.classList.add("active");
     state.filter = button.dataset.filter;
+    renderFeed();
+  });
+});
+
+document.querySelectorAll(".strategy-button").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".strategy-button").forEach((target) => target.classList.remove("active"));
+    button.classList.add("active");
+    state.strategy = button.dataset.strategy || "action";
     renderFeed();
   });
 });

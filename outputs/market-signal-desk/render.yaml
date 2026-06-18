@@ -20,7 +20,7 @@ services:
       - key: SIGNAL_OVERSEAS_CANDIDATE_LIMIT
         value: "10"
       - key: SIGNAL_DISCOVERY_MAX_SYMBOLS
-        value: "30"
+        value: "40"
       - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
         value: "3"
       - key: TOSS_LIVE_PRICES

@@ -142,8 +142,9 @@ SIGNAL_AUTO_CANDIDATE_LIMIT = max(
     SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
 )
 SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
-    int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "30")),
+    int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "40")),
     SIGNAL_AUTO_CANDIDATE_LIMIT,
+    SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT + 20,
 )
 SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
@@ -3135,6 +3136,8 @@ def universe_search_result(entry: dict, watched: set[str]) -> dict:
         "name": name,
         "market": entry.get("market", ""),
         "category": entry.get("category", ""),
+        "discoveryTier": entry.get("discoveryTier", "core"),
+        "opportunityType": entry.get("opportunityType", "core"),
         "aliases": text_list(entry.get("aliases", []), limit=8),
         "price": "-",
         "change": "",
@@ -3649,6 +3652,8 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
         "name": name,
         "market": entry.get("market", "KR"),
         "category": entry.get("category", "domestic"),
+        "discoveryTier": entry.get("discoveryTier", "core"),
+        "opportunityType": entry.get("opportunityType", "core"),
         "aliases": text_list(entry.get("aliases", []), limit=10),
         "price": "-",
         "change": "",
@@ -3717,6 +3722,8 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         ],
         limit=12,
     )
+    base["discoveryTier"] = entry.get("discoveryTier", base.get("discoveryTier", "core"))
+    base["opportunityType"] = entry.get("opportunityType", base.get("opportunityType", "core"))
     if symbol in seed_lookup and news_items:
         live_sources = [source_from_news_item(item) for item in news_items[:3]]
         base["sources"] = [*live_sources, *base.get("sources", [])][:6]
