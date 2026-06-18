@@ -3982,6 +3982,177 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     }
 
 
+def candidate_compression_score(candidate: dict) -> int:
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+
+    action_key = str(final_decision.get("actionKey", "verify"))
+    gate_key = str(gate.get("key", "defer"))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    base = {
+        "buy": 30,
+        "add": 28,
+        "hold": 16,
+        "trim": 12,
+        "watch": 14,
+        "pullback": 10,
+        "verify": 2,
+        "stop": -28,
+        "exclude": -36,
+    }.get(action_key, 0)
+    gate_bonus = {"actionable": 22, "watch": 10, "defer": -8, "exclude": -30}.get(gate_key, -4)
+    official_bonus = 0
+    if official.get("riskLevel") == "high":
+        official_bonus -= 30
+    elif official.get("riskLevel") == "medium":
+        official_bonus -= 8
+    elif official.get("positiveCount"):
+        official_bonus += min(10, bounded_int(official.get("positiveCount", 0), 0, 20) * 2)
+
+    material_news = bounded_int(
+        trend.get("materialNewsCount", discovery.get("materialNewsItems", 0)),
+        0,
+        20,
+    )
+    score = (
+        base
+        + gate_bonus
+        + official_bonus
+        + (bounded_int(candidate.get("totalScore", 0), 0, 100) * 0.18)
+        + (bounded_int(candidate.get("triggerReadiness", 0), 0, 100) * 0.16)
+        + (bounded_int(confidence.get("score", 0), 0, 100) * 0.18)
+        + (bounded_int(reaction.get("score", 0), 0, 100) * 0.22)
+        + min(8, material_news * 2)
+        + (bounded_int(score_detail.get("volume", 0), 0, 18) * 0.35)
+        + (bounded_int(score_detail.get("price", 0), 0, 16) * 0.35)
+        - (risk * 1.2)
+        - (heat * 0.8)
+    )
+    return bounded_int(round(score), 0, 100)
+
+
+def candidate_is_portfolio_linked(candidate: dict) -> bool:
+    portfolio = candidate.get("portfolio", {}) if isinstance(candidate.get("portfolio"), dict) else {}
+    holding = portfolio.get("holding", {}) if isinstance(portfolio.get("holding"), dict) else {}
+    return bool(portfolio.get("isHeld") or holding)
+
+
+def candidate_core_eligible(candidate: dict) -> bool:
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    action_key = str(final_decision.get("actionKey", ""))
+    gate_key = str(gate.get("key", ""))
+    if candidate_is_portfolio_linked(candidate):
+        return False
+    if official.get("riskLevel") in {"medium", "high"}:
+        return False
+    if action_key not in {"buy", "add"} and gate_key != "actionable":
+        return False
+    return (
+        bounded_int(candidate.get("totalScore", 0), 0, 100) >= 70
+        and bounded_int(candidate.get("triggerReadiness", 0), 0, 100) >= 68
+        and bounded_int(confidence.get("score", 0), 0, 100) >= 68
+        and bounded_int(reaction.get("score", 0), 0, 100) >= 56
+        and risk < 18
+        and heat < 10
+    )
+
+
+def assign_candidate_compression(candidates: list[dict]) -> dict:
+    max_core = 3
+    ranked = sorted(candidates, key=candidate_compression_score, reverse=True)
+    rank_by_symbol = {
+        str(item.get("symbol", "")).upper(): index
+        for index, item in enumerate(ranked, start=1)
+        if str(item.get("symbol", "")).strip()
+    }
+    core_symbols: set[str] = set()
+    for item in ranked:
+        if len(core_symbols) >= max_core:
+            break
+        if candidate_core_eligible(item):
+            symbol = str(item.get("symbol", "")).upper()
+            if symbol:
+                core_symbols.add(symbol)
+
+    counts = {"core": 0, "review": 0, "wait": 0, "portfolio": 0, "exclude": 0}
+    top_candidates: list[dict] = []
+    for item in candidates:
+        symbol = str(item.get("symbol", "")).upper()
+        final_decision = item.get("finalDecision", {}) if isinstance(item.get("finalDecision"), dict) else {}
+        gate = item.get("qualityGate", {}) if isinstance(item.get("qualityGate"), dict) else {}
+        reaction = item.get("priceReaction", {}) if isinstance(item.get("priceReaction"), dict) else {}
+        confidence = item.get("dataConfidence", {}) if isinstance(item.get("dataConfidence"), dict) else {}
+        score_detail = item.get("score", {}) if isinstance(item.get("score"), dict) else {}
+        action_key = str(final_decision.get("actionKey", "verify"))
+        gate_key = str(gate.get("key", "defer"))
+        risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+        compression_score = candidate_compression_score(item)
+
+        if symbol in core_symbols:
+            tier, label = "core", "핵심"
+            reason = "신뢰도·가격 반응·리스크 기준을 통과한 압축 후보"
+        elif action_key in {"exclude", "stop"} or gate_key == "exclude" or risk >= 24:
+            tier, label = "exclude", "제외"
+            reason = "리스크나 최종 판단 기준으로 오늘 신규 진입 제외"
+        elif candidate_is_portfolio_linked(item):
+            tier, label = "portfolio", "보유"
+            reason = "보유 자산 기준으로 추가매수·보유·매도 판단 대상"
+        elif gate_key == "watch" or action_key in {"watch", "pullback"} or compression_score >= 62:
+            tier, label = "review", "검토"
+            reason = "재료는 있으나 가격·거래량 또는 진입가 확인이 필요"
+        else:
+            tier, label = "wait", "대기"
+            reason = "신뢰도나 가격 반응이 부족해 다음 갱신까지 대기"
+
+        counts[tier] = counts.get(tier, 0) + 1
+        compression = {
+            "tier": tier,
+            "label": label,
+            "rank": rank_by_symbol.get(symbol, 0),
+            "score": compression_score,
+            "coreLimit": max_core,
+            "tradeReady": tier == "core",
+            "reason": reason,
+            "confidenceScore": bounded_int(confidence.get("score", 0), 0, 100),
+            "reactionScore": bounded_int(reaction.get("score", 0), 0, 100),
+        }
+        item["candidateCompression"] = compression
+        if tier == "core":
+            top_candidates.append({
+                "symbol": item.get("symbol", ""),
+                "name": item.get("name", ""),
+                "score": item.get("totalScore", 0),
+                "compressionScore": compression_score,
+                "decision": final_decision.get("action", ""),
+                "reason": reason,
+            })
+
+    return {
+        "candidateCompressionCounts": counts,
+        "coreCandidateCount": counts.get("core", 0),
+        "reviewCandidateCount": counts.get("review", 0),
+        "waitCandidateCompressionCount": counts.get("wait", 0),
+        "portfolioCandidateCompressionCount": counts.get("portfolio", 0),
+        "excludeCandidateCompressionCount": counts.get("exclude", 0),
+        "compressedTopCandidates": top_candidates,
+        "coreCandidateLimit": max_core,
+    }
+
+
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
@@ -4113,6 +4284,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     average_reaction = sum(reaction_scores) / len(reaction_scores) if reaction_scores else 0
     average_official = sum(official_scores) / len(official_scores) if official_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
+    compression_status = assign_candidate_compression(enriched)
     groups = decision_group_counts(enriched)
     return enriched, {
         "source": "live-rules",
@@ -4133,6 +4305,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "qualityGateCounts": gate_counts,
         "priceReactionCounts": reaction_counts,
         "finalDecisionCounts": final_decision_counts,
+        **compression_status,
         "buyDecisionCount": final_decision_counts.get("buy", 0),
         "addDecisionCount": final_decision_counts.get("add", 0),
         "holdDecisionCount": final_decision_counts.get("hold", 0),
@@ -5750,6 +5923,17 @@ def score_signal_context(context: dict) -> dict:
 
 
 def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
+    def compression_rank(item: dict) -> int:
+        compression = item.get("candidateCompression", {}) if isinstance(item, dict) else {}
+        tier = str(compression.get("tier", "")) if isinstance(compression, dict) else ""
+        return {
+            "core": 120,
+            "review": 92,
+            "portfolio": 84,
+            "wait": 48,
+            "exclude": 8,
+        }.get(tier, 50)
+
     def final_rank(item: dict) -> int:
         decision = item.get("finalDecision", {}) if isinstance(item, dict) else {}
         key = str(decision.get("actionKey", "")) if isinstance(decision, dict) else ""
@@ -5775,11 +5959,11 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
 
     if mode == "preopen":
-        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), item["totalScore"]), reverse=True)
     elif mode == "intraday":
-        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), item["totalScore"]), reverse=True)
     else:
-        candidates.sort(key=lambda item: (final_rank(item), group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
+        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item)), reverse=True)
     return candidates
 
 
@@ -5856,6 +6040,14 @@ def build_dashboard_payload(context: dict) -> dict:
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
+            "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
+            "coreCandidateCount": selection_status.get("coreCandidateCount"),
+            "reviewCandidateCount": selection_status.get("reviewCandidateCount"),
+            "waitCandidateCompressionCount": selection_status.get("waitCandidateCompressionCount"),
+            "portfolioCandidateCompressionCount": selection_status.get("portfolioCandidateCompressionCount"),
+            "excludeCandidateCompressionCount": selection_status.get("excludeCandidateCompressionCount"),
+            "compressedTopCandidates": selection_status.get("compressedTopCandidates", []),
+            "coreCandidateLimit": selection_status.get("coreCandidateLimit"),
             "buyDecisionCount": selection_status.get("buyDecisionCount"),
             "addDecisionCount": selection_status.get("addDecisionCount"),
             "holdDecisionCount": selection_status.get("holdDecisionCount"),
@@ -6035,6 +6227,7 @@ def dashboard_summary(payload: dict) -> dict:
             "confidence": item.get("dataConfidence", {}).get("score") if isinstance(item.get("dataConfidence"), dict) else None,
             "reaction": item.get("priceReaction", {}).get("score") if isinstance(item.get("priceReaction"), dict) else None,
             "finalDecision": item.get("finalDecision", {}).get("action", "") if isinstance(item.get("finalDecision"), dict) else "",
+            "compression": item.get("candidateCompression", {}).get("label", "") if isinstance(item.get("candidateCompression"), dict) else "",
         })
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
@@ -6060,6 +6253,10 @@ def dashboard_summary(payload: dict) -> dict:
         "qualityGateCounts": summary.get("qualityGateCounts", {}),
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
+        "candidateCompressionCounts": summary.get("candidateCompressionCounts", {}),
+        "coreCandidateCount": summary.get("coreCandidateCount"),
+        "reviewCandidateCount": summary.get("reviewCandidateCount"),
+        "compressedTopCandidates": summary.get("compressedTopCandidates", []),
         "buyDecisionCount": summary.get("buyDecisionCount"),
         "addDecisionCount": summary.get("addDecisionCount"),
         "holdDecisionCount": summary.get("holdDecisionCount"),

@@ -637,6 +637,42 @@ h3 {
   background: rgba(180, 193, 216, 0.08);
 }
 
+.feed-title .compression-badge {
+  color: var(--soft);
+  border-color: rgba(180, 193, 216, 0.24);
+  background: rgba(180, 193, 216, 0.08);
+}
+
+.feed-title .compression-core {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.44);
+  background: rgba(123, 216, 143, 0.15);
+}
+
+.feed-title .compression-review {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.34);
+  background: rgba(105, 210, 231, 0.1);
+}
+
+.feed-title .compression-wait {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.32);
+  background: rgba(244, 201, 93, 0.1);
+}
+
+.feed-title .compression-portfolio {
+  color: #d7ecff;
+  border-color: rgba(108, 166, 255, 0.34);
+  background: rgba(108, 166, 255, 0.12);
+}
+
+.feed-title .compression-exclude {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.35);
+  background: rgba(255, 100, 115, 0.1);
+}
+
 .feed-title .gate-badge {
   color: var(--green);
   border-color: rgba(123, 216, 143, 0.34);
