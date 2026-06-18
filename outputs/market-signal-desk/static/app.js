@@ -898,17 +898,19 @@ function renderTossStatus() {
   const priceSourceValue =
     priceStatus?.source === "toss"
       ? `토스 ${priceStatus.priceCount ?? 0}건${baselineDriftCount > 0 ? ` · 기준가 차이 ${baselineDriftCount}건` : ""}`
-      : "샘플";
+      : tossSourceLabel(priceStatus, status.livePricesEnabled, "priceCount");
   const rows = [
     ["Client ID", status.clientIdConfigured, status.clientIdPreview || "미설정"],
     ["Client Secret", status.clientSecretConfigured, status.clientSecretConfigured ? "설정됨" : "미설정"],
     ["토큰 발급", status.readyForTokenIssue, status.readyForTokenIssue ? "준비됨" : "대기"],
     ["시세 조회", status.readyForMarketData, status.readyForMarketData ? "가능" : "대기"],
+    ["가격 live", status.livePricesEnabled, status.livePricesEnabled ? "켜짐" : "꺼짐"],
     [
       "가격 출처",
       priceStatus?.source === "toss" && baselineDriftCount === 0,
       priceSourceValue
     ],
+    ["차트 live", status.liveCandlesEnabled, status.liveCandlesEnabled ? "켜짐" : "꺼짐"],
     [
       "차트 출처",
       candleStatus?.source === "toss" && (candleStatus.candleCount ?? 0) > 0,
@@ -916,25 +918,23 @@ function renderTossStatus() {
         ? `토스 ${candleStatus.candleCount ?? 0}건`
         : (candleStatus?.staleCount ?? 0) > 0
           ? `오래됨 ${candleStatus.staleCount}건`
-          : "샘플"
+          : tossSourceLabel(candleStatus, status.liveCandlesEnabled, "candleCount")
     ],
+    ["호가 live", status.liveOrderbookEnabled, status.liveOrderbookEnabled ? "켜짐" : "꺼짐"],
     [
       "호가 출처",
       orderbookStatus?.source === "toss" && (orderbookStatus.orderbookCount ?? 0) > 0,
       orderbookStatus?.source === "toss" && (orderbookStatus.orderbookCount ?? 0) > 0
         ? `토스 ${orderbookStatus.orderbookCount ?? 0}건`
-        : orderbookStatus?.source === "sample" && orderbookStatus?.enabled
-          ? "샘플"
-          : "꺼짐"
+        : tossSourceLabel(orderbookStatus, status.liveOrderbookEnabled, "orderbookCount")
     ],
+    ["체결 live", status.liveTradesEnabled, status.liveTradesEnabled ? "켜짐" : "꺼짐"],
     [
       "체결 출처",
       tradesStatus?.source === "toss" && (tradesStatus.tradeCount ?? 0) > 0,
       tradesStatus?.source === "toss" && (tradesStatus.tradeCount ?? 0) > 0
         ? `토스 ${tradesStatus.tradeCount ?? 0}건`
-        : tradesStatus?.source === "sample" && tradesStatus?.enabled
-          ? "샘플"
-          : "꺼짐"
+        : tossSourceLabel(tradesStatus, status.liveTradesEnabled, "tradeCount")
     ]
   ];
   els.tossStatus.innerHTML = rows
@@ -948,6 +948,16 @@ function renderTossStatus() {
       `;
     })
     .join("");
+}
+
+function tossSourceLabel(status, liveEnabled, countKey) {
+  if (!liveEnabled || status?.enabled === false) return "라이브 꺼짐";
+  if (!status) return "확인 중";
+  if (status.error) return "오류";
+  if (status.source === "skipped") return "제한";
+  if (status.source === "stale") return "오래됨";
+  if (status.source === "toss") return `토스 ${status[countKey] ?? 0}건`;
+  return "샘플";
 }
 
 function renderDartStatus() {
