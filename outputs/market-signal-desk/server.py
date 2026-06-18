@@ -2929,6 +2929,60 @@ def dynamic_risk_score(candidate: dict, market: dict, base_score: dict, notes: l
     return bounded_int(risk, 0, 30)
 
 
+def is_hidden_discovery_candidate(candidate: dict) -> bool:
+    return candidate.get("discoveryTier") == "hidden" or candidate.get("opportunityType") == "hidden"
+
+
+def hidden_opportunity_score(candidate: dict, score_detail: dict, notes: list[str]) -> tuple[int, list[str]]:
+    signals: list[str] = []
+    opportunity = bounded_int(score_detail.get("opportunity", 0), 0, 18)
+    change = display_percent_to_decimal(candidate.get("change"))
+    trend = candidate.get("trend", {})
+    volume = display_multiplier_to_decimal(trend.get("volumeSpike") if isinstance(trend, dict) else "")
+    news_items = len(candidate.get("liveNews", {}).get("items", [])) if isinstance(candidate.get("liveNews"), dict) else 0
+    global_items = len(candidate.get("globalNews", {}).get("items", [])) if isinstance(candidate.get("globalNews"), dict) else 0
+    is_hidden = is_hidden_discovery_candidate(candidate)
+
+    if is_hidden:
+        opportunity += 5
+        signals.append("자동 발굴에서 기존 핵심 후보 밖 숨은 종목으로 분류")
+
+    if news_items or global_items:
+        opportunity += min((news_items + global_items) * 2, 6)
+        signals.append(f"관련 뉴스 {news_items + global_items}건 감지")
+
+    if change is not None:
+        if Decimal("-1.5") <= change <= Decimal("1.5") and (news_items or global_items or is_hidden):
+            opportunity += 4
+            signals.append(f"뉴스 대비 가격 반응이 {display_change(change)}로 아직 크지 않음")
+        elif change > Decimal("3"):
+            opportunity -= 4
+            signals.append(f"이미 {display_change(change)} 상승해 추격 위험 우선 확인")
+        elif change < Decimal("-3"):
+            opportunity -= 3
+            signals.append(f"{display_change(change)} 약세로 반등 확인 필요")
+
+    if volume is not None:
+        if Decimal("1.2") <= volume < Decimal("2.5"):
+            opportunity += 3
+            signals.append(f"거래량 {volume}배로 초기 수급 반응")
+        elif volume >= Decimal("2.5"):
+            opportunity += 1
+            signals.append(f"거래량 {volume}배로 관심은 높지만 과열 여부 확인")
+
+    if score_detail.get("market", 0) >= 9 and is_hidden:
+        opportunity += 2
+        signals.append("시장 방향이 우호적인 상태에서 숨은 후보로 포착")
+
+    if candidate.get("isWatched"):
+        opportunity += 1
+
+    opportunity = bounded_int(opportunity, 0, 18)
+    if opportunity >= 8:
+        notes.append(f"숨은 기회 신호 {opportunity}/18 반영")
+    return opportunity, unique_texts(signals, limit=4)
+
+
 def event_score_from_candidate(candidate: dict, base_score: dict) -> int:
     text = " ".join(
         [
@@ -2950,9 +3004,11 @@ def event_score_from_candidate(candidate: dict, base_score: dict) -> int:
     return bounded_int(score, 0, 25)
 
 
-def verdict_from_scores(total: int, readiness: int, risk: int, heat: int) -> str:
+def verdict_from_scores(total: int, readiness: int, risk: int, heat: int, opportunity: int = 0) -> str:
     if total >= 75 and readiness >= 70 and risk < 18:
         return "조건 충족 시 관찰"
+    if opportunity >= 10 and total >= 65 and risk < 22 and heat < 8:
+        return "숨은 기회 관찰"
     if total >= 65 and heat >= 8:
         return "눌림 대기"
     if total >= 60:
@@ -2965,6 +3021,7 @@ def verdict_from_scores(total: int, readiness: int, risk: int, heat: int) -> str
 def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
+    opportunity_scores = []
     for candidate in candidates:
         item = dict(candidate)
         base_score = item.get("score", {})
@@ -2991,21 +3048,46 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
             "riskPenalty": risk,
             "heatPenalty": heat,
         }
+        opportunity, opportunity_signals = hidden_opportunity_score(item, score_detail, notes)
+        score_detail["opportunity"] = opportunity
         total = score_candidate({"score": score_detail})
-        readiness = bounded_int((total * 0.58) + (price * 1.4) + (volume * 0.7) + (market_score * 0.6) - (risk * 0.45))
-        preopen_priority = bounded_int((total * 0.66) + (news * 0.9) + (event * 0.45) + (market_score * 0.8) - (heat * 0.5))
+        readiness = bounded_int(
+            (total * 0.58)
+            + (price * 1.4)
+            + (volume * 0.7)
+            + (market_score * 0.6)
+            + (opportunity * 0.45)
+            - (risk * 0.45)
+        )
+        preopen_priority = bounded_int(
+            (total * 0.66)
+            + (news * 0.9)
+            + (event * 0.45)
+            + (market_score * 0.8)
+            + (opportunity * 0.65)
+            - (heat * 0.5)
+        )
         shift = total - original_total
         score_shifts.append(shift)
+        opportunity_scores.append(opportunity)
 
         item["score"] = score_detail
         item["totalScore"] = total
         item["triggerReadiness"] = readiness
         item["preopenPriority"] = preopen_priority
-        item["verdict"] = verdict_from_scores(total, readiness, risk, heat)
+        item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
+        item["hiddenOpportunity"] = {
+            "score": opportunity,
+            "maxScore": 18,
+            "signals": opportunity_signals,
+            "tier": item.get("discoveryTier", "core"),
+            "type": item.get("opportunityType", "core"),
+        }
         item["selection"] = {
             "source": "live-rules",
             "previousScore": original_total,
             "scoreChange": shift,
+            "opportunityScore": opportunity,
             "components": score_detail,
             "notes": unique_texts(notes, limit=5),
             "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -3013,12 +3095,16 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         enriched.append(item)
 
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
+    average_opportunity = sum(opportunity_scores) / len(opportunity_scores) if opportunity_scores else 0
+    hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
     return enriched, {
         "source": "live-rules",
         "enabled": True,
         "message": "뉴스, 시세, 지수, 공시 신호로 후보 점수를 재계산했습니다.",
         "candidateCount": len(enriched),
         "averageScoreShift": round(average_shift, 1),
+        "averageOpportunityScore": round(average_opportunity, 1),
+        "hiddenOpportunityCount": hidden_opportunity_count,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -3027,7 +3113,7 @@ def score_candidate(candidate: dict) -> int:
     score = candidate.get("score", {})
     positive = sum(
         int(score.get(key, 0))
-        for key in ["event", "news", "volume", "price", "market", "attention"]
+        for key in ["event", "news", "volume", "price", "market", "attention", "opportunity"]
     )
     penalty = sum(int(score.get(key, 0)) for key in ["riskPenalty", "heatPenalty"])
     return max(0, min(100, positive - penalty))
@@ -4187,6 +4273,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
             "filteredNewsCount": discovery_status.get("filteredNewsCount"),
             "averageScoreShift": selection_status.get("averageScoreShift"),
+            "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
+            "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
         },
         "integrations": {
             "pipeline": context["pipeline"],

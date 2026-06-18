@@ -469,7 +469,11 @@ function applyStrategyFilter(candidates = []) {
 }
 
 function isHiddenOpportunity(item) {
-  return item?.discoveryTier === "hidden" || item?.opportunityType === "hidden";
+  return (
+    item?.discoveryTier === "hidden" ||
+    item?.opportunityType === "hidden" ||
+    Number(item?.hiddenOpportunity?.score ?? 0) >= 8
+  );
 }
 
 function hasMomentumSignal(item) {
@@ -481,6 +485,7 @@ function hasMomentumSignal(item) {
     Number(score.news ?? 0) >= 12 ||
     Number(score.price ?? 0) >= 12 ||
     Number(score.volume ?? 0) >= 12 ||
+    Number(score.opportunity ?? 0) >= 10 ||
     (change != null && change > 0.8)
   );
 }
@@ -1023,6 +1028,8 @@ function renderMetrics() {
   const discovery = state.dashboard?.integrations?.discovery ?? {};
   const actions = candidateActionSummary(state.dashboard?.candidates ?? []);
   const hiddenCount = (state.dashboard?.candidates ?? []).filter(isHiddenOpportunity).length;
+  const hiddenOpportunityCount = Number(summary.hiddenOpportunityCount ?? 0);
+  const averageOpportunityScore = Number(summary.averageOpportunityScore ?? 0);
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
   if (els.candidateSource) {
     const sourceLabel =
@@ -1039,8 +1046,9 @@ function renderMetrics() {
     const splitText = domestic || overseas ? ` · 국내 ${domestic ?? 0} · 해외 ${overseas ?? 0}` : "";
     const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
     const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
+    const opportunityText = hiddenOpportunityCount ? ` · 기회 ${hiddenOpportunityCount} · 평균 ${averageOpportunityScore}/18` : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${hiddenText}${opportunityText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -1476,6 +1484,7 @@ function tradePlan(item) {
       [
         `후보 점수 ${score}/100`,
         change != null ? `현재 등락률 ${item.change}` : "",
+        item.hiddenOpportunity?.score ? `숨은 기회 ${item.hiddenOpportunity.score}/18` : "",
         holding ? `내 보유 상태 ${holding.judgement ?? "보유"} · ${holding.profitLossRate ?? "-"}` : "내 보유 없음",
         item.aiAnalysis?.actionBias ? `AI 판단 ${actionBiasLabel(item.aiAnalysis.actionBias)}` : ""
       ],
@@ -1955,6 +1964,7 @@ function renderFeed() {
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
       const plan = tradePlan(item);
+      const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -1963,6 +1973,7 @@ function renderFeed() {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
+              ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
           </span>
@@ -2202,6 +2213,7 @@ function renderDetail() {
 
     <div class="detail-grid">
       ${tradePlanSection(item)}
+      ${hiddenOpportunitySection(item)}
 
       <section class="detail-section">
         <div class="section-title">
@@ -2513,6 +2525,31 @@ function tradePlanSection(item) {
       <ul class="trade-reasons">
         ${plan.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
       </ul>
+    </section>
+  `;
+}
+
+function hiddenOpportunitySection(item) {
+  const opportunity = item.hiddenOpportunity ?? {};
+  const score = Number(opportunity.score ?? 0);
+  const signals = uniqueTexts(opportunity.signals ?? [], 4);
+  if (!score && !signals.length) return "";
+  const tierText = opportunity.tier === "hidden" ? "숨은 후보" : "일반 후보";
+  return `
+    <section class="detail-section">
+      <div class="section-title">
+        <p class="eyebrow">발굴 신호</p>
+        <h2>숨은 기회 ${escapeHtml(`${score}/18`)}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("분류", tierText)}
+        ${statCard("기회 점수", `${score}/18`)}
+      </div>
+      ${
+        signals.length
+          ? `<ul class="bullet-list">${signals.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
     </section>
   `;
 }
