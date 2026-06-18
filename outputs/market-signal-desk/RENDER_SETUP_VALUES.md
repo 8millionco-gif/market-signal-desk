@@ -115,15 +115,37 @@ https://market-signal-desk.onrender.com
 첫 화면이 정상인 뒤 아래 순서대로 하나씩 켭니다.
 
 ```text
-0. SIGNAL_AUTO_CANDIDATES_ENABLED=1
-1. GDELT_LIVE_NEWS=1
-2. NAVER_CLIENT_ID / NAVER_CLIENT_SECRET / NAVER_LIVE_NEWS=1
-3. DART_API_KEY / DART_LIVE_DISCLOSURES=1
-4. OPENAI_API_KEY / OPENAI_ANALYSIS_ENABLED=1
-5. Toss 키와 Toss live flags
-6. TOSS_LIVE_PORTFOLIO=1
-7. SIGNAL_SCHEDULER_ENABLED=1
+0. DATABASE_URL / SIGNAL_STORAGE_BACKEND=auto
+1. SIGNAL_AUTO_CANDIDATES_ENABLED=1
+2. GDELT_LIVE_NEWS=1
+3. NAVER_CLIENT_ID / NAVER_CLIENT_SECRET / NAVER_LIVE_NEWS=1
+4. DART_API_KEY / DART_LIVE_DISCLOSURES=1
+5. OPENAI_API_KEY / OPENAI_ANALYSIS_ENABLED=1
+6. Toss 키와 Toss live flags
+7. TOSS_LIVE_PORTFOLIO=1
+8. SIGNAL_SCHEDULER_ENABLED=1
 ```
+
+## DB 저장소 활성화
+
+실전 운영 전에는 파일 저장소 대신 Postgres DB를 먼저 연결합니다. Render Postgres 또는 Supabase Postgres에서 발급한 연결 문자열을 Render Environment에 추가합니다.
+
+```text
+SIGNAL_STORAGE_BACKEND=auto
+DATABASE_URL=postgresql://...
+```
+
+앱은 DB 연결이 가능하면 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다.
+
+DB에 저장되는 데이터:
+
+```text
+candidate_pool          후보 풀
+discovery_latest        상시 발굴 봇 최신 결과
+signal_snapshots        장전/장마감/장중 스냅샷과 성과 검증 기준 데이터
+```
+
+DB가 연결되지 않으면 기존처럼 `data/*.json`, `data/runs/*.json` 파일 저장소로 대체됩니다. Render 무료 웹 서비스의 파일 저장소는 재배포/재시작 시 유지가 보장되지 않으므로, 후보 풀과 성과 기록을 운영에 쓰려면 `DATABASE_URL` 연결이 필요합니다.
 
 GDELT는 요청 제한이 있으므로 처음에는 아래 기본값을 유지합니다.
 

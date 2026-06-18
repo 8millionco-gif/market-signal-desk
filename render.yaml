@@ -12,6 +12,8 @@ services:
         value: 0.0.0.0
       - key: SIGNAL_SCHEDULER_ENABLED
         value: "0"
+      - key: SIGNAL_STORAGE_BACKEND
+        value: "auto"
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT
@@ -43,6 +45,8 @@ services:
       - key: FX_LIVE_RATES
         value: "1"
       - key: ADMIN_TOKEN
+        sync: false
+      - key: DATABASE_URL
         sync: false
       - key: TOSS_CLIENT_ID
         sync: false

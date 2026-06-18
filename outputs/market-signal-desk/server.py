@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import zipfile
+import importlib
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from io import BytesIO
@@ -34,6 +35,8 @@ RUNS_DIR = DATA_DIR / "runs"
 DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -198,6 +201,9 @@ GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
+DB_LOCK = threading.Lock()
+DB_SCHEMA_READY = False
+DB_LAST_ERROR = ""
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
     "running": False,
@@ -235,6 +241,283 @@ def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+def database_storage_enabled() -> bool:
+    if SIGNAL_STORAGE_BACKEND in {"", "0", "false", "off", "filesystem", "file", "json", "local", "ephemeral"}:
+        return False
+    return bool(DATABASE_URL)
+
+
+def database_storage_requested() -> bool:
+    return SIGNAL_STORAGE_BACKEND in {"auto", "database", "db", "postgres", "postgresql"} or bool(DATABASE_URL)
+
+
+def set_db_error(error: Exception | str) -> None:
+    global DB_LAST_ERROR
+    DB_LAST_ERROR = str(error)[:240]
+
+
+def psycopg_modules():
+    psycopg = importlib.import_module("psycopg")
+    json_module = importlib.import_module("psycopg.types.json")
+    return psycopg, json_module.Jsonb
+
+
+def ensure_database_schema() -> bool:
+    global DB_SCHEMA_READY
+    if not database_storage_enabled():
+        return False
+    if DB_SCHEMA_READY:
+        return True
+    with DB_LOCK:
+        if DB_SCHEMA_READY:
+            return True
+        try:
+            psycopg, _jsonb = psycopg_modules()
+            with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS signal_kv (
+                            key TEXT PRIMARY KEY,
+                            payload JSONB NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS signal_snapshots (
+                            id TEXT PRIMARY KEY,
+                            mode TEXT NOT NULL,
+                            run_trigger TEXT NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL,
+                            summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            dashboard JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            payload JSONB NOT NULL,
+                            file_name TEXT NOT NULL DEFAULT '',
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_snapshots_mode_created_idx
+                        ON signal_snapshots (mode, created_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_snapshots_trigger_created_idx
+                        ON signal_snapshots (run_trigger, created_at DESC)
+                        """
+                    )
+            DB_SCHEMA_READY = True
+            set_db_error("")
+            return True
+        except Exception as error:
+            set_db_error(error)
+            return False
+
+
+def normalize_db_payload(value, fallback):
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return fallback
+
+
+def db_read_kv(key: str, fallback):
+    if not ensure_database_schema():
+        return fallback
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (key,))
+                row = cur.fetchone()
+        if not row:
+            return fallback
+        return normalize_db_payload(row[0], fallback)
+    except Exception as error:
+        set_db_error(error)
+        return fallback
+
+
+def db_write_kv(key: str, payload) -> bool:
+    if not ensure_database_schema():
+        return False
+    try:
+        psycopg, Jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO signal_kv (key, payload, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (key)
+                    DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+                    """,
+                    (key, Jsonb(payload)),
+                )
+        set_db_error("")
+        return True
+    except Exception as error:
+        set_db_error(error)
+        return False
+
+
+def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
+    if not ensure_database_schema():
+        return False
+    snapshot_id = str(snapshot.get("id", "")).strip()
+    if not snapshot_id:
+        return False
+    try:
+        psycopg, Jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO signal_snapshots (
+                        id, mode, run_trigger, created_at, summary, dashboard, payload, file_name, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (id)
+                    DO UPDATE SET
+                        mode = EXCLUDED.mode,
+                        run_trigger = EXCLUDED.run_trigger,
+                        created_at = EXCLUDED.created_at,
+                        summary = EXCLUDED.summary,
+                        dashboard = EXCLUDED.dashboard,
+                        payload = EXCLUDED.payload,
+                        file_name = EXCLUDED.file_name,
+                        updated_at = NOW()
+                    """,
+                    (
+                        snapshot_id,
+                        str(snapshot.get("mode", "")),
+                        str(snapshot.get("trigger", "")),
+                        str(snapshot.get("createdAt", datetime.now(KST).isoformat(timespec="seconds"))),
+                        Jsonb(snapshot.get("summary", {})),
+                        Jsonb(snapshot.get("dashboard", {})),
+                        Jsonb(snapshot),
+                        file_name,
+                    ),
+                )
+        set_db_error("")
+        return True
+    except Exception as error:
+        set_db_error(error)
+        return False
+
+
+def db_recent_scheduler_runs(limit: int) -> list[dict]:
+    if not ensure_database_schema():
+        return []
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, mode, run_trigger, created_at, file_name, summary
+                    FROM signal_snapshots
+                    ORDER BY created_at DESC, updated_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        records = []
+        for snapshot_id, mode, trigger, created_at, file_name, summary in rows:
+            created_text = created_at.isoformat(timespec="seconds") if hasattr(created_at, "isoformat") else str(created_at)
+            records.append({
+                "id": snapshot_id,
+                "mode": mode,
+                "trigger": trigger,
+                "createdAt": created_text,
+                "file": file_name or "database",
+                "summary": normalize_db_payload(summary, {}),
+            })
+        set_db_error("")
+        return records
+    except Exception as error:
+        set_db_error(error)
+        return []
+
+
+def db_scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
+    if not ensure_database_schema():
+        return False
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM signal_snapshots
+                    WHERE mode = %s AND run_trigger = 'scheduled' AND created_at::date = %s::date
+                    LIMIT 1
+                    """,
+                    (mode, run_date),
+                )
+                row = cur.fetchone()
+        set_db_error("")
+        return bool(row)
+    except Exception as error:
+        set_db_error(error)
+        return False
+
+
+def db_snapshot_detail(run_id: str) -> dict | None:
+    if not ensure_database_schema():
+        return None
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM signal_snapshots WHERE id = %s", (run_id,))
+                row = cur.fetchone()
+        if not row:
+            return None
+        snapshot = normalize_db_payload(row[0], {})
+        if not isinstance(snapshot, dict):
+            return None
+        record = {
+            "id": snapshot.get("id", run_id),
+            "mode": snapshot.get("mode"),
+            "trigger": snapshot.get("trigger"),
+            "createdAt": snapshot.get("createdAt"),
+            "file": "database",
+            "summary": snapshot.get("summary", {}),
+        }
+        set_db_error("")
+        return {"record": record, "dashboard": snapshot.get("dashboard", {})}
+    except Exception as error:
+        set_db_error(error)
+        return None
+
+
+def database_status() -> dict:
+    enabled = database_storage_enabled()
+    ready = ensure_database_schema() if enabled else False
+    return {
+        "backend": SIGNAL_STORAGE_BACKEND,
+        "urlConfigured": bool(DATABASE_URL),
+        "enabled": enabled,
+        "ready": ready,
+        "implementation": "postgres" if enabled else "filesystem",
+        "persistent": bool(ready),
+        "error": DB_LAST_ERROR,
+    }
 
 
 def seed_data() -> dict:
@@ -4299,7 +4582,8 @@ def candidate_pool_empty() -> dict:
 
 
 def candidate_pool_data() -> dict:
-    data = read_json(CANDIDATE_POOL_FILE, candidate_pool_empty())
+    stored = db_read_kv("candidate_pool", None) if database_storage_enabled() else None
+    data = stored if isinstance(stored, dict) else read_json(CANDIDATE_POOL_FILE, candidate_pool_empty())
     if not isinstance(data, dict):
         return candidate_pool_empty()
     if not isinstance(data.get("items"), dict):
@@ -4793,7 +5077,8 @@ def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "
         removed_count = trim_candidate_pool_items(items)
         data["items"] = items
         data["updatedAt"] = now.isoformat(timespec="seconds")
-        write_json(CANDIDATE_POOL_FILE, data)
+        if not db_write_kv("candidate_pool", data):
+            write_json(CANDIDATE_POOL_FILE, data)
         summary = candidate_pool_summary(data)
     summary.update({
         "stage": stage,
@@ -7058,6 +7343,10 @@ def scheduler_config_status() -> dict:
 
 
 def scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
+    if database_storage_enabled():
+        exists = db_scheduled_snapshot_exists(run_date, mode)
+        if exists or not DB_LAST_ERROR:
+            return exists
     return any(RUNS_DIR.glob(f"{run_date}_{mode}_scheduled_*.json"))
 
 
@@ -7232,12 +7521,18 @@ def discovery_bot_config_status() -> dict:
 
 
 def discovery_latest_record(include_dashboard: bool = False) -> dict:
-    record = read_json(DISCOVERY_LATEST_FILE, {})
+    stored = db_read_kv("discovery_latest", None) if database_storage_enabled() else None
+    record = stored if isinstance(stored, dict) else read_json(DISCOVERY_LATEST_FILE, {})
     if not isinstance(record, dict):
         return {}
     if include_dashboard:
         return record
     return {key: value for key, value in record.items() if key != "dashboard"}
+
+
+def write_discovery_latest_record(record: dict) -> None:
+    if not db_write_kv("discovery_latest", record):
+        write_json(DISCOVERY_LATEST_FILE, record)
 
 
 def discovery_bot_status() -> dict:
@@ -7282,7 +7577,7 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             "summary": dashboard_summary(payload),
             "dashboard": payload,
         }
-        write_json(DISCOVERY_LATEST_FILE, record)
+        write_discovery_latest_record(record)
         public_record = {key: value for key, value in record.items() if key != "dashboard"}
         with DISCOVERY_BOT_LOCK:
             DISCOVERY_BOT_STATE["lastRun"] = public_record
@@ -7310,6 +7605,10 @@ def scheduler_record_from_snapshot(path: Path, snapshot: dict) -> dict:
 
 def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
     limit = SIGNAL_RUN_HISTORY_LIMIT if limit is None else max(1, int(limit))
+    if database_storage_enabled():
+        records = db_recent_scheduler_runs(limit)
+        if records or not DB_LAST_ERROR:
+            return records
     if not RUNS_DIR.exists():
         return []
     records = []
@@ -7324,6 +7623,24 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 
 
 def snapshot_storage_status() -> dict:
+    db_status = database_status()
+    if db_status["enabled"] and db_status["ready"]:
+        recent_runs = recent_scheduler_runs()
+        return {
+            "mode": SIGNAL_STORAGE_BACKEND,
+            "implementation": "postgres",
+            "runsDir": display_local_path(RUNS_DIR),
+            "runsDirExists": RUNS_DIR.exists(),
+            "writable": True,
+            "persistent": True,
+            "recentRunCount": len(recent_runs),
+            "latestRunId": recent_runs[0]["id"] if recent_runs else "",
+            "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
+            "database": db_status,
+            "message": "Postgres DB에 스냅샷과 후보 풀을 저장합니다.",
+            "error": "",
+        }
+
     writable = False
     error = ""
     check_path = RUNS_DIR / ".storage-check.tmp"
@@ -7347,6 +7664,7 @@ def snapshot_storage_status() -> dict:
         "recentRunCount": len(recent_runs),
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
+        "database": db_status,
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
@@ -7371,6 +7689,10 @@ def scheduler_snapshot_path(run_id: str) -> Path | None:
 
 
 def scheduler_snapshot_detail(run_id: str) -> dict | None:
+    if database_storage_enabled():
+        detail = db_snapshot_detail(run_id)
+        if detail or not DB_LAST_ERROR:
+            return detail
     path = scheduler_snapshot_path(run_id)
     if path is None:
         return None
@@ -7757,8 +8079,18 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
         "summary": dashboard_summary(payload),
         "dashboard": payload,
     }
-    write_json(path, snapshot)
-    record = scheduler_record_from_snapshot(path, snapshot)
+    if db_write_snapshot(snapshot, file_name=file_name):
+        record = {
+            "id": snapshot.get("id", run_id),
+            "mode": snapshot.get("mode"),
+            "trigger": snapshot.get("trigger"),
+            "createdAt": snapshot.get("createdAt"),
+            "file": "database",
+            "summary": snapshot.get("summary", {}),
+        }
+    else:
+        write_json(path, snapshot)
+        record = scheduler_record_from_snapshot(path, snapshot)
     with SCHEDULER_LOCK:
         last_runs = dict(SCHEDULER_STATE.get("lastRuns", {}))
         last_runs[mode] = record

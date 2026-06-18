@@ -332,9 +332,28 @@ $env:SIGNAL_DISCOVERY_SYMBOLS="TSLA,AMD,064350"
 
 화면의 `오늘의 후보` 아래에는 `자동 뉴스 선정`, `자동 유니버스 선정`, `샘플 후보` 중 어떤 기준으로 후보가 만들어졌는지 표시됩니다. 후보 자동 생성은 주문이나 자동매매와 연결되지 않고, 이후 기존 시세·뉴스·공시·AI 분석 단계로 넘겨지는 시작 목록만 바꿉니다.
 
+## DB 저장소 설정
+
+기본값은 파일 저장소입니다. `DATABASE_URL`이 설정되면 Postgres DB를 우선 사용하고, 연결 실패 시 기존 JSON 파일 저장소로 안전하게 대체합니다.
+
+DB에 저장되는 핵심 데이터는 다음과 같습니다.
+
+- 후보 풀: `candidate_pool`
+- 상시 발굴 봇 최신 결과: `discovery_latest`
+- 장전/장마감/장중 스냅샷: `signal_snapshots`
+
+Render Postgres 또는 Supabase Postgres를 연결한 뒤 아래 값을 설정합니다.
+
+```powershell
+$env:SIGNAL_STORAGE_BACKEND="auto"
+$env:DATABASE_URL="postgresql://..."
+```
+
+앱은 시작 후 첫 저장/조회 시 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다. 운영에서는 이 값을 연결해야 후보 풀과 성과 검증 기록이 재배포 후에도 유지됩니다.
+
 ## 상시 발굴 봇 설정
 
-상시 발굴 봇은 장마감/장전 스냅샷과 별도로 최신 후보를 주기적으로 갱신하고 `data/discovery-latest.json`에 마지막 발굴 결과를 저장합니다. 이 봇은 투자 판단 보조용이며 주문이나 자동매매와 연결되지 않습니다.
+상시 발굴 봇은 장마감/장전 스냅샷과 별도로 최신 후보를 주기적으로 갱신하고 마지막 발굴 결과를 저장합니다. DB가 연결되어 있으면 `signal_kv`에, 없으면 `data/discovery-latest.json`에 저장합니다. 이 봇은 투자 판단 보조용이며 주문이나 자동매매와 연결되지 않습니다.
 
 ```powershell
 $env:SIGNAL_DISCOVERY_BOT_ENABLED="1"
@@ -352,7 +371,7 @@ POST /api/discovery/run
 
 ## 스케줄러 설정
 
-서버가 켜져 있으면 장전과 장마감에 후보 분석을 자동 실행하고 `data/runs` 폴더에 JSON 스냅샷을 저장합니다. 이 기능은 분석 저장용이며 주문이나 매매 실행과 연결되지 않습니다.
+서버가 켜져 있으면 장전과 장마감에 후보 분석을 자동 실행하고 스냅샷을 저장합니다. DB가 연결되어 있으면 `signal_snapshots`에, 없으면 `data/runs` 폴더에 JSON 파일로 저장합니다. 이 기능은 분석 저장용이며 주문이나 매매 실행과 연결되지 않습니다.
 
 ```powershell
 $env:SIGNAL_SCHEDULER_ENABLED="1"
