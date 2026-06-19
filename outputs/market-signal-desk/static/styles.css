@@ -1325,6 +1325,11 @@ h3 {
   font-weight: 800;
 }
 
+.change-missing {
+  color: var(--amber);
+  font-weight: 900;
+}
+
 .sr-only {
   position: absolute;
   overflow: hidden;

@@ -202,6 +202,21 @@ function displayChangeText(change) {
   return `${sign}${value}%`;
 }
 
+function changeMissingText(item) {
+  if (item?.livePrice?.changeSource === "missing") return "미수신";
+  if (item?.livePrice?.source === "toss" && (!item?.change || item.change === "-")) return "미수신";
+  return "";
+}
+
+function displayCandidateChangeText(item) {
+  const value = displayChangeText(item?.change);
+  return value === "-" ? changeMissingText(item) || "-" : value;
+}
+
+function candidateChangeClass(item) {
+  return displayCandidateChangeText(item) === "미수신" ? "change-missing" : changeClass(item?.change);
+}
+
 function initials(name) {
   return name
     .split("")
@@ -827,8 +842,8 @@ function updateFeedPriceFragments() {
     if (time) time.textContent = livePriceLabel(item) || item.updated || "";
     if (price) price.textContent = item.price || "-";
     if (change) {
-      change.textContent = displayChangeText(item.change);
-      change.className = changeClass(item.change);
+      change.textContent = displayCandidateChangeText(item);
+      change.className = candidateChangeClass(item);
     }
     if (decision) {
       decision.textContent = primary.label;
@@ -852,8 +867,8 @@ function updateSelectedPriceFragments(options = {}) {
   const decisionDetailNode = decisionNode?.querySelector("span");
   if (priceNode) priceNode.textContent = item.price || "-";
   if (changeNode) {
-    changeNode.textContent = displayChangeText(item.change);
-    changeNode.className = changeClass(item.change);
+    changeNode.textContent = displayCandidateChangeText(item);
+    changeNode.className = candidateChangeClass(item);
   }
   if (sourceNode) sourceNode.textContent = priceMeta(item);
   if (liveDataNode) liveDataNode.innerHTML = liveDataCoverageChips(item);
@@ -1430,7 +1445,7 @@ function reactionStageForDisplay(item) {
       ])
     : [
         ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
-        ["가격 방향", hasPositivePrice, displayChangeText(item.change)],
+        ["가격 방향", hasPositivePrice, displayCandidateChangeText(item)],
         ["거래 반응", hasVolume, volumeReactionText(item)],
         ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
       ];
@@ -1801,7 +1816,7 @@ function renderTradeDecisionStatus() {
     ["가격 반응", stage.tone === "buy", stage.label],
     ["최종 판단", primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
     ["관찰 매수", plan.tone === "buy", currentRow],
-    ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayChangeText(item.change)}`.trim()],
+    ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayCandidateChangeText(item)}`.trim()],
     ["보유", Boolean(plan.holding), holdingRow]
   ];
   els.tradeDecisionStatus.innerHTML = rows
@@ -4108,7 +4123,7 @@ function renderFeed() {
           <span class="feed-meta">
             <span class="feed-price-line">
               <b data-feed-price>${escapeHtml(item.price || "-")}</b>
-              <em class="${escapeHtml(changeClass(item.change))}" data-feed-change>${escapeHtml(displayChangeText(item.change))}</em>
+              <em class="${escapeHtml(candidateChangeClass(item))}" data-feed-change>${escapeHtml(displayCandidateChangeText(item))}</em>
             </span>
             <span class="feed-action ${escapeHtml(plan.tone)}" data-feed-action>${escapeHtml(actionLabel)}</span>
             <span class="score-pill ${scoreClass(item.totalScore)}" data-feed-score>${item.totalScore}</span>
@@ -4472,7 +4487,7 @@ function renderDetail() {
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
           <h2>${escapeHtml(item.name)}</h2>
           <span data-selected-price>${escapeHtml(item.price)}</span>
-          <span class="${changeClass(item.change)}" data-selected-change>${escapeHtml(displayChangeText(item.change))}</span>
+          <span class="${candidateChangeClass(item)}" data-selected-change>${escapeHtml(displayCandidateChangeText(item))}</span>
           <button
             class="watch-button ${item.isWatched ? "active" : ""}"
             id="watchButton"
@@ -4857,7 +4872,7 @@ function statCard(label, value) {
 }
 
 function tradeNowGuide(item, plan) {
-  const current = `${item?.price ?? "-"} ${displayChangeText(item?.change)}`.trim();
+  const current = `${item?.price ?? "-"} ${displayCandidateChangeText(item)}`.trim();
   const entry = rowValue(plan, "관찰 매수");
   const pullback = rowValue(plan, "눌림 대기");
   const rebound = rowValue(plan, "반등 확인");
@@ -5483,7 +5498,9 @@ function priceMeta(item) {
         ? " · 등락률 실시간 반영"
         : item.livePrice.changeSource === "toss-candles"
           ? " · 전일 대비는 일봉 기준 추정"
-          : "";
+          : item.livePrice.changeSource === "missing"
+            ? " · 등락률 미수신"
+            : "";
     const warningText = item.livePrice.baselineWarning
       ? ` · 기준가 차이 확인 필요(${item.livePrice.baselineDifferencePercent ?? ""})`
       : "";

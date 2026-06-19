@@ -2676,6 +2676,9 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
             if change:
                 item["change"] = change
                 item["livePrice"]["changeSource"] = "toss-prices"
+            else:
+                item["livePrice"]["changeSource"] = "missing"
+                item["livePrice"]["changeMessage"] = "토스 현재가 응답에 등락률 필드가 없어 전일 대비를 표시하지 못했습니다."
             if baseline_warning and baseline_difference is not None:
                 item["livePrice"].update({
                     "baselineWarning": True,
