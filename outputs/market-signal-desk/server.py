@@ -9420,21 +9420,206 @@ def candidate_prefetch_gap_profile(
     }
 
 
-def candidate_prefetch_queue_records(limit: int) -> tuple[list[dict], dict]:
+def candidate_prefetch_record_from_candidate(candidate: dict, source: str) -> dict | None:
+    if not isinstance(candidate, dict):
+        return None
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None
+
+    name = str(candidate.get("name") or symbol)
+    market = str(candidate.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", symbol) else "KR"))
+    category = str(candidate.get("category") or ("overseas" if market == "US" else "domestic"))
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    evaluation = candidate.get("evaluationMode", {}) if isinstance(candidate.get("evaluationMode"), dict) else {}
+    price_reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    quality_gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
+    score_payload = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+
+    total_score = bounded_int(
+        candidate.get("totalScore", discovery.get("score", score_payload.get("total", score_payload.get("score", 0)))),
+        0,
+        100,
+    )
+    trigger_readiness = bounded_int(
+        candidate.get("triggerReadiness", candidate.get("preopenPriority", discovery.get("triggerReadiness", 0))),
+        0,
+        100,
+    )
+    monitor_score = bounded_int(
+        candidate.get("monitorScore", max(trigger_readiness, bounded_int(discovery.get("score", 0), 0, 100))),
+        0,
+        100,
+    )
+    retain_score = max(
+        bounded_int(candidate.get("retainScore", 0), 0, 100),
+        total_score,
+        trigger_readiness,
+        monitor_score,
+    )
+
+    state_key = str(
+        candidate.get("stateKey")
+        or compression.get("key")
+        or final_decision.get("key")
+        or evaluation.get("key")
+        or "validating"
+    ).strip() or "validating"
+    state_label = str(
+        candidate.get("stateLabel")
+        or compression.get("label")
+        or final_decision.get("label")
+        or evaluation.get("label")
+        or "검증중"
+    ).strip() or "검증중"
+    headline = str(
+        candidate.get("headline")
+        or candidate.get("reason")
+        or final_decision.get("summary")
+        or discovery.get("headline")
+        or f"{name} 후보 데이터 보강"
+    )
+    themes = unique_texts(
+        [
+            *text_list(candidate.get("themes", []), limit=10),
+            *text_list(discovery.get("themes", []), limit=10),
+            str(price_reaction.get("label", "")),
+            str(quality_gate.get("label", "")),
+            str(final_decision.get("label", "")),
+        ],
+        limit=10,
+    )
+
+    return {
+        "symbol": symbol,
+        "name": name,
+        "market": market,
+        "category": category,
+        "headline": headline,
+        "themes": themes,
+        "stateKey": state_key,
+        "stateLabel": state_label,
+        "stateReason": str(final_decision.get("reason") or compression.get("reason") or candidate.get("reason") or ""),
+        "retainScore": retain_score,
+        "monitorScore": monitor_score,
+        "totalScore": total_score,
+        "triggerReadiness": trigger_readiness,
+        "preopenPriority": bounded_int(candidate.get("preopenPriority", trigger_readiness), 0, 100),
+        "evidenceScore": bounded_int(
+            discovery.get("evidenceScore", candidate.get("evidenceScore", score_payload.get("evidenceScore", 0))),
+            0,
+            100,
+        ),
+        "evidenceGrade": discovery.get("evidenceGrade") or candidate.get("evidenceGrade", ""),
+        "qualityTier": discovery.get("qualityTier") or candidate.get("qualityTier", ""),
+        "price": candidate.get("price", ""),
+        "change": candidate.get("change", ""),
+        "updated": candidate.get("updated", ""),
+        "lastSeenAt": candidate.get("updated") or candidate.get("collectedAt") or candidate.get("generatedAt") or "",
+        "prefetchSource": source,
+    }
+
+
+def candidate_prefetch_records_from_candidates(candidates: list[dict] | None, source: str, limit: int | None = None) -> list[dict]:
+    records: list[dict] = []
+    for candidate in candidates or []:
+        record = candidate_prefetch_record_from_candidate(candidate, source)
+        if record is None:
+            continue
+        records.append(record)
+        if limit is not None and len(records) >= max(0, limit):
+            break
+    return records
+
+
+def latest_discovery_candidate_prefetch_records(limit: int) -> list[dict]:
+    try:
+        latest = discovery_latest_record(True)
+    except Exception:
+        return []
+    dashboard_payload = latest.get("dashboard", {}) if isinstance(latest, dict) and isinstance(latest.get("dashboard"), dict) else {}
+    candidates = dashboard_payload.get("candidates", []) if isinstance(dashboard_payload.get("candidates"), list) else []
+    return candidate_prefetch_records_from_candidates(candidates, "latest-discovery", limit=limit)
+
+
+def candidate_prefetch_record_priority(record: dict) -> tuple[int, int, int, int]:
+    source_priority = {
+        "current-discovery": 4,
+        "latest-discovery": 3,
+        "candidate-data": 2,
+        "pool": 1,
+    }.get(str(record.get("prefetchSource", "")), 0)
+    return (
+        source_priority,
+        bounded_int(record.get("retainScore", 0), 0, 100),
+        bounded_int(record.get("monitorScore", 0), 0, 100),
+        bounded_int(record.get("totalScore", 0), 0, 100),
+    )
+
+
+def merge_prefetch_record_maps(existing: dict, incoming: dict) -> dict:
+    if candidate_prefetch_record_priority(incoming) >= candidate_prefetch_record_priority(existing):
+        merged = {**existing, **incoming}
+    else:
+        merged = {**incoming, **existing}
+    for key in ("price", "change", "updated", "lastSeenAt"):
+        if not merged.get(key) and (existing.get(key) or incoming.get(key)):
+            merged[key] = existing.get(key) or incoming.get(key)
+    merged["themes"] = unique_texts(
+        [
+            *text_list(existing.get("themes", []), limit=12),
+            *text_list(incoming.get("themes", []), limit=12),
+        ],
+        limit=12,
+    )
+    return merged
+
+
+def candidate_prefetch_queue_records(limit: int, seed_candidates: list[dict] | None = None) -> tuple[list[dict], dict]:
     selected_limit = max(0, limit)
     if selected_limit <= 0:
         return [], {"enabled": True, "limit": selected_limit, "scanCount": 0, "selectedCount": 0}
 
     scan_limit = max(selected_limit, min(SIGNAL_CANDIDATE_POOL_SCAN_LIMIT, max(selected_limit * 4, selected_limit)))
-    records = candidate_pool_retainable_records(limit=scan_limit)
+    pool_records = candidate_pool_retainable_records(limit=scan_limit)
+    stored_records = candidate_prefetch_records_from_candidates(
+        list(stored_candidate_data_latest_records().values()),
+        "candidate-data",
+        limit=scan_limit,
+    )
+    latest_records = latest_discovery_candidate_prefetch_records(scan_limit)
+    seed_records = candidate_prefetch_records_from_candidates(seed_candidates, "current-discovery", limit=scan_limit)
+
+    source_counts = {
+        "pool": len(pool_records),
+        "candidateData": len(stored_records),
+        "latestDiscovery": len(latest_records),
+        "currentDiscovery": len(seed_records),
+    }
+    records_by_symbol: dict[str, dict] = {}
+    for source_records in (pool_records, stored_records, latest_records, seed_records):
+        for record in source_records:
+            symbol = str(record.get("symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            item = dict(record)
+            item["symbol"] = symbol
+            if symbol in records_by_symbol:
+                records_by_symbol[symbol] = merge_prefetch_record_maps(records_by_symbol[symbol], item)
+            else:
+                records_by_symbol[symbol] = item
+    records = list(records_by_symbol.values())
     if not records:
         return [], {
             "enabled": True,
             "limit": selected_limit,
             "scanLimit": scan_limit,
             "scanCount": 0,
+            "sourceCounts": source_counts,
             "selectedCount": 0,
-            "message": "보강할 후보 풀 종목이 아직 없습니다.",
+            "message": "보강할 후보 종목이 아직 없습니다.",
         }
 
     candidate_records = stored_candidate_data_latest_records()
@@ -9495,12 +9680,13 @@ def candidate_prefetch_queue_records(limit: int) -> tuple[list[dict], dict]:
         "limit": selected_limit,
         "scanLimit": scan_limit,
         "scanCount": len(records),
+        "sourceCounts": source_counts,
         "selectedCount": len(selected),
         "missingPriorityCount": missing_priority_count,
         "selectedMissingPriorityCount": len([item for item in selected if bounded_int(item.get("prefetchGapScore", 0), 0, 160) > 0]),
         "gapReasonCounts": dict(sorted(reason_counts.items(), key=lambda pair: pair[1], reverse=True)[:12]),
         "topSymbols": top_symbols,
-        "message": "미수신·제한·오래된 후보를 우선 보강하도록 큐를 정렬했습니다.",
+        "message": "현재 발굴 후보와 저장 후보를 함께 보강 큐에 넣고 미수신·제한·오래된 항목을 우선 정렬했습니다.",
     }
 
 
@@ -13188,7 +13374,12 @@ def prefetch_enrichment_status(source: str, error: Exception, message: str) -> d
     }
 
 
-def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market: dict | None = None) -> dict:
+def prefetch_candidate_pool_market_data(
+    mode: str,
+    trigger: str = "bot",
+    market: dict | None = None,
+    seed_candidates: list[dict] | None = None,
+) -> dict:
     if not SIGNAL_CANDIDATE_PREFETCH_ENABLED:
         return {
             "enabled": False,
@@ -13197,16 +13388,17 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
             "message": "후보 풀 사전 보강이 꺼져 있습니다.",
         }
 
-    records, queue_status = candidate_prefetch_queue_records(SIGNAL_CANDIDATE_PREFETCH_LIMIT)
+    records, queue_status = candidate_prefetch_queue_records(SIGNAL_CANDIDATE_PREFETCH_LIMIT, seed_candidates=seed_candidates)
     if not records:
         return {
             "enabled": True,
             "mode": mode,
             "trigger": trigger,
+            "seedCandidateCount": len(seed_candidates or []),
             "inputCount": 0,
             "prefetchedCount": 0,
             "queue": queue_status,
-            "message": "보강할 후보 풀 종목이 아직 없습니다.",
+            "message": "보강할 후보 종목이 아직 없습니다.",
         }
 
     data = seed_data()
@@ -13275,6 +13467,7 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
         "enabled": True,
         "mode": mode,
         "trigger": trigger,
+        "seedCandidateCount": len(seed_candidates or []),
         "inputCount": len(records),
         "prefetchedCount": len(candidates),
         "limit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
@@ -13775,6 +13968,7 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             selected_mode,
             trigger=trigger,
             market=payload.get("market", {}),
+            seed_candidates=payload.get("candidates", []),
         )
         payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
         post_prefetch_status = refresh_discovery_payload_after_prefetch(payload, selected_mode, trigger)
