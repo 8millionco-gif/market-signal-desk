@@ -210,11 +210,11 @@ function changeMissingText(item) {
   const freshness = priceFreshnessInfo(item);
   if (livePrice.changeSource === "pending-change" || livePrice.changeSource === "missing") {
     if (hasLivePrice && freshness.isBaseline) return "마감 등락률 확인중";
-    return hasLivePrice ? "등락률 확인중" : "미수신";
+    return hasLivePrice ? "등락률 수집중" : "가격 수집중";
   }
   if (livePrice.source === "toss" && (!item?.change || item.change === "-")) {
     if (hasLivePrice && freshness.isBaseline) return "마감 등락률 확인중";
-    return hasLivePrice ? "등락률 확인중" : "미수신";
+    return hasLivePrice ? "등락률 수집중" : "가격 수집중";
   }
   return "";
 }
@@ -226,7 +226,7 @@ function displayCandidateChangeText(item) {
 
 function candidateChangeClass(item) {
   const text = displayCandidateChangeText(item);
-  if (text === "미수신") return "change-missing";
+  if (text.includes("수집")) return "change-missing";
   if (text.includes("확인")) return "change-wait";
   return changeClass(item?.change);
 }
@@ -874,7 +874,7 @@ function incomingLivePriceMissing(incoming) {
 
 function currentChangeStillUsable(current) {
   const display = displayChangeText(current?.change);
-  if (!current?.change || !display || display === "-" || display === "미수신") return false;
+  if (!current?.change || !display || display === "-" || display.includes("수집")) return false;
   const livePrice = current?.livePrice ?? {};
   if (livePrice.source !== "toss") return true;
   const ageSeconds = livePriceAgeSeconds(livePrice);
@@ -905,8 +905,8 @@ function mergeLiveCandidate(current, incoming) {
     !retainCurrentPrice &&
     currentChangeStillUsable(current) &&
     incomingChangeMissing(incoming);
-  const priceRetainedFields = new Set(["price", "change", "updated", "livePrice", "priceReaction"]);
-  const changeRetainedFields = new Set(["change", "priceReaction"]);
+  const priceRetainedFields = new Set(["price", "change", "updated", "livePrice", "dataCompleteness", "priceReadiness", "evaluationMode", "priceReaction", "qualityGate", "finalDecision", "signalValidation"]);
+  const changeRetainedFields = new Set(["change", "priceReaction", "dataCompleteness", "priceReadiness", "evaluationMode", "qualityGate", "finalDecision", "signalValidation"]);
   const liveFields = [
     "price",
     "change",
@@ -916,7 +916,17 @@ function mergeLiveCandidate(current, incoming) {
     "liveCandles",
     "liveOrderbook",
     "liveTrades",
-    "priceReaction"
+    "dataCompleteness",
+    "priceReadiness",
+    "evaluationMode",
+    "priceReaction",
+    "qualityGate",
+    "finalDecision",
+    "signalValidation",
+    "dataConfidence",
+    "sourceReliability",
+    "decisionGroup",
+    "candidateCompression"
   ];
   liveFields.forEach((key) => {
     if (retainCurrentPrice && priceRetainedFields.has(key)) return;
@@ -977,7 +987,12 @@ function livePriceSummaryPatch(summary) {
     "stableDecisionCount",
     "finalDecisionStabilitySeconds",
     "candidateDataCarriedForwardCount",
-    "candidateDataCarriedForwardFields"
+    "candidateDataCarriedForwardFields",
+    "evaluationModeCounts",
+    "tradeEvaluationReadyCount",
+    "baselineEvaluationCount",
+    "serverCollectingCount",
+    "unavailableEvaluationCount"
   ];
   return allowedKeys.reduce((patch, key) => {
     if (source[key] !== undefined) patch[key] = source[key];
@@ -1555,6 +1570,32 @@ function signalValidationForDisplay(item) {
   };
 }
 
+function evaluationModeForDisplay(item) {
+  const mode = item?.evaluationMode ?? item?.finalDecision?.evaluationMode ?? {};
+  const readiness = item?.priceReadiness ?? {};
+  const key = mode.key || readiness.key || "collecting";
+  const fallback = {
+    entry_ready: ["실시간 평가 가능", "ready", "서버가 가격·등락률·거래 반응을 확보했습니다."],
+    closed_baseline: ["장마감 기준", "baseline", "직전 정규장 가격 기준입니다. 신규 진입은 개장 후 확인합니다."],
+    display_ready: ["후보 분석 가능", "analysis", "가격과 재료는 확보됐지만 거래 반응 보강 전까지 진입 후보로 올리지 않습니다."],
+    collecting_change: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
+    change_wait: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
+    collecting_price: ["가격 수집 중", "collecting", "토스 가격 또는 마감가 기준을 서버가 보강 중입니다."],
+    price_wait: ["가격 수집 중", "collecting", "토스 가격 또는 마감가 기준을 서버가 보강 중입니다."],
+    collecting: ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."],
+    unavailable: ["평가 불가", "blocked", "필수 데이터가 부족해 현재 후보 평가는 참고용입니다."]
+  }[key] || ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."];
+  return {
+    key,
+    label: mode.label || readiness.label || fallback[0],
+    status: mode.status || fallback[1],
+    message: mode.message || readiness.message || fallback[2],
+    tradeEligible: Boolean(mode.tradeEligible || readiness.entryReady),
+    rankEligible: Boolean(mode.rankEligible || readiness.displayReady),
+    missing: Array.isArray(mode.missing) ? mode.missing : Array.isArray(readiness.missing) ? readiness.missing : []
+  };
+}
+
 function reactionGateLabel(value) {
   if (value === "confirmed") return "반응 확인";
   if (value === "watch") return "관찰 지속";
@@ -1747,6 +1788,7 @@ function reactionStageForDisplay(item) {
   const reaction = item?.priceReaction ?? {};
   const decision = reaction.decision ?? {};
   const metrics = reaction.metrics ?? {};
+  const evaluation = evaluationModeForDisplay(item);
   const serverCriteria = Array.isArray(reaction.entryCriteria) ? reaction.entryCriteria.filter(Boolean) : [];
   const confirmationCount = Number(metrics.confirmationCount ?? 0);
   const requiredConfirmations = Number(metrics.requiredConfirmations ?? 2);
@@ -1762,7 +1804,16 @@ function reactionStageForDisplay(item) {
   let label = decision.label || reaction.decisionLabel || "가격 확인 필요";
   let tone = decision.tone || "wait";
   let summary = decision.summary || reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
-  if (decision.key) {
+  if (evaluation.status === "collecting" || evaluation.status === "blocked") {
+    label = evaluation.label;
+    tone = "wait";
+    summary = evaluation.message;
+  } else if (evaluation.status === "baseline") {
+    label = "장마감 기준";
+    tone = "wait";
+    summary = evaluation.message;
+  }
+  if (decision.key && !["collecting", "blocked", "baseline"].includes(evaluation.status)) {
     if (decision.key === "blocked") tone = "risk";
     else if (decision.key === "confirmed") tone = "buy";
     else if (decision.key === "watch") tone = "watch";
@@ -1816,6 +1867,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   const reaction = item?.priceReaction ?? {};
   const reactionDecision = reaction.decision ?? {};
   const freshness = priceFreshnessInfo(item);
+  const evaluation = evaluationModeForDisplay(item);
   if (plan.tone === "sell") {
     return { key: "sell", label: "분할매도 점검", detail: plan.summary || "보유 수익을 점검합니다." };
   }
@@ -1824,6 +1876,15 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   }
   if (reactionDecision.key === "blocked") {
     return { key: "avoid", label: reactionDecision.action || "오늘 제외", detail: reactionDecision.summary || "가격 반응이 차단되어 신규 진입하지 않습니다." };
+  }
+  if (evaluation.status === "collecting" || evaluation.status === "blocked") {
+    return { key: "wait", label: evaluation.label, detail: evaluation.message };
+  }
+  if (evaluation.status === "baseline" && !selectedHoldingFor(item)) {
+    return { key: "wait", label: "장마감 기준", detail: evaluation.message };
+  }
+  if (evaluation.status === "analysis" && decision.actionKey === "verify") {
+    return { key: "wait", label: evaluation.label, detail: evaluation.message };
   }
   if (["wait", "watch"].includes(reactionDecision.key) && !reactionDecision.tradeAllowed && (decision.actionKey === "buy" || gate.key === "actionable")) {
     return { key: "wait", label: reactionDecision.label || "반응 대기", detail: reactionDecision.summary || "가격·거래량 반응을 더 확인합니다." };
@@ -2990,6 +3051,18 @@ function renderMetrics() {
       reactionGates.confirmed || reactionGates.watch || reactionGates.wait || reactionGates.blocked || summary.priceReactionEntryBlockedCount
         ? ` · 반응게이트 확인 ${reactionGates.confirmed ?? 0} · 관찰 ${reactionGates.watch ?? 0} · 대기 ${reactionGates.wait ?? 0} · 차단 ${reactionGates.blocked ?? 0} · 진입차단 ${summary.priceReactionEntryBlockedCount ?? 0}`
         : "";
+    const evaluationCounts = summary.evaluationModeCounts ?? {};
+    const realtimeEvaluationReady = Number(summary.tradeEvaluationReadyCount ?? evaluationCounts.entry_ready ?? 0);
+    const baselineEvaluation = Number(summary.baselineEvaluationCount ?? evaluationCounts.closed_baseline ?? 0);
+    const serverCollecting = Number(
+      summary.serverCollectingCount ??
+      ((evaluationCounts.collecting_change ?? 0) + (evaluationCounts.collecting_price ?? 0) + (evaluationCounts.collecting ?? 0))
+    );
+    const unavailableEvaluation = Number(summary.unavailableEvaluationCount ?? evaluationCounts.unavailable ?? 0);
+    const evaluationText =
+      realtimeEvaluationReady || baselineEvaluation || serverCollecting || unavailableEvaluation
+        ? ` · 평가 실시간 ${realtimeEvaluationReady} · 마감기준 ${baselineEvaluation} · 서버수집 ${serverCollecting} · 불가 ${unavailableEvaluation}`
+        : "";
     const priceReadiness = summary.priceReadinessCounts ?? {};
     const entryDataReady = Number(summary.entryDataReadyCount ?? priceReadiness.entry_ready ?? 0);
     const closedBaselineCount = Number(summary.closedBaselineCandidateCount ?? priceReadiness.closed_baseline ?? 0);
@@ -2997,7 +3070,9 @@ function renderMetrics() {
     const priceWaitCount = Number(summary.priceBasisWaitCount ?? priceReadiness.price_wait ?? 0);
     const changeWaitCount = Number(summary.changeWaitCount ?? priceReadiness.change_wait ?? 0);
     const priceReadyText =
-      entryDataReady || closedBaselineCount || displayDataReady || priceWaitCount || changeWaitCount
+      evaluationText
+        ? evaluationText
+        : entryDataReady || closedBaselineCount || displayDataReady || priceWaitCount || changeWaitCount
         ? ` · 가격준비 진입 ${entryDataReady} · 마감가 ${closedBaselineCount} · 표시 ${displayDataReady} · 가격대기 ${priceWaitCount} · 등락대기 ${changeWaitCount}`
         : "";
     const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";

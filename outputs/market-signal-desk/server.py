@@ -3179,7 +3179,11 @@ def candidate_has_usable_price_basis(candidate: dict) -> bool:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice"):
-        return bool(freshness.get("usableForBaseline") or freshness.get("usableForReaction"))
+        return bool(
+            freshness.get("usableForBaseline")
+            or freshness.get("usableForReaction")
+            or str(freshness.get("status", "")) == "closed-baseline"
+        )
     return display_number_to_decimal(candidate.get("price")) is not None
 
 
@@ -3962,6 +3966,9 @@ LIVE_STATE_CANDIDATE_FIELDS = [
     "signalValidation",
     "dataConfidence",
     "sourceReliability",
+    "dataCompleteness",
+    "priceReadiness",
+    "evaluationMode",
     "decisionGroup",
     "candidateCompression",
     "score",
@@ -4279,17 +4286,17 @@ def candidate_price_readiness(candidate: dict) -> dict:
     entry_ready = bool(completeness.get("entryReady"))
     status = str(freshness.get("status", "missing"))
     if entry_ready:
-        key, label, message = "entry_ready", "진입 데이터 준비", "가격·등락률·거래 반응 데이터가 모두 확인되었습니다."
+        key, label, message = "entry_ready", "실시간 평가 가능", "가격·등락률·거래 반응 데이터가 모두 확인되었습니다."
     elif display_ready and status == "closed-baseline":
         key, label, message = "closed_baseline", "마감가 기준", "직전 정규장 가격 기준은 확보됐지만 실시간 진입은 개장 후 확인합니다."
     elif display_ready:
-        key, label, message = "display_ready", "분석 데이터 준비", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
+        key, label, message = "display_ready", "후보 분석 가능", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
     elif price_ok and not change_ok:
-        key, label, message = "change_wait", "등락률 확인 중", "현재가는 있으나 등락률이 없어 가격 반응 판단을 보류합니다."
+        key, label, message = "change_wait", "등락률 수집 중", "현재가는 있으나 등락률이 없어 서버 보강 전까지 가격 반응 판단을 보류합니다."
     elif not price_ok:
-        key, label, message = "price_wait", "가격 기준 대기", "현재가 또는 마감가 기준이 없어 후보 평가를 보류합니다."
+        key, label, message = "price_wait", "가격 수집 중", "현재가 또는 마감가 기준이 없어 서버 보강 전까지 후보 평가를 보류합니다."
     else:
-        key, label, message = "collecting", "데이터 수집 중", "가격·뉴스·공시 데이터를 수집한 뒤 판단합니다."
+        key, label, message = "collecting", "서버 수집 중", "가격·뉴스·공시 데이터를 수집한 뒤 판단합니다."
     return {
         "key": key,
         "label": label,
@@ -4301,6 +4308,80 @@ def candidate_price_readiness(candidate: dict) -> dict:
         "freshnessStatus": status,
         "missing": unique_texts(missing, limit=8),
     }
+
+
+def candidate_evaluation_mode(candidate: dict) -> dict:
+    readiness = candidate.get("priceReadiness", {}) if isinstance(candidate.get("priceReadiness"), dict) else candidate_price_readiness(candidate)
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    key = str(readiness.get("key", "collecting"))
+    missing = unique_texts(readiness.get("missing", []) if isinstance(readiness.get("missing"), list) else [], limit=6)
+    base = {
+        "entry_ready": {
+            "key": "entry_ready",
+            "label": "실시간 평가 가능",
+            "status": "ready",
+            "message": "서버가 가격·등락률·거래 반응을 확보해 진입 판단에 사용할 수 있습니다.",
+            "tradeEligible": True,
+            "rankEligible": True,
+        },
+        "closed_baseline": {
+            "key": "closed_baseline",
+            "label": "장마감 기준",
+            "status": "baseline",
+            "message": "직전 정규장 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다.",
+            "tradeEligible": False,
+            "rankEligible": True,
+        },
+        "display_ready": {
+            "key": "display_ready",
+            "label": "후보 분석 가능",
+            "status": "analysis",
+            "message": "가격과 재료는 확보됐지만 차트·호가·체결 보강 전까지 진입 후보로 올리지 않습니다.",
+            "tradeEligible": False,
+            "rankEligible": True,
+        },
+        "change_wait": {
+            "key": "collecting_change",
+            "label": "등락률 수집 중",
+            "status": "collecting",
+            "message": "현재가는 들어왔지만 등락률 기준이 없어 서버가 전일 대비와 기준가를 보강 중입니다.",
+            "tradeEligible": False,
+            "rankEligible": False,
+        },
+        "price_wait": {
+            "key": "collecting_price",
+            "label": "가격 수집 중",
+            "status": "collecting",
+            "message": "현재가 또는 마감가 기준이 없어 서버가 토스 시세를 다시 수집 중입니다.",
+            "tradeEligible": False,
+            "rankEligible": False,
+        },
+        "collecting": {
+            "key": "collecting",
+            "label": "서버 수집 중",
+            "status": "collecting",
+            "message": "가격·뉴스·공시 중 필수 데이터가 부족해 서버 보강 후 평가합니다.",
+            "tradeEligible": False,
+            "rankEligible": False,
+        },
+    }.get(key, {
+        "key": "unavailable",
+        "label": "평가 불가",
+        "status": "blocked",
+        "message": "필수 데이터가 부족해 현재 후보 평가는 참고용으로만 표시합니다.",
+        "tradeEligible": False,
+        "rankEligible": False,
+    })
+    mode = dict(base)
+    mode["sourceKey"] = key
+    mode["missing"] = missing
+    mode["priceOk"] = bool(completeness.get("priceOk"))
+    mode["changeOk"] = bool(completeness.get("changeOk"))
+    mode["displayReady"] = bool(completeness.get("displayReady"))
+    mode["entryReady"] = bool(completeness.get("entryReady"))
+    if missing and mode["status"] == "collecting":
+        mode["message"] = f"{', '.join(missing[:4])} 보강 후 평가합니다."
+    return mode
 
 
 def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_text: str) -> dict | None:
@@ -4325,6 +4406,7 @@ def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_t
         "preopenPriority": candidate.get("preopenPriority", 0),
         "score": compact_raw_payload(candidate.get("score", {}), list_limit=20),
         "priceReadiness": compact_raw_payload(candidate_price_readiness(candidate), list_limit=20),
+        "evaluationMode": compact_raw_payload(candidate_evaluation_mode(candidate), list_limit=20),
         "livePrice": compact_raw_payload(candidate.get("livePrice", {}), list_limit=20),
         "liveCandles": compact_raw_payload(candidate.get("liveCandles", {}), list_limit=20),
         "liveOrderbook": compact_raw_payload(candidate.get("liveOrderbook", {}), list_limit=20),
@@ -6561,6 +6643,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     has_live_price = candidate_has_fresh_live_price(candidate)
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
     price_readiness = candidate_price_readiness(candidate)
+    evaluation_mode = candidate_evaluation_mode(candidate)
     display_data_ready = bool(completeness.get("displayReady"))
     entry_data_ready = bool(completeness.get("entryReady"))
     missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
@@ -6579,17 +6662,17 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
     elif not display_data_ready:
-        key, label, priority = "defer", price_readiness["label"], 3
-        reasons.append(price_readiness["message"])
+        key, label, priority = "defer", evaluation_mode["label"], 3
+        reasons.append(evaluation_mode["message"])
     elif group_key == "action" and not entry_data_ready:
-        key, label, priority = "defer", "데이터 보강 대기", 3
+        key, label, priority = "defer", evaluation_mode["label"], 3
         if missing_data:
-            reasons.append(f"진입 필수 데이터 미완성: {', '.join(str(item) for item in missing_data[:4])}")
+            reasons.append(f"진입 필수 데이터 보강 중: {', '.join(str(item) for item in missing_data[:4])}")
         else:
             reasons.append("진입 판단 전 가격·등락률·거래 반응 데이터 보강 필요")
     elif group_key in {"hidden", "momentum"} and not entry_data_ready:
-        key, label, priority = "defer", price_readiness["label"], 3
-        reasons.append(price_readiness["message"])
+        key, label, priority = "defer", evaluation_mode["label"], 3
+        reasons.append(evaluation_mode["message"])
     elif reaction_gate == "blocked":
         key, label, priority = "exclude", "가격 반응 차단", 4
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
@@ -6769,6 +6852,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         official_signal = official_event_signal(candidate)
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
     price_readiness = candidate_price_readiness(candidate)
+    evaluation_mode = candidate_evaluation_mode(candidate)
     display_data_ready = bool(completeness.get("displayReady"))
     entry_data_ready = bool(completeness.get("entryReady"))
     missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
@@ -6801,15 +6885,15 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
             action_key, action, tone = "hold", "보유 유지", "wait"
             summary = "보유 종목은 신규 진입보다 기존 수익률, 비중, 가격 반응을 기준으로 관리합니다."
     elif not has_price:
-        action_key, action, tone = "verify", "확인 대기", "wait"
-        summary = "현재가가 확인되지 않아 매수·대기·손절 기준을 확정하지 않습니다."
+        action_key, action, tone = "verify", evaluation_mode["label"], "wait"
+        summary = evaluation_mode["message"]
     elif not display_data_ready:
-        action_key, action, tone = "verify", "데이터 보강 대기", "wait"
+        action_key, action, tone = "verify", evaluation_mode["label"], "wait"
         missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "필수 데이터"
-        summary = f"{missing_text} 확인 전까지 신규 진입 판단을 확정하지 않습니다."
+        summary = evaluation_mode["message"] or f"{missing_text} 확인 전까지 신규 진입 판단을 확정하지 않습니다."
     elif not entry_data_ready:
-        action_key, action, tone = "verify", price_readiness["label"], "wait"
-        summary = price_readiness["message"]
+        action_key, action, tone = "verify", evaluation_mode["label"], "wait"
+        summary = evaluation_mode["message"]
     elif gate_key == "actionable" and not entry_data_ready:
         action_key, action, tone = "verify", "반응 데이터 대기", "wait"
         missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "가격·거래 반응"
@@ -6921,6 +7005,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         "reactionScore": reaction_score,
         "reactionLabel": reaction.get("label", ""),
         "reactionGate": reaction_gate,
+        "evaluationMode": evaluation_mode,
         "officialSignal": official_signal,
         "portfolioAware": is_held,
         "holdingJudgement": holding_judgement if is_held else "",
@@ -8345,6 +8430,15 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "price_wait": 0,
         "collecting": 0,
     }
+    evaluation_mode_counts = {
+        "entry_ready": 0,
+        "closed_baseline": 0,
+        "display_ready": 0,
+        "collecting_change": 0,
+        "collecting_price": 0,
+        "collecting": 0,
+        "unavailable": 0,
+    }
     final_decision_counts = {
         "buy": 0,
         "add": 0,
@@ -8423,8 +8517,11 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["preopenPriority"] = preopen_priority
         item["dataCompleteness"] = candidate_data_completeness(item)
         item["priceReadiness"] = candidate_price_readiness(item)
+        item["evaluationMode"] = candidate_evaluation_mode(item)
         readiness_key = str(item["priceReadiness"].get("key", "collecting"))
         price_readiness_counts[readiness_key] = price_readiness_counts.get(readiness_key, 0) + 1
+        evaluation_key = str(item["evaluationMode"].get("key", "collecting"))
+        evaluation_mode_counts[evaluation_key] = evaluation_mode_counts.get(evaluation_key, 0) + 1
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
         source_reliability = candidate_source_reliability(item)
@@ -8515,6 +8612,15 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "priceReactionCounts": reaction_counts,
         "priceReactionGateCounts": reaction_gate_counts,
         "priceReadinessCounts": price_readiness_counts,
+        "evaluationModeCounts": evaluation_mode_counts,
+        "tradeEvaluationReadyCount": evaluation_mode_counts.get("entry_ready", 0),
+        "baselineEvaluationCount": evaluation_mode_counts.get("closed_baseline", 0),
+        "serverCollectingCount": (
+            evaluation_mode_counts.get("collecting_change", 0)
+            + evaluation_mode_counts.get("collecting_price", 0)
+            + evaluation_mode_counts.get("collecting", 0)
+        ),
+        "unavailableEvaluationCount": evaluation_mode_counts.get("unavailable", 0),
         "entryDataReadyCount": price_readiness_counts.get("entry_ready", 0),
         "closedBaselineCandidateCount": price_readiness_counts.get("closed_baseline", 0),
         "displayDataReadyCount": (
@@ -11277,6 +11383,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
             "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
             "priceReadinessCounts": selection_status.get("priceReadinessCounts", {}),
+            "evaluationModeCounts": selection_status.get("evaluationModeCounts", {}),
+            "tradeEvaluationReadyCount": selection_status.get("tradeEvaluationReadyCount"),
+            "baselineEvaluationCount": selection_status.get("baselineEvaluationCount"),
+            "serverCollectingCount": selection_status.get("serverCollectingCount"),
+            "unavailableEvaluationCount": selection_status.get("unavailableEvaluationCount"),
             "entryDataReadyCount": selection_status.get("entryDataReadyCount"),
             "closedBaselineCandidateCount": selection_status.get("closedBaselineCandidateCount"),
             "displayDataReadyCount": selection_status.get("displayDataReadyCount"),
@@ -11804,6 +11915,11 @@ def dashboard_summary(payload: dict) -> dict:
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
         "priceReactionGateCounts": summary.get("priceReactionGateCounts", {}),
         "priceReadinessCounts": summary.get("priceReadinessCounts", {}),
+        "evaluationModeCounts": summary.get("evaluationModeCounts", {}),
+        "tradeEvaluationReadyCount": summary.get("tradeEvaluationReadyCount"),
+        "baselineEvaluationCount": summary.get("baselineEvaluationCount"),
+        "serverCollectingCount": summary.get("serverCollectingCount"),
+        "unavailableEvaluationCount": summary.get("unavailableEvaluationCount"),
         "entryDataReadyCount": summary.get("entryDataReadyCount"),
         "closedBaselineCandidateCount": summary.get("closedBaselineCandidateCount"),
         "displayDataReadyCount": summary.get("displayDataReadyCount"),
@@ -12502,6 +12618,11 @@ def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
             "averagePriceReaction": selection_status.get("averagePriceReaction"),
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
             "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+            "evaluationModeCounts": selection_status.get("evaluationModeCounts", {}),
+            "tradeEvaluationReadyCount": selection_status.get("tradeEvaluationReadyCount"),
+            "baselineEvaluationCount": selection_status.get("baselineEvaluationCount"),
+            "serverCollectingCount": selection_status.get("serverCollectingCount"),
+            "unavailableEvaluationCount": selection_status.get("unavailableEvaluationCount"),
             "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
@@ -12569,6 +12690,11 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
         "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
         "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
         "priceReadinessCounts": selection_status.get("priceReadinessCounts", {}),
+        "evaluationModeCounts": selection_status.get("evaluationModeCounts", {}),
+        "tradeEvaluationReadyCount": selection_status.get("tradeEvaluationReadyCount"),
+        "baselineEvaluationCount": selection_status.get("baselineEvaluationCount"),
+        "serverCollectingCount": selection_status.get("serverCollectingCount"),
+        "unavailableEvaluationCount": selection_status.get("unavailableEvaluationCount"),
         "entryDataReadyCount": selection_status.get("entryDataReadyCount"),
         "closedBaselineCandidateCount": selection_status.get("closedBaselineCandidateCount"),
         "displayDataReadyCount": selection_status.get("displayDataReadyCount"),
