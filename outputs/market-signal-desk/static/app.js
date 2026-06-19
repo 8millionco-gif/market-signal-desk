@@ -627,6 +627,9 @@ function candidatePoolStateForDisplay(item) {
     peakConfidenceScore: Number(pool.peakConfidenceScore ?? 0),
     peakReactionScore: Number(pool.peakReactionScore ?? 0),
     peakEvidenceScore: Number(pool.peakEvidenceScore ?? 0),
+    monitorScore: Number(pool.monitorScore ?? memory.monitorScore ?? 0),
+    monitorLabel: pool.monitorLabel || memory.monitorLabel || "",
+    monitorReason: pool.monitorReason || memory.monitorReason || "",
     scoreDelta: Number(pool.scoreDelta ?? 0),
     momentumLabel: pool.momentumLabel || "",
     performanceMeasuredCount: Number(pool.performanceMeasuredCount ?? memory.performanceMeasuredCount ?? 0),
@@ -940,13 +943,15 @@ function renderCandidatePoolStatus() {
   const retained = Number(summary.candidatePoolRetainedScanCount ?? 0);
   const improving = Number(summary.candidatePoolImprovingCount ?? pool.improvingCount ?? 0);
   const weakening = Number(summary.candidatePoolWeakeningCount ?? pool.weakeningCount ?? 0);
+  const monitorReady = Number(summary.candidatePoolMonitorReadyCount ?? pool.monitorReadyCount ?? 0);
+  const monitorWait = Number(summary.candidatePoolMonitorWaitCount ?? pool.monitorWaitCount ?? 0);
   const performanceMeasured = Number(summary.candidatePoolPerformanceMeasuredCount ?? pool.performanceMeasuredCount ?? 0);
   const performanceHitRate = summary.candidatePoolPerformanceHitRate ?? pool.performanceHitRate ?? "-";
   const performanceAverage = summary.candidatePoolPerformanceAverageChange ?? pool.performanceAverageChange ?? "-";
   const topText = top.length
     ? top
         .slice(0, 2)
-        .map((item) => `${item.name || item.symbol} ${item.stateLabel || ""} ${item.peakScore ?? item.score ?? "-"}점`)
+        .map((item) => `${item.name || item.symbol} ${item.monitorLabel || item.stateLabel || ""} ${item.monitorScore ?? item.peakScore ?? item.score ?? "-"}점`)
         .join(" · ")
     : "상위 관찰 후보 없음";
   const rows = [
@@ -954,6 +959,7 @@ function renderCandidatePoolStatus() {
     ["진입/검증", (counts.entry_candidate ?? 0) + (counts.validating ?? 0) > 0, `진입 ${counts.entry_candidate ?? 0} · 검증 ${counts.validating ?? 0}`],
     ["눌림/관찰", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `눌림 ${counts.pullback_wait ?? 0} · 관찰 ${counts.watching ?? 0}`],
     ["재점검", retained > 0 || selected > 0, `스캔 ${retained} · 선정 ${selected}`],
+    ["우선 감시", monitorReady > 0 || monitorWait > 0, `우선 ${monitorReady} · 대기 ${monitorWait}`],
     ["흐름", improving >= weakening, `개선 ${improving} · 약화 ${weakening}`],
     ["성과", performanceMeasured > 0, `${performanceMeasured}건 · 승률 ${performanceHitRate} · 평균 ${performanceAverage}`],
     ["상위", top.length > 0, topText]
@@ -3733,6 +3739,7 @@ function candidatePoolSection(item) {
     ["관측 횟수", pool.observations ? `${pool.observations}회` : "-"],
     ["선정 횟수", pool.selectedCount ? `${pool.selectedCount}회` : "-"],
     ["재점검 점수", pool.retained && pool.retainScore ? `${pool.retainScore}/100` : "-"],
+    ["재검토 우선도", pool.monitorScore ? `${pool.monitorLabel || "재검토"} · ${pool.monitorScore}/100` : "-"],
     ["최고 점수", pool.peakScore ? `${pool.peakScore}/100` : "-"],
     ["최고 준비도", pool.peakReadiness ? `${pool.peakReadiness}/100` : "-"],
     ["상태 변화", `${pool.promotionCount}회 승격 · ${pool.demotionCount}회 강등`],
@@ -3756,6 +3763,7 @@ function candidatePoolSection(item) {
       </div>
       <ul class="bullet-list">
         <li>${escapeHtml(pool.reason)}</li>
+        ${pool.monitorReason ? `<li>${escapeHtml(`재검토 이유: ${pool.monitorReason}`)}</li>` : ""}
         ${pool.retained ? `<li>${escapeHtml(pool.retainReason || `${pool.retainStateLabel || "후보 풀"} 상태로 재점검 대상입니다.`)}</li>` : ""}
         ${
           pool.performanceMeasuredCount

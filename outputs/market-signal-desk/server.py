@@ -5610,8 +5610,18 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
         "newsItems": bounded_int(discovery.get("newsItems", existing.get("newsItems", 0)), 0, 100_000),
         "materialNewsItems": bounded_int(discovery.get("materialNewsItems", existing.get("materialNewsItems", 0)), 0, 100_000),
         "qualityTier": discovery.get("qualityTier", existing.get("qualityTier", "")),
+        "reactionGate": reaction.get("reactionGate", existing.get("reactionGate", "")),
+        "reactionEntryBlock": bool(reaction.get("entryBlock", existing.get("reactionEntryBlock", False))),
+        "sourceReliabilityScore": bounded_int(
+            candidate.get("sourceReliability", {}).get("score", existing.get("sourceReliabilityScore", 0))
+            if isinstance(candidate.get("sourceReliability"), dict)
+            else existing.get("sourceReliabilityScore", 0),
+            0,
+            100,
+        ),
         "updatedAt": now_text,
     })
+    record.update(candidate_pool_monitor_profile(record))
     if not record.get("firstSeenAt"):
         record["firstSeenAt"] = now_text
     if stage == "selected":
@@ -5783,6 +5793,9 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     performance_neutral_count = 0
     performance_change_weighted_total = Decimal("0")
     performance_latest_at = ""
+    monitor_ready_count = 0
+    monitor_wait_count = 0
+    monitor_weak_count = 0
     top_records: list[dict] = []
     for record in items.values():
         if not isinstance(record, dict):
@@ -5799,6 +5812,16 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
             improving_count += 1
         elif momentum == "약화":
             weakening_count += 1
+        monitor_profile = candidate_pool_monitor_profile(record)
+        monitor_score = bounded_int(monitor_profile.get("monitorScore", record.get("monitorScore", 0)), 0, 100)
+        monitor_label = str(monitor_profile.get("monitorLabel", record.get("monitorLabel", "")))
+        monitor_reason = str(monitor_profile.get("monitorReason", record.get("monitorReason", "")))
+        if monitor_score >= 72:
+            monitor_ready_count += 1
+        elif monitor_score >= 55:
+            monitor_wait_count += 1
+        elif key not in {"excluded", "expired"}:
+            monitor_weak_count += 1
         performance_count = bounded_int(record.get("performanceMeasuredCount", 0), 0, 100_000)
         if performance_count:
             performance_symbol_count += 1
@@ -5823,6 +5846,10 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
                 "readiness": bounded_int(record.get("triggerReadiness", 0), 0, 100),
                 "evidenceScore": bounded_int(record.get("evidenceScore", 0), 0, 100),
                 "reactionScore": bounded_int(record.get("reactionScore", 0), 0, 100),
+                "monitorScore": monitor_score,
+                "monitorLabel": monitor_label,
+                "monitorReason": monitor_reason,
+                "reactionGate": record.get("reactionGate", ""),
                 "observations": bounded_int(record.get("observations", 0), 0, 100_000),
                 "selectedCount": bounded_int(record.get("selectedCount", 0), 0, 100_000),
                 "momentumLabel": momentum,
@@ -5835,6 +5862,7 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
     top_records.sort(
         key=lambda record: (
             candidate_pool_rank(str(record.get("stateKey", ""))),
+            bounded_int(record.get("monitorScore", 0), 0, 100),
             bounded_int(record.get("peakScore", 0), 0, 100),
             bounded_int(record.get("score", 0), 0, 100),
             bounded_int(record.get("evidenceScore", 0), 0, 100),
@@ -5865,6 +5893,9 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         "softDemotionCount": soft_demotion_count,
         "improvingCount": improving_count,
         "weakeningCount": weakening_count,
+        "monitorReadyCount": monitor_ready_count,
+        "monitorWaitCount": monitor_wait_count,
+        "monitorWeakCount": monitor_weak_count,
         "performanceSymbolCount": performance_symbol_count,
         "performanceMeasuredCount": performance_measured_count,
         "performancePositiveCount": performance_positive_count,
@@ -5919,9 +5950,105 @@ def candidate_pool_selection_score(record: dict) -> int:
     )
 
 
+def candidate_pool_monitor_profile(record: dict) -> dict:
+    state_key = str(record.get("stateKey", "collected"))
+    if state_key in {"excluded", "expired"}:
+        return {
+            "monitorScore": 0,
+            "monitorLabel": "감시 제외",
+            "monitorReason": record.get("stateReason", "제외 또는 만료 상태"),
+        }
+
+    selection_score = candidate_pool_selection_score(record)
+    evidence = max(
+        bounded_int(record.get("evidenceScore", 0), 0, 100),
+        bounded_int(record.get("peakEvidenceScore", 0), 0, 100),
+    )
+    reaction = max(
+        bounded_int(record.get("reactionScore", 0), 0, 100),
+        bounded_int(record.get("peakReactionScore", 0), 0, 100),
+    )
+    confidence = max(
+        bounded_int(record.get("confidenceScore", 0), 0, 100),
+        bounded_int(record.get("peakConfidenceScore", 0), 0, 100),
+        bounded_int(record.get("sourceReliabilityScore", 0), 0, 100),
+    )
+    readiness = max(
+        bounded_int(record.get("triggerReadiness", 0), 0, 100),
+        bounded_int(record.get("peakReadiness", 0), 0, 100),
+    )
+    reaction_gate = str(record.get("reactionGate", ""))
+    validation_key = str(record.get("validationKey", ""))
+    final_action = str(record.get("finalActionKey", ""))
+    performance_measured = bounded_int(record.get("performanceMeasuredCount", 0), 0, 100_000)
+    performance_average = (
+        decimal_or_none(record.get("performanceAverageChangeRate"))
+        or display_percent_to_decimal(record.get("performanceAverageChange"))
+        or Decimal("0")
+    )
+    performance_hit_rate = (
+        decimal_or_none(record.get("performanceHitRateValue"))
+        or display_percent_to_decimal(record.get("performanceHitRate"))
+        or Decimal("0")
+    )
+
+    score = selection_score
+    if reaction_gate == "confirmed":
+        score += 8
+    elif reaction_gate == "blocked":
+        score -= 18
+    elif bool(record.get("reactionEntryBlock")):
+        score -= 8
+    if evidence >= 65 and reaction >= 56 and confidence >= 60:
+        score += 8
+    if readiness >= 70:
+        score += 5
+    if str(record.get("momentumLabel", "")) == "개선":
+        score += 4
+    elif str(record.get("momentumLabel", "")) == "약화":
+        score -= 6
+    if performance_measured >= 3 and performance_average <= Decimal("-1") and performance_hit_rate < Decimal("40"):
+        score -= 10
+    elif performance_measured >= 3 and performance_average >= Decimal("1") and performance_hit_rate >= Decimal("50"):
+        score += 6
+
+    score = bounded_int(score, 0, 100)
+    if final_action in {"buy", "add"} or state_key == "entry_candidate":
+        label = "핵심 재검토"
+        reason = "최종 판단 또는 후보 풀 상태가 진입 후보에 가까움"
+    elif evidence >= 65 and reaction_gate != "confirmed":
+        label = "반응 대기"
+        reason = "근거는 있으나 가격·거래량 반응 확인 전"
+    elif reaction_gate == "confirmed" and evidence < 60:
+        label = "근거 보강"
+        reason = "가격은 반응했지만 뉴스·공시 근거 보강 필요"
+    elif state_key == "pullback_wait" or final_action == "pullback":
+        label = "눌림 감시"
+        reason = "재료와 관심은 있으나 추격보다 가격대 확인 필요"
+    elif validation_key in {"evidence_wait", "reaction_only"} or state_key == "validating":
+        label = "검증 지속"
+        reason = "재료와 가격 반응 중 한 축을 계속 확인"
+    elif performance_measured >= 3 and performance_average <= Decimal("-1"):
+        label = "성과 약화"
+        reason = "최근 후보 선정 이후 성과가 약해 재진입 기준 강화"
+    elif score >= 55:
+        label = "관찰 유지"
+        reason = "후보 풀 점수가 유지되어 다음 스캔에서도 확인"
+    else:
+        label = "낮은 우선"
+        reason = "현재는 근거·가격 반응·성과 중 강한 축이 부족"
+
+    return {
+        "monitorScore": score,
+        "monitorLabel": label,
+        "monitorReason": reason,
+    }
+
+
 def candidate_pool_memory_payload(record: dict) -> dict:
     score = bounded_int(record.get("retainScore", candidate_pool_selection_score(record)), 0, 100)
     state_key = str(record.get("stateKey", "collected"))
+    monitor = candidate_pool_monitor_profile(record)
     payload = {
         "retained": True,
         "score": score,
@@ -5932,8 +6059,11 @@ def candidate_pool_memory_payload(record: dict) -> dict:
         "peakReadiness": bounded_int(record.get("peakReadiness", record.get("triggerReadiness", 0)), 0, 100),
         "observations": bounded_int(record.get("observations", 0), 0, 100_000),
         "selectedCount": bounded_int(record.get("selectedCount", 0), 0, 100_000),
+        "monitorScore": monitor.get("monitorScore", 0),
+        "monitorLabel": monitor.get("monitorLabel", ""),
+        "monitorReason": monitor.get("monitorReason", ""),
         "lastSeenAt": record.get("lastSeenAt", ""),
-        "reason": "후보 풀에서 의미 있는 상태가 유지되어 재점검 대상",
+        "reason": monitor.get("monitorReason") or "후보 풀에서 의미 있는 상태가 유지되어 재점검 대상",
     }
     payload.update(candidate_pool_performance_fields(record))
     return payload
@@ -5954,14 +6084,20 @@ def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
         if not symbol or state_key in {"excluded", "expired"}:
             continue
         retain_score = candidate_pool_selection_score(record)
-        if retain_score < SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and state_key not in keep_states:
+        monitor = candidate_pool_monitor_profile(record)
+        monitor_score = bounded_int(monitor.get("monitorScore", 0), 0, 100)
+        if max(retain_score, monitor_score) < SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and state_key not in keep_states:
             continue
         item = dict(record)
         item["symbol"] = symbol
         item["retainScore"] = retain_score
+        item["monitorScore"] = monitor_score
+        item["monitorLabel"] = monitor.get("monitorLabel", item.get("monitorLabel", ""))
+        item["monitorReason"] = monitor.get("monitorReason", item.get("monitorReason", ""))
         records.append(item)
     records.sort(
         key=lambda item: (
+            bounded_int(item.get("monitorScore", 0), 0, 100),
             bounded_int(item.get("retainScore", 0), 0, 100),
             candidate_pool_rank(str(item.get("stateKey", ""))),
             bounded_int(item.get("peakScore", item.get("totalScore", 0)), 0, 100),
@@ -5981,6 +6117,7 @@ def candidate_pool_entry_from_record(record: dict) -> dict:
     headline = str(record.get("headline") or f"{name} 후보 풀 재점검")
     themes = unique_texts(
         [
+            record.get("monitorLabel", ""),
             record.get("stateLabel", ""),
             record.get("finalAction", ""),
             record.get("compressionLabel", ""),
@@ -6129,6 +6266,12 @@ def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "
                     "performanceLatestChangeRate",
                     "performanceLatestOutcome",
                     "performanceLatestAt",
+                    "monitorScore",
+                    "monitorLabel",
+                    "monitorReason",
+                    "reactionGate",
+                    "reactionEntryBlock",
+                    "sourceReliabilityScore",
                     "transitionHistory",
                 ]
                 if key in items[symbol]
@@ -8327,6 +8470,9 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolSoftDemotionCount": pool_status.get("softDemotionCount"),
             "candidatePoolImprovingCount": pool_status.get("improvingCount"),
             "candidatePoolWeakeningCount": pool_status.get("weakeningCount"),
+            "candidatePoolMonitorReadyCount": pool_status.get("monitorReadyCount"),
+            "candidatePoolMonitorWaitCount": pool_status.get("monitorWaitCount"),
+            "candidatePoolMonitorWeakCount": pool_status.get("monitorWeakCount"),
             "candidatePoolPerformanceSymbolCount": pool_status.get("performanceSymbolCount"),
             "candidatePoolPerformanceMeasuredCount": pool_status.get("performanceMeasuredCount"),
             "candidatePoolPerformancePositiveCount": pool_status.get("performancePositiveCount"),
@@ -8585,6 +8731,9 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolSoftDemotionCount": summary.get("candidatePoolSoftDemotionCount"),
         "candidatePoolImprovingCount": summary.get("candidatePoolImprovingCount"),
         "candidatePoolWeakeningCount": summary.get("candidatePoolWeakeningCount"),
+        "candidatePoolMonitorReadyCount": summary.get("candidatePoolMonitorReadyCount"),
+        "candidatePoolMonitorWaitCount": summary.get("candidatePoolMonitorWaitCount"),
+        "candidatePoolMonitorWeakCount": summary.get("candidatePoolMonitorWeakCount"),
         "candidatePoolPerformanceSymbolCount": summary.get("candidatePoolPerformanceSymbolCount"),
         "candidatePoolPerformanceMeasuredCount": summary.get("candidatePoolPerformanceMeasuredCount"),
         "candidatePoolPerformancePositiveCount": summary.get("candidatePoolPerformancePositiveCount"),
