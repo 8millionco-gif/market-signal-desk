@@ -6581,6 +6581,85 @@ STOCK_SEARCH_ALIAS_OVERRIDES = {
 }
 
 
+STOCK_SEARCH_MANUAL_UNIVERSE = [
+    {
+        "symbol": "069500",
+        "name": "KODEX 200",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["코덱스200", "KODEX200", "kodex 200", "코스피200"],
+        "themes": ["ETF", "코스피200"],
+        "focusWeight": 4,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+    {
+        "symbol": "102110",
+        "name": "TIGER 200",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["타이거200", "TIGER200", "tiger 200", "코스피200"],
+        "themes": ["ETF", "코스피200"],
+        "focusWeight": 4,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+    {
+        "symbol": "278530",
+        "name": "KODEX 200TR",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["코덱스200TR", "KODEX200TR", "kodex 200 tr", "코스피200TR"],
+        "themes": ["ETF", "코스피200", "TR"],
+        "focusWeight": 4,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+    {
+        "symbol": "091160",
+        "name": "KODEX 반도체",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["코덱스반도체", "KODEX반도체", "kodex semiconductor", "반도체ETF"],
+        "themes": ["ETF", "반도체"],
+        "focusWeight": 5,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+    {
+        "symbol": "091230",
+        "name": "TIGER 반도체",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["타이거반도체", "TIGER반도체", "tiger semiconductor", "반도체ETF"],
+        "themes": ["ETF", "반도체"],
+        "focusWeight": 5,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+    {
+        "symbol": "360750",
+        "name": "TIGER 미국S&P500",
+        "market": "KR",
+        "category": "domestic",
+        "securityType": "ETF",
+        "aliases": ["타이거미국S&P500", "TIGER미국S&P500", "tiger sp500", "s&p500etf"],
+        "themes": ["ETF", "S&P500", "미국"],
+        "focusWeight": 4,
+        "source": "manual-etf",
+        "sourceLabel": "ETF 검색 마스터",
+    },
+]
+
+
+STOCK_SEARCH_UNIVERSE_CACHE: list[dict] | None = None
+
+
 def hangul_initials(value: str) -> str:
     letters = []
     for char in str(value or ""):
@@ -6626,7 +6705,7 @@ def universe_aliases_for_symbol(symbol: str) -> list[str]:
     normalized_symbol = str(symbol or "").strip().upper()
     if not normalized_symbol:
         return []
-    for entry in universe_data().get("symbols", []):
+    for entry in stock_search_universe_entries():
         if not isinstance(entry, dict):
             continue
         if str(entry.get("symbol", "")).strip().upper() == normalized_symbol:
@@ -6782,9 +6861,69 @@ def universe_search_result(entry: dict, watched: set[str]) -> dict:
         "updated": "자동완성",
         "isWatched": symbol in watched,
         "inCandidates": False,
-        "source": "universe",
-        "sourceLabel": "감시 유니버스",
+        "securityType": entry.get("securityType", ""),
+        "source": entry.get("source", "universe"),
+        "sourceLabel": entry.get("sourceLabel", "감시 유니버스"),
     }
+
+
+def dart_stock_search_entries() -> list[dict]:
+    payload = load_dart_corp_codes()
+    by_stock_code = payload.get("byStockCode", payload) if isinstance(payload, dict) else {}
+    if not isinstance(by_stock_code, dict):
+        return []
+    entries = []
+    for symbol, item in by_stock_code.items():
+        if not isinstance(item, dict):
+            continue
+        stock_code = str(item.get("stockCode") or symbol).strip().upper()
+        if not re.fullmatch(r"[0-9A-Z]{6}", stock_code):
+            continue
+        name = str(item.get("corpName") or stock_code).strip()
+        english_name = str(item.get("corpEngName") or "").strip()
+        aliases = unique_texts([name, english_name], limit=4)
+        entries.append({
+            "symbol": stock_code,
+            "name": name,
+            "englishName": english_name,
+            "market": "KR",
+            "category": "domestic",
+            "securityType": "STOCK",
+            "aliases": aliases,
+            "themes": ["OpenDART 등록 상장사"],
+            "query": name,
+            "focusWeight": 2,
+            "discoveryTier": "lookup",
+            "opportunityType": "lookup",
+            "source": "dart-corp-code",
+            "sourceLabel": "OpenDART 종목마스터",
+        })
+    return entries
+
+
+def stock_search_universe_entries() -> list[dict]:
+    global STOCK_SEARCH_UNIVERSE_CACHE
+    if STOCK_SEARCH_UNIVERSE_CACHE is not None:
+        return STOCK_SEARCH_UNIVERSE_CACHE
+    entries = []
+    seen: set[str] = set()
+    for source_entries in [
+        candidate_universe_entries(),
+        STOCK_SEARCH_MANUAL_UNIVERSE,
+        dart_stock_search_entries(),
+    ]:
+        for entry in source_entries:
+            if not isinstance(entry, dict):
+                continue
+            symbol = str(entry.get("symbol", "")).strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            item = dict(entry)
+            item["symbol"] = symbol
+            entries.append(item)
+            seen.add(symbol)
+    STOCK_SEARCH_UNIVERSE_CACHE = entries
+    return entries
 
 
 def universe_candidate_search(query: str, watched: set[str], limit: int = 8, existing_symbols: set[str] | None = None) -> list[dict]:
@@ -6793,7 +6932,7 @@ def universe_candidate_search(query: str, watched: set[str], limit: int = 8, exi
         return []
     existing_symbols = existing_symbols or set()
     matches = []
-    for entry in candidate_universe_entries():
+    for entry in stock_search_universe_entries():
         symbol = str(entry.get("symbol", "")).strip().upper()
         if not symbol or symbol in existing_symbols:
             continue
@@ -6858,6 +6997,7 @@ def stock_search(query: str, limit: int = 8) -> dict:
     query = query.strip()
     limit = max(1, min(int(limit), 20))
     watched = set(watchlist())
+    search_master_count = len(stock_search_universe_entries())
     candidate_items = seed_candidate_search(query, watched, limit=limit)
     items = list(candidate_items)
     existing_symbols = {str(item.get("symbol", "")).upper() for item in items}
@@ -6925,7 +7065,11 @@ def stock_search(query: str, limit: int = 8) -> dict:
     return {
         "query": query,
         "items": sorted(items[:limit], key=lambda item: search_relevance_rank(query, item)),
-        "status": toss_status,
+        "status": {
+            **toss_status,
+            "searchMasterCount": search_master_count,
+            "searchMasterSources": ["candidate-universe", "manual-etf", "opendart-corp-code"],
+        },
         "message": " ".join(unique_texts(messages, limit=3)),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
@@ -7047,18 +7191,18 @@ def lookup_candidate_for_symbol(symbol: str, watched: set[str]) -> tuple[dict, d
     universe_match = next(
         (
             entry
-            for entry in candidate_universe_entries()
+            for entry in stock_search_universe_entries()
             if str(entry.get("symbol", "")).strip().upper() == symbol
         ),
         None,
     )
     if universe_match:
         candidate = default_candidate_for_entry(universe_match, [], {"source": "lookup", "total": 0})
-        candidate["candidateSource"] = "search-universe"
+        candidate["candidateSource"] = f"search-{universe_match.get('source', 'universe')}"
         candidate["updated"] = "검색 분석"
         return decorate_candidate(candidate, watched), {
-            "source": "universe",
-            "message": "감시 유니버스에 있는 종목을 분석합니다.",
+            "source": universe_match.get("source", "universe"),
+            "message": "검색 마스터에 있는 종목을 분석합니다.",
         }
 
     search_payload = stock_search(symbol, limit=8)
