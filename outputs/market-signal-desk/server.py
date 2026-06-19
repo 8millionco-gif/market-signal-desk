@@ -1164,9 +1164,14 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             change = candidate_change_decimal(candidate)
             if change is not None:
                 row["changeRate"] = str(change)
+                row["changeDisplay"] = display_change(change)
             for source_key in ("changeSource", "changeMessage", "freshness"):
                 if source_key in live_price:
                     row[source_key] = live_state_json_safe(live_price.get(source_key))
+            if live_price.get("changeDisplay") and "changeDisplay" not in row:
+                row["changeDisplay"] = str(live_price.get("changeDisplay"))
+            if live_price.get("changeRate") and "changeRate" not in row:
+                row["changeRate"] = str(live_price.get("changeRate"))
             metadata = {
                 **base_metadata,
                 "eventType": "prices",
@@ -1406,6 +1411,10 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
     change = change_from_toss_price_row(row)
     if change:
         live_price["changeSource"] = "market-data-latest"
+        live_price["changeDisplay"] = change
+        change_rate = display_percent_to_decimal(change)
+        if change_rate is not None:
+            live_price["changeRate"] = str(change_rate)
     else:
         live_price["changeSource"] = "pending-change"
         live_price["changeMessage"] = "DB 최신 가격에는 있으나 등락률 기준가는 추가 확인 중입니다."
@@ -3863,6 +3872,10 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                         "missedInLastFetch": True,
                         "message": f"이번 토스 응답에는 없지만 {stored_status.get('message', '저장된 토스 가격을 유지합니다.')}",
                     }
+                    if not candidate_data_has_change(item) and stored_live_price.get("changeDisplay"):
+                        item["change"] = str(stored_live_price.get("changeDisplay"))
+                        item["livePrice"]["changeSource"] = item["livePrice"].get("changeSource") or "market-data-latest"
+                        item["livePrice"]["changeMessage"] = item["livePrice"].get("changeMessage") or "저장된 최신 가격의 등락률을 유지합니다."
                     stored_record = stored_candidate_records.get(str(item.get("symbol", "")).strip().upper(), {})
                     if not candidate_data_has_change(item) and candidate_data_has_change(stored_record):
                         item["change"] = stored_record.get("change", item.get("change", ""))
