@@ -4410,6 +4410,46 @@ def candidate_evaluation_mode(candidate: dict) -> dict:
     return mode
 
 
+def candidate_trade_data_gate(candidate: dict) -> dict:
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    readiness = candidate.get("priceReadiness", {}) if isinstance(candidate.get("priceReadiness"), dict) else candidate_price_readiness(candidate)
+    evaluation = candidate.get("evaluationMode", {}) if isinstance(candidate.get("evaluationMode"), dict) else candidate_evaluation_mode(candidate)
+    missing = unique_texts(
+        completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else [],
+        limit=8,
+    )
+    display_ready = bool(completeness.get("displayReady"))
+    entry_ready = bool(completeness.get("entryReady"))
+    trade_ready = bool(entry_ready and evaluation.get("tradeEligible"))
+    rank_ready = bool(display_ready and evaluation.get("rankEligible"))
+    readiness_key = str(readiness.get("key", "collecting"))
+    closed_baseline = readiness_key == "closed_baseline"
+    if trade_ready:
+        label = "실시간 진입 검증 완료"
+        reason = "서버가 가격·등락률·거래 반응을 모두 확보했습니다."
+    elif closed_baseline:
+        label = "장마감 기준 관찰"
+        reason = "직전 정규장 가격 기준은 확보됐지만 신규 진입은 개장 후 실시간 반응을 확인합니다."
+    elif display_ready:
+        label = "반응 검증 대기"
+        reason = "가격과 재료는 확보됐지만 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
+    else:
+        label = str(readiness.get("label") or evaluation.get("label") or "서버 수집 중")
+        reason = str(evaluation.get("message") or readiness.get("message") or "필수 데이터를 서버에서 보강 중입니다.")
+    return {
+        "tradeReady": trade_ready,
+        "rankReady": rank_ready,
+        "displayReady": display_ready,
+        "entryReady": entry_ready,
+        "closedBaseline": closed_baseline,
+        "readinessKey": readiness_key,
+        "evaluationKey": evaluation.get("key", ""),
+        "label": label,
+        "reason": reason,
+        "missing": missing,
+    }
+
+
 def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_text: str) -> dict | None:
     symbol = str(candidate.get("symbol", "")).strip().upper()
     if not symbol:
@@ -6345,10 +6385,21 @@ def candidate_decision_group(
         - (risk * 0.55)
         - (heat * 0.3)
     )
+    trade_gate = candidate_trade_data_gate(candidate)
 
     if risk >= 24 or total < 45:
         key, label, priority = "exclude", "오늘 제외", 4
         reason = "리스크나 종합 점수가 후보 기준에 부족합니다."
+    elif not trade_gate["displayReady"]:
+        key, label, priority = "wait", trade_gate["label"], 3
+        reason = trade_gate["reason"]
+    elif not trade_gate["tradeReady"]:
+        key, priority = "wait", 3
+        if trade_gate["closedBaseline"]:
+            label = "장마감 관찰"
+        else:
+            label = "반응 검증 대기"
+        reason = trade_gate["reason"]
     elif total >= 75 and readiness >= 70 and risk < 18 and heat < 8:
         key, label, priority = "action", "진입 후보", 0
         reason = "점수, 준비도, 리스크 조건이 동시에 충족됩니다."
@@ -6371,6 +6422,10 @@ def candidate_decision_group(
         "priority": priority,
         "score": action_score,
         "reason": reason,
+        "tradeDataReady": bool(trade_gate["tradeReady"]),
+        "displayDataReady": bool(trade_gate["displayReady"]),
+        "dataGateLabel": trade_gate["label"],
+        "missingData": trade_gate["missing"],
     }
 
 
@@ -7089,6 +7144,8 @@ def decision_stability_merge(previous: dict, new_decision: dict, candidate: dict
 
     if new_key in risk_keys and previous_key not in risk_keys:
         return new_decision, False
+    if previous_key in trade_keys and not entry_ready:
+        return new_decision, False
     if previous_key not in trade_keys and new_key in trade_keys and entry_ready:
         return new_decision, False
     if previous_key == "verify" and display_ready and new_key != "verify":
@@ -7638,6 +7695,7 @@ def candidate_pool_state(candidate: dict, stage: str = "selected", existing: dic
     quality = discovery.get("qualityProfile", {}) if isinstance(discovery.get("qualityProfile"), dict) else {}
     official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
     score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    trade_gate = candidate_trade_data_gate(candidate)
 
     action_key = str(final_decision.get("actionKey", ""))
     compression_tier = str(compression.get("tier", ""))
@@ -7651,6 +7709,14 @@ def candidate_pool_state(candidate: dict, stage: str = "selected", existing: dic
         return "excluded", "리스크 또는 제외 판단으로 신규 진입 대상에서 제외"
     if candidate_is_portfolio_linked(candidate):
         return "portfolio", "보유 자산과 연결되어 추가매수·보유·매도 판단 대상"
+    if not trade_gate["displayReady"]:
+        if stage == "discovered" and candidate_pool_rank(previous_state) >= candidate_pool_rank("validating"):
+            return "validating", f"{trade_gate['reason']} · 기존 검증 후보로 유지하되 진입 후보 승격은 차단"
+        return "watching", f"{trade_gate['reason']} · 가격/등락률 보강 전까지 관찰 풀에만 유지"
+    if not trade_gate["tradeReady"]:
+        if action_key == "pullback":
+            return "pullback_wait", "재료는 있으나 실시간 거래 반응 확인 전이라 눌림 구간만 관찰"
+        return "validating", f"{trade_gate['reason']} · 실시간 반응 확인 전까지 진입 후보 승격 차단"
     if compression_tier == "core" or (action_key in {"buy", "add"} and validation_key == "confirmed"):
         return "entry_candidate", "근거와 가격 반응이 확인되어 오늘 판단 후보로 승격"
     if action_key == "pullback":
@@ -7679,12 +7745,15 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
     reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
     previous_state = str(existing.get("stateKey", ""))
     desired_state, desired_reason = candidate_pool_state(candidate, stage, existing)
+    trade_gate = candidate_trade_data_gate(candidate)
     now_text = now.isoformat(timespec="seconds")
     previous_rank = candidate_pool_rank(previous_state)
     desired_rank = candidate_pool_rank(desired_state)
     soft_demotion_count = bounded_int(existing.get("softDemotionCount", 0), 0, 100_000)
     demotion_confirmations = max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS)
     force_state_change = desired_state in {"excluded", "expired"} or desired_rank >= previous_rank or not previous_state
+    if previous_state == "entry_candidate" and desired_state != "entry_candidate" and not trade_gate["tradeReady"]:
+        force_state_change = True
     if stage == "selected" and previous_rank > desired_rank and not force_state_change:
         soft_demotion_count += 1
         if soft_demotion_count < demotion_confirmations:
@@ -7754,6 +7823,11 @@ def candidate_pool_record(candidate: dict, existing: dict, mode: str, stage: str
         "qualityTier": discovery.get("qualityTier", existing.get("qualityTier", "")),
         "reactionGate": reaction.get("reactionGate", existing.get("reactionGate", "")),
         "reactionEntryBlock": bool(reaction.get("entryBlock", existing.get("reactionEntryBlock", False))),
+        "tradeDataReady": bool(trade_gate["tradeReady"]),
+        "displayDataReady": bool(trade_gate["displayReady"]),
+        "dataGateLabel": trade_gate["label"],
+        "dataGateReason": trade_gate["reason"],
+        "missingData": trade_gate["missing"],
         "sourceReliabilityScore": bounded_int(
             candidate.get("sourceReliability", {}).get("score", existing.get("sourceReliabilityScore", 0))
             if isinstance(candidate.get("sourceReliability"), dict)
