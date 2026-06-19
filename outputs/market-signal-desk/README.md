@@ -144,7 +144,7 @@ Render 배포 환경에서는 오른쪽 `Render 외부 IP` 카드 또는 `GET /a
 보유 자산 판단은 `TOSS_LIVE_PORTFOLIO=1`을 켠 뒤 계좌 목록, 보유 주식, 매수 가능 금액을 읽기 전용으로 조회합니다. 여러 계좌가 있으면 `TOSS_ACCOUNT_SEQ`를 지정하고, 지정하지 않으면 첫 계좌를 조회합니다. 이 기능도 주문 생성이나 자동 매매와 연결하지 않습니다.
 Render에서는 토스 키와 live 플래그를 넣은 뒤 `test-render-deploy.ps1`로 토큰 발급 가능 상태, 대시보드 반영, 가격/차트/호가/체결/포트폴리오 API를 함께 확인합니다. 토스증권 허용 IP가 켜져 있으면 Render 서버 외부 IP가 등록되어 있어야 합니다.
 
-API 호출량을 줄이기 위해 현재가는 기본 15초, 캔들은 기본 60초, 호가/체결은 기본 5초, 포트폴리오는 기본 30초, 종목 기본정보는 기본 1일 동안 캐시합니다.
+API 호출량을 줄이기 위해 현재가는 기본 5초, 캔들은 기본 60초, 호가/체결은 기본 5초, 포트폴리오는 기본 30초, 종목 기본정보는 기본 1일 동안 캐시합니다.
 
 ```powershell
 $env:TOSS_PRICE_CACHE_SECONDS="15"
@@ -155,8 +155,10 @@ $env:TOSS_PORTFOLIO_CACHE_SECONDS="30"
 $env:TOSS_STOCK_CACHE_SECONDS="86400"
 $env:TOSS_REQUEST_TIMEOUT_SECONDS="5"
 $env:TOSS_CANDLE_MAX_CANDIDATES="20"
-$env:TOSS_ORDERBOOK_MAX_CANDIDATES="20"
-$env:TOSS_TRADES_MAX_CANDIDATES="20"
+$env:TOSS_ORDERBOOK_MAX_CANDIDATES="10"
+$env:TOSS_ORDERBOOK_CANDIDATES_MAX_LIMIT="10"
+$env:TOSS_TRADES_MAX_CANDIDATES="10"
+$env:TOSS_TRADES_CANDIDATES_MAX_LIMIT="10"
 $env:TOSS_TRADES_COUNT="30"
 $env:TOSS_CANDLE_MAX_STALENESS_DAYS="7"
 ```
@@ -169,7 +171,7 @@ $env:TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT="50"
 
 이 옵션을 켜면 샘플 가격과 토스 현재가의 차이가 위 비율보다 큰 종목에 `기준가 차이` 경고를 표시합니다.
 
-웹 화면의 10초 가격 갱신은 판단 결과를 흔들지 않도록 현재가와 등락률만 반영합니다. 차트, 호가, 체결은 서버 후보 풀 보강 봇이 수집해 `candidate-data-snapshots`와 `market-data-latest`에 저장하고, 저장된 값이 후보 판단에 반영됩니다. 운영 기본값은 오늘 후보 20개 전체를 보강하는 것을 기준으로 `TOSS_CANDLE_MAX_CANDIDATES`, `TOSS_ORDERBOOK_MAX_CANDIDATES`, `TOSS_TRADES_MAX_CANDIDATES`를 20으로 둡니다.
+웹 화면의 10초 가격 갱신은 판단 결과를 흔들지 않도록 현재가와 등락률만 반영합니다. 차트, 호가, 체결은 서버 후보 풀 보강 봇이 수집해 `candidate-data-snapshots`와 `market-data-latest`에 저장하고, 저장된 값이 후보 판단에 반영됩니다. 운영 기본값은 차트 20개, 호가/체결 10개 우선 보강입니다. 호가/체결은 요청 비용이 커서 `TOSS_ORDERBOOK_CANDIDATES_MAX_LIMIT`와 `TOSS_TRADES_CANDIDATES_MAX_LIMIT`를 명시적으로 올리기 전에는 과도하게 늘어나지 않습니다.
 
 라이브 현재가 반영을 잠시 끄려면 다음 값을 설정합니다.
 
@@ -273,6 +275,7 @@ $env:GDELT_NEWS_MAX_CANDIDATES="1"
 $env:GDELT_REQUEST_TIMEOUT_SECONDS="20"
 $env:GDELT_REQUEST_SPACING_SECONDS="5.2"
 $env:GDELT_BACKOFF_SECONDS="900"
+$env:NAVER_NEWS_CANDIDATES_MAX_LIMIT="2"
 ```
 
 GDELT는 짧은 시간에 연속 요청하면 제한에 걸릴 수 있어 기본 조회 후보 수를 1개로 둡니다. 더 많은 후보를 조회하려면 `GDELT_NEWS_MAX_CANDIDATES`를 늘리되 응답 시간이 길어질 수 있습니다.
@@ -329,6 +332,7 @@ $env:SIGNAL_OVERSEAS_CANDIDATE_LIMIT="10"
 $env:SIGNAL_DISCOVERY_MAX_SYMBOLS="160"
 $env:SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED="1"
 $env:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT="30"
+$env:SIGNAL_LIVE_PRICE_SYMBOL_MAX_LIMIT="30"
 $env:SIGNAL_DISCOVERY_NEWS_DISPLAY="3"
 $env:SIGNAL_DISCOVERY_CACHE_SECONDS="600"
 ```
@@ -370,9 +374,12 @@ $env:SIGNAL_DB_MIGRATE_RUN_LIMIT="200"
 $env:SIGNAL_RAW_EVENT_STORAGE_ENABLED="1"
 $env:SIGNAL_RAW_EVENT_PAYLOAD_LIMIT="40"
 $env:SIGNAL_RAW_EVENT_FILE_LIMIT="300"
+$env:SIGNAL_RAW_EVENT_FILE_MAX_LIMIT="300"
 $env:SIGNAL_NEWS_EVENT_STORAGE_ENABLED="1"
 $env:SIGNAL_NEWS_EVENT_FILE_LIMIT="400"
+$env:SIGNAL_NEWS_EVENT_FILE_MAX_LIMIT="400"
 $env:SIGNAL_NEWS_EVENT_MAX_ITEMS="1200"
+$env:SIGNAL_NEWS_EVENT_ITEMS_MAX_LIMIT="1200"
 $env:SIGNAL_LIVE_STATE_STORAGE_ENABLED="1"
 $env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="180"
 ```
@@ -415,7 +422,9 @@ $env:SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE="58"
 $env:SIGNAL_CANDIDATE_POOL_TOP_LIMIT="5"
 $env:SIGNAL_CANDIDATE_PREFETCH_ENABLED="1"
 $env:SIGNAL_CANDIDATE_PREFETCH_LIMIT="30"
+$env:SIGNAL_CANDIDATE_PREFETCH_MAX_LIMIT="30"
 $env:SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS="180"
+$env:SIGNAL_CANDIDATE_PREFETCH_MIN_INTERVAL_SECONDS="180"
 $env:SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED="1"
 $env:SIGNAL_CANDIDATE_DATA_MAX_ITEMS="1000"
 $env:SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT="30"
@@ -423,6 +432,7 @@ $env:SIGNAL_FINAL_DECISION_STABILITY_ENABLED="1"
 $env:SIGNAL_FINAL_DECISION_STABILITY_SECONDS="120"
 $env:SIGNAL_MARKET_DATA_LATEST_ENABLED="1"
 $env:SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS="1000"
+$env:SIGNAL_MARKET_DATA_LATEST_ITEMS_MAX_LIMIT="1000"
 $env:SIGNAL_LIVE_STATE_STORAGE_ENABLED="1"
 $env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="900"
 ```
@@ -454,6 +464,7 @@ POST /api/discovery/run
 ```powershell
 $env:SIGNAL_SCHEDULER_ENABLED="1"
 $env:SIGNAL_SCHEDULER_INTERVAL_SECONDS="60"
+$env:SIGNAL_SCHEDULER_INTERVAL_MIN_SECONDS="60"
 $env:SIGNAL_PREOPEN_RUN_TIME="08:40"
 $env:SIGNAL_PREOPEN_RUN_WINDOW_MINUTES="80"
 $env:SIGNAL_CLOSE_RUN_TIME="16:40"
