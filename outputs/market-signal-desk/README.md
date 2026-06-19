@@ -423,6 +423,8 @@ $env:SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS="600"
 $env:SIGNAL_DISCOVERY_BOT_MODE="intraday"
 ```
 
+후보 풀 가격 보강은 장마감/장전 스냅샷 실행 여부와 분리되어 `SIGNAL_CANDIDATE_PREFETCH_ENABLED=1`이면 계속 동작합니다. 따라서 스냅샷 스케줄러를 임시로 끄더라도 서버는 저장된 후보 풀의 Toss 가격, 차트, 호가, 체결 데이터를 주기적으로 보강하고 `candidate-data-snapshots`와 `market-data-latest` 저장소를 업데이트합니다.
+
 상태 확인과 수동 실행 API는 다음과 같습니다.
 
 ```text

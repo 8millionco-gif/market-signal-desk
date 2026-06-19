@@ -12183,6 +12183,7 @@ def scheduler_config_status() -> dict:
         "enabled": SIGNAL_SCHEDULER_ENABLED,
         "intervalSeconds": SIGNAL_SCHEDULER_INTERVAL_SECONDS,
         "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+        "candidatePrefetchIndependent": True,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
         "historyLimit": SIGNAL_RUN_HISTORY_LIMIT,
@@ -12253,7 +12254,7 @@ def next_scheduler_run(now: datetime | None = None) -> dict:
 
 
 def candidate_prefetch_due(now: datetime | None = None) -> bool:
-    if not SIGNAL_SCHEDULER_ENABLED or not SIGNAL_CANDIDATE_PREFETCH_ENABLED:
+    if not SIGNAL_CANDIDATE_PREFETCH_ENABLED:
         return False
     now = now or datetime.now(KST)
     with SCHEDULER_LOCK:
