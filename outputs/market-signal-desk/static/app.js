@@ -71,6 +71,7 @@ const state = {
   performance: null,
   performanceLoading: false,
   authEnabled: false,
+  authReadOnlyPublic: false,
   authRequired: false,
   adminToken: readStoredValue("marketSignalAdminToken", ""),
   schedulerStatus: null,
@@ -562,6 +563,7 @@ async function loadDashboard(options = {}) {
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
   ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
+    state.authReadOnlyPublic = Boolean(authStatus?.readOnlyPublic);
     state.schedulerStatus = schedulerStatus;
     state.discoveryBotStatus = discoveryBotStatus;
     state.storageStatus = storageStatus;
@@ -2802,7 +2804,7 @@ function clearAdminToken() {
   state.authRequired = state.authEnabled;
   removeStoredValue("marketSignalAdminToken");
   renderAuthStatus();
-  if (state.authEnabled) {
+  if (state.authEnabled && !state.authReadOnlyPublic) {
     renderAuthGate();
   } else {
     loadDashboard();
@@ -2864,11 +2866,12 @@ function renderAuthGate() {
 function renderAuthStatus() {
   if (!els.authStatus) return;
   const enabled = Boolean(state.authEnabled);
+  const readOnlyPublic = Boolean(state.authReadOnlyPublic);
   const hasToken = Boolean(state.adminToken);
   const rows = [
-    ["보호 상태", enabled, enabled ? "켜짐" : "꺼짐"],
-    ["토큰 저장", !enabled || hasToken, hasToken ? "있음" : enabled ? "필요" : "불필요"],
-    ["API 접근", !enabled || (hasToken && !state.authRequired), !enabled ? "공개" : state.authRequired ? "확인 필요" : "허용"]
+    ["보호 상태", enabled, enabled ? "관리 작업 보호" : "꺼짐"],
+    ["조회 화면", !enabled || readOnlyPublic || hasToken, !enabled || readOnlyPublic ? "공개" : hasToken ? "허용" : "토큰 필요"],
+    ["관리 작업", !enabled || hasToken, !enabled ? "공개" : hasToken ? "허용" : "토큰 필요"]
   ];
   els.authStatus.innerHTML = `
     ${rows

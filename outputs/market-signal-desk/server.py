@@ -2100,6 +2100,9 @@ def toss_config_status() -> dict:
 def auth_config_status() -> dict:
     return {
         "enabled": bool(ADMIN_TOKEN),
+        "readOnlyPublic": True,
+        "protectedMethods": ["POST"],
+        "message": "조회 화면은 공개하고 실행/변경 API만 관리자 토큰으로 보호합니다.",
     }
 
 
@@ -15827,10 +15830,12 @@ def start_discovery_bot_thread() -> None:
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "MarketSignalDesk/0.1"
 
-    def auth_required_for_path(self, path: str) -> bool:
+    def auth_required_for_path(self, path: str, method: str = "GET") -> bool:
         if not ADMIN_TOKEN:
             return False
         if path in {"/api/health", "/api/auth/status"}:
+            return False
+        if method.upper() in {"GET", "HEAD"}:
             return False
         return path.startswith("/api/")
 
@@ -15862,7 +15867,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(auth_config_status())
             return
 
-        if self.auth_required_for_path(parsed.path) and not self.is_authorized():
+        if self.auth_required_for_path(parsed.path, method="GET") and not self.is_authorized():
             self.reject_unauthorized()
             return
 
@@ -16165,7 +16170,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if self.auth_required_for_path(parsed.path) and not self.is_authorized():
+        if self.auth_required_for_path(parsed.path, method="POST") and not self.is_authorized():
             self.reject_unauthorized()
             return
 
