@@ -7226,6 +7226,7 @@ def raw_event_reliability_context() -> dict:
     market_persistent = bool(market_data.get("persistent"))
     candidate_items = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
     market_items = bounded_int(market_data.get("itemCount", 0), 0, 1_000_000)
+    data_analysis_ready = bool(candidate_items > 0 and market_items > 0)
     data_operation_ready = bool(
         candidate_persistent
         and market_persistent
@@ -7241,6 +7242,7 @@ def raw_event_reliability_context() -> dict:
         "lastEventType": RAW_EVENT_STATE.get("lastEventType", ""),
         "dataStorage": {
             "operationReady": data_operation_ready,
+            "analysisReady": data_analysis_ready,
             "persistent": bool(candidate_persistent and market_persistent),
             "candidatePersistent": candidate_persistent,
             "marketPersistent": market_persistent,
@@ -7378,7 +7380,7 @@ def candidate_source_reliability(candidate: dict, raw_context: dict | None = Non
         data_score, label, status, reason = 66, "DB 수집값 대기", "partial", "DB는 연결됐지만 후보 또는 최신 시세 저장이 아직 부족"
         warnings.append("다음 수집 주기에서 후보·시세 DB 저장 확인 필요")
     elif candidate_items or market_items:
-        data_score, label, status, reason = 46, "파일 수집값", "filesystem", "후보 또는 최신 시세가 임시 파일 저장소 기준"
+        data_score, label, status, reason = 62, "서버 수집값 저장", "filesystem", "후보 또는 최신 시세가 서버 파일 저장소 기준"
         warnings.append("후보·시세가 DB가 아닌 파일 fallback에 있어 재배포 후 손실될 수 있음")
     else:
         data_score, label, status, reason = 24, "수집값 저장 대기", "missing", "후보·시세 저장값이 아직 충분하지 않음"
@@ -7421,6 +7423,7 @@ def candidate_source_reliability(candidate: dict, raw_context: dict | None = Non
         },
         "dataStorage": {
             "operationReady": bool(data_storage.get("operationReady")),
+            "analysisReady": bool(data_storage.get("analysisReady")),
             "persistent": bool(data_storage.get("persistent")),
             "candidatePersistent": bool(data_storage.get("candidatePersistent")),
             "marketPersistent": bool(data_storage.get("marketPersistent")),
@@ -7551,6 +7554,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
     data_storage = source_reliability.get("dataStorage", {}) if isinstance(source_reliability.get("dataStorage"), dict) else {}
     storage_ready = bool(data_storage.get("operationReady"))
+    analysis_ready = bool(data_storage.get("analysisReady") or storage_ready)
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
@@ -7581,9 +7585,9 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
-    elif group_key == "action" and not storage_ready:
+    elif group_key == "action" and not analysis_ready:
         key, label, priority = "defer", "저장 확인 대기", 3
-        reasons.append("후보·시세가 DB 기준으로 저장된 뒤 실전 진입 후보로 판단")
+        reasons.append("서버가 수집한 후보·시세 저장값이 확보된 뒤 실전 진입 후보로 판단")
     elif not display_data_ready:
         key, label, priority = "defer", evaluation_mode["label"], 3
         reasons.append(evaluation_mode["message"])
@@ -7764,6 +7768,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
     data_storage = source_reliability.get("dataStorage", {}) if isinstance(source_reliability.get("dataStorage"), dict) else {}
     storage_ready = bool(data_storage.get("operationReady"))
+    analysis_ready = bool(data_storage.get("analysisReady") or storage_ready)
     hot = change is not None and change >= Decimal("3")
     weak = change is not None and change <= Decimal("-2")
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
@@ -7832,9 +7837,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif reliability_score < 58:
         action_key, action, tone = "verify", "근거 보강 대기", "wait"
         summary = "후보 신호는 있으나 원천 데이터 신뢰도가 낮아 시세·뉴스·공시 보강 전까지 대기합니다."
-    elif group_key == "action" and not storage_ready:
+    elif group_key == "action" and not analysis_ready:
         action_key, action, tone = "verify", "저장 확인 대기", "wait"
-        summary = "서버가 수집한 후보·시세 데이터가 DB에 저장된 뒤 실전 진입 판단으로 승격합니다."
+        summary = "서버가 수집한 후보·시세 데이터가 저장된 뒤 실전 진입 판단으로 승격합니다."
     elif official_signal.get("riskLevel") == "medium" and reaction_key not in {"strong", "confirmed"}:
         action_key, action, tone = "verify", "공시 확인 대기", "wait"
         summary = "공식 공시 영향이 아직 가격과 거래량으로 검증되지 않아 진입을 보류합니다."
@@ -13686,6 +13691,10 @@ def snapshot_storage_status() -> dict:
     raw_events = raw_event_storage_status()
     candidate_data = candidate_data_snapshot_status()
     market_data = market_data_latest_status()
+    analysis_ready = bool(
+        bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
+        and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
+    )
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent"))
@@ -13705,6 +13714,7 @@ def snapshot_storage_status() -> dict:
             "persistent": operation_ready,
             "volatileFallback": not operation_ready,
             "operationReady": operation_ready,
+            "analysisReady": analysis_ready,
             "recentRunCount": len(recent_runs),
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
@@ -13738,6 +13748,7 @@ def snapshot_storage_status() -> dict:
         "persistent": persistent,
         "volatileFallback": True,
         "operationReady": False,
+        "analysisReady": analysis_ready,
         "recentRunCount": len(recent_runs),
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",

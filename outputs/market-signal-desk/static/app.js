@@ -3664,6 +3664,7 @@ function renderStorageStatus() {
   const candidateData = status.candidateData ?? {};
   const marketData = status.marketData ?? {};
   const operationReady = Boolean(status.operationReady || (status.persistent && database.ready));
+  const analysisReady = Boolean(status.analysisReady || (Number(candidateData.itemCount ?? 0) > 0 && Number(marketData.itemCount ?? 0) > 0));
   const volatileFallback = Boolean(status.volatileFallback || (!operationReady && status.implementation !== "postgres"));
   const modeText = status.implementation === "postgres"
     ? "Postgres DB"
@@ -3740,16 +3741,19 @@ function renderStorageStatus() {
   const candidateStorageReady = Boolean(candidateData.enabled && candidateData.readSource === "postgres");
   const storageWarningText = marketStorageReady && candidateStorageReady
     ? "후보/최신값 DB 기준"
+    : analysisReady
+    ? `서버 저장값 사용 · 후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`
     : `후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`;
   const rows = [
     ["운영 저장소", operationReady, operationReady ? "DB 기준" : "미완료"],
+    ["분석 저장소", analysisReady, analysisReady ? "서버 저장값 확보" : "후보/최신값 대기"],
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
     ["후보 기준", candidateStorageReady, storageBasisText(candidateData)],
     ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
-    ["판단 기준", marketStorageReady && candidateStorageReady, storageWarningText],
+    ["판단 기준", analysisReady, storageWarningText],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
