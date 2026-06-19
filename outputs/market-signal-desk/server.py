@@ -74,6 +74,8 @@ TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "2"))
 TOSS_TRADES_COUNT = int(os.getenv("TOSS_TRADES_COUNT", "30"))
 TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS", "7"))
 SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "10"))
+SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
+SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
@@ -2530,6 +2532,66 @@ def change_from_toss_price_row(price: dict) -> str | None:
     return display_change(((current - previous_close) / previous_close) * Decimal(100))
 
 
+def seconds_since_timestamp(value: str | None) -> int | None:
+    parsed = parse_iso_datetime(str(value or ""))
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "") -> dict:
+    live_price = live_price if isinstance(live_price, dict) else {}
+    source = str(live_price.get("source", "")).strip()
+    timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or fallback_updated_at or "").strip()
+    age_seconds = seconds_since_timestamp(timestamp)
+
+    if source == "toss":
+        if age_seconds is None:
+            status, label, message = "unknown", "시간 미확인", "토스 가격 시간이 없어 실시간 판단에 사용하지 않습니다."
+        elif age_seconds <= SIGNAL_LIVE_PRICE_FRESH_SECONDS:
+            status, label, message = "live", "실시간", "토스 현재가를 실시간 판단에 사용합니다."
+        elif age_seconds <= SIGNAL_LIVE_PRICE_DELAYED_SECONDS:
+            status, label, message = "delayed", "지연", "토스 현재가가 지연되어 신규 진입 판단을 보류합니다."
+        else:
+            status, label, message = "stale", "오래됨", "토스 현재가가 오래되어 저장 가격처럼만 참고합니다."
+    elif source in {"sample", "seed", "lookup", "candidate_pool", "snapshot", "retained"}:
+        status, label, message = "snapshot", "저장값", "저장된 가격이라 실시간 반응 판단에는 사용하지 않습니다."
+    elif source:
+        status, label, message = "missing", "미확인", str(live_price.get("message") or "실시간 가격을 확인하지 못했습니다.")
+    else:
+        status, label, message = "missing", "미확인", "실시간 가격 정보가 없습니다."
+
+    return {
+        "status": status,
+        "label": label,
+        "timestamp": timestamp,
+        "ageSeconds": age_seconds,
+        "freshSeconds": SIGNAL_LIVE_PRICE_FRESH_SECONDS,
+        "delayedSeconds": SIGNAL_LIVE_PRICE_DELAYED_SECONDS,
+        "isFresh": status == "live",
+        "isDelayed": status == "delayed",
+        "isStale": status in {"stale", "snapshot", "unknown", "missing"},
+        "usableForReaction": status == "live",
+        "message": message,
+    }
+
+
+def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at: str = "") -> dict:
+    item = dict(candidate)
+    live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+    item["livePrice"] = {
+        **live_price,
+        "freshness": live_price_freshness(live_price, fallback_updated_at),
+    }
+    return item
+
+
+def candidate_has_fresh_live_price(candidate: dict) -> bool:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    return str(live_price.get("source", "")) == "toss" and bool(freshness.get("usableForReaction"))
+
+
 def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not TOSS_LIVE_PRICES:
         return candidates, {
@@ -2550,6 +2612,7 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
     prices = price_by_symbol(payload)
     enriched = []
     baseline_drift_count = 0
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
     for candidate in candidates:
         item = dict(candidate)
         price = prices.get(str(item.get("symbol")))
@@ -2573,8 +2636,10 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                 "lastPrice": str(price["lastPrice"]),
                 "currency": str(price["currency"]),
                 "timestamp": price.get("timestamp"),
+                "updatedAt": now_text,
                 "source": "toss",
             }
+            item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
             change = change_from_toss_price_row(price)
             if change:
                 item["change"] = change
@@ -2587,7 +2652,12 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                     "message": "초기 샘플 기준가와 차이가 커서 기준 데이터 갱신 여부를 확인하세요.",
                 })
         else:
-            item["livePrice"] = {"source": "sample", "message": "토스 현재가 응답에 종목이 없습니다."}
+            item["livePrice"] = {
+                "source": "sample",
+                "updatedAt": now_text,
+                "message": "토스 현재가 응답에 종목이 없습니다.",
+            }
+            item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
         enriched.append(item)
 
     return enriched, {
@@ -2601,7 +2671,7 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
             if TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT is not None
             else ""
         ),
-        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "updatedAt": now_text,
     }
 
 
@@ -4211,9 +4281,12 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
 
     change = display_percent_to_decimal(candidate.get("change"))
     live_price = candidate.get("livePrice", {})
-    has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
+    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    has_live_price = candidate_has_fresh_live_price(candidate)
     if has_live_price:
         sources.append("토스 현재가")
+    elif isinstance(live_price, dict) and live_price.get("source") == "toss":
+        warnings.append(str(live_freshness.get("message") or "토스 현재가가 지연되어 실시간 판단 보류"))
     price_reaction_positive = False
     price_reaction_confirmed = False
     if change is None:
@@ -4429,7 +4502,11 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
             "key": "live_price",
             "label": "실시간 가격",
             "ok": has_live_price,
-            "value": str(candidate.get("price", "")) if has_live_price else "토스 가격 대기",
+            "value": (
+                f"{live_freshness.get('label')} · {candidate.get('price', '-')}"
+                if isinstance(live_price, dict) and live_price.get("source") == "toss"
+                else str(live_freshness.get("label") or "토스 가격 대기")
+            ),
             "required": True,
         },
         {
@@ -4464,7 +4541,7 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     elif blockers:
         next_check = blockers[0]
     elif not has_live_price:
-        next_check = "토스 실시간 현재가 수신을 기다립니다."
+        next_check = str(live_freshness.get("message") or "토스 실시간 현재가 수신을 기다립니다.")
     elif not price_reaction_confirmed:
         next_check = "뉴스 방향과 같은 가격 반응이 확인될 때까지 대기합니다."
     elif not market_response_confirmed:
@@ -5010,7 +5087,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction_supports_entry = bool(reaction.get("supportsEntry"))
     reaction_entry_ready = bool(reaction.get("entryReady", reaction_supports_entry))
     live_price = candidate.get("livePrice", {})
-    has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
+    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    has_live_price = candidate_has_fresh_live_price(candidate)
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
@@ -5030,7 +5108,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
     elif group_key == "action" and not has_live_price:
         key, label, priority = "defer", "실시간 가격 대기", 3
-        reasons.append("토스 실시간 현재가 확인 전까지 진입 판단 보류")
+        reasons.append(str(live_freshness.get("message") or "토스 실시간 현재가 확인 전까지 진입 판단 보류"))
     elif reaction_entry_block and reaction.get("hasEvent"):
         key, label, priority = "defer", "반응 검증 대기", 3
         reasons.append(str(reaction.get("nextCheck") or "재료는 있으나 진입 전 가격·거래량 검증 필요"))
@@ -6569,7 +6647,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "exclude": 0,
     }
     for candidate in candidates:
-        item = dict(candidate)
+        item = annotate_candidate_live_price_freshness(dict(candidate))
         base_score = item.get("score", {})
         if not isinstance(base_score, dict):
             base_score = {}
