@@ -825,7 +825,7 @@ function mergeLivePricePayload(payload) {
     generatedAt: payload.updatedAt || state.dashboard.generatedAt,
     summary: {
       ...(state.dashboard.summary ?? {}),
-      ...livePriceSummaryPatch(payload.summary)
+      ...livePriceSummaryPatch(payload.summary, { priceOnly })
     },
     integrations: {
       ...(state.dashboard.integrations ?? {}),
@@ -982,8 +982,9 @@ function mergeLiveFinalDecision(current = {}, incoming = {}) {
   };
 }
 
-function livePriceSummaryPatch(summary) {
+function livePriceSummaryPatch(summary, options = {}) {
   const source = summary && typeof summary === "object" ? summary : {};
+  const priceOnly = Boolean(options.priceOnly);
   const allowedKeys = [
     "livePriceUpdatedAt",
     "livePricePollSeconds",
@@ -1004,19 +1005,22 @@ function livePriceSummaryPatch(summary) {
     "tossChartCoverageCount",
     "tossOrderbookCoverageCount",
     "tossTradeCoverageCount",
-    "tossEntryDataReadyCount",
     "candidateMarketDataLatestUpdatedCount",
     "candidateMarketDataLatestStored",
+    "candidateDataCarriedForwardCount",
+    "candidateDataCarriedForwardFields"
+  ];
+  const analysisKeys = [
+    "tossEntryDataReadyCount",
     "stableDecisionCount",
     "finalDecisionStabilitySeconds",
-    "candidateDataCarriedForwardCount",
-    "candidateDataCarriedForwardFields",
     "evaluationModeCounts",
     "tradeEvaluationReadyCount",
     "baselineEvaluationCount",
     "serverCollectingCount",
     "unavailableEvaluationCount"
   ];
+  if (!priceOnly) allowedKeys.push(...analysisKeys);
   return allowedKeys.reduce((patch, key) => {
     if (source[key] !== undefined) patch[key] = source[key];
     return patch;
@@ -1323,6 +1327,9 @@ async function refreshLivePrices() {
     requestedCount: symbols.length
   };
   const payload = await safeFetchJson(`/api/dashboard/live-prices?${params.toString()}`, fallback, 12000);
+  const priceOnlyPayload = payload?.detail === "price" || payload?.selectionCycle === "price-only";
+  const stableDecisionCount = state.livePrice.stableDecisionCount ?? 0;
+  const finalDecisionStabilitySeconds = state.livePrice.finalDecisionStabilitySeconds ?? 0;
   const merged = mergeLivePricePayload(payload);
   state.livePrice = {
     ...state.livePrice,
@@ -1341,9 +1348,13 @@ async function refreshLivePrices() {
     retainedCount: Number(payload.summary?.livePriceRetainedCount ?? 0),
     missingCount: Number(payload.summary?.livePriceMissingCount ?? 0),
     tossDataCoverage: payload.summary?.tossDataCoverage ?? state.livePrice.tossDataCoverage ?? {},
-    stableDecisionCount: Number(payload.summary?.stableDecisionCount ?? state.livePrice.stableDecisionCount ?? 0),
+    stableDecisionCount: Number(
+      priceOnlyPayload ? stableDecisionCount : payload.summary?.stableDecisionCount ?? stableDecisionCount
+    ),
     finalDecisionStabilitySeconds: Number(
-      payload.summary?.finalDecisionStabilitySeconds ?? state.livePrice.finalDecisionStabilitySeconds ?? 0
+      priceOnlyPayload
+        ? finalDecisionStabilitySeconds
+        : payload.summary?.finalDecisionStabilitySeconds ?? finalDecisionStabilitySeconds
     ),
     candidateDataCarriedForwardCount: Number(
       payload.summary?.candidateDataCarriedForwardCount ?? state.livePrice.candidateDataCarriedForwardCount ?? 0
