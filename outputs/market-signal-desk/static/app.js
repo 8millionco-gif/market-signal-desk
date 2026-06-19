@@ -1285,6 +1285,7 @@ async function refreshLivePrices() {
     updatedAt: payload.updatedAt || state.livePrice.updatedAt,
     message: payload.message || (merged ? "라이브 가격 반영" : "라이브 가격 대기"),
     source: payload.source || state.livePrice.source,
+    selectionCycle: payload.selectionCycle || payload.integrations?.livePrice?.selectionCycle || state.livePrice.selectionCycle,
     error: payload.error || "",
     pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 10),
     refreshCount: Number(state.livePrice.refreshCount || 0) + 1,
@@ -2285,6 +2286,12 @@ function livePriceDiagnostics() {
   const ageSeconds = updatedMs ? Math.max(0, Math.round((Date.now() - updatedMs) / 1000)) : null;
   const pollSeconds = Number(live.pollSeconds || 10);
   const stale = ageSeconds != null && ageSeconds > Math.max(30, pollSeconds * 3);
+  const selectionCycle = live.selectionCycle || state.dashboard?.integrations?.livePrice?.selectionCycle || "";
+  const selectionCycleLabel = selectionCycle === "price-only"
+    ? "가격만 갱신"
+    : selectionCycle === "full-analysis"
+      ? "전체 분석"
+      : "대기";
   const enabled = Boolean(state.tossStatus?.livePricesEnabled ?? state.dashboard?.integrations?.toss?.config?.readyForMarketData ?? true);
   let label = "대기";
   let ok = false;
@@ -2325,6 +2332,8 @@ function livePriceDiagnostics() {
     notFreshCount,
     pollSeconds,
     symbolCount,
+    selectionCycle,
+    selectionCycleLabel,
     updatedAt: live.updatedAt,
     attemptAt: live.attemptAt,
     message: live.error ? live.message || live.error : live.message || "",
@@ -2346,6 +2355,7 @@ function renderLivePriceStatus() {
     ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
     ["DB 보강", true, diag.carriedForwardCount ? `${diag.carriedForwardCount}개 유지` : "없음"],
     ["부분 갱신", true, diag.changedCount ? `${diag.changedCount}개 변경` : "변경 없음"],
+    ["갱신 범위", true, diag.selectionCycleLabel],
     [
       "판단 유지",
       true,

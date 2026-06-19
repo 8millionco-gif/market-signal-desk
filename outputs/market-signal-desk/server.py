@@ -12671,7 +12671,7 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
         "watchedCount": len([item for item in candidates if item.get("isWatched")]),
         "highScoreCount": len([item for item in candidates if item.get("totalScore", 0) >= 75]),
         "readyCount": len([item for item in candidates if item.get("triggerReadiness", 0) >= 70]),
-        "selectionSource": "live-price-rules",
+        "selectionSource": selection_status.get("source", "live-price-rules"),
         "livePriceUpdatedAt": now_text,
         "livePricePollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "averageScoreShift": selection_status.get("averageScoreShift"),
@@ -12730,6 +12730,95 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
         "excludeCandidateCount": selection_status.get("excludeCandidateCount"),
     })
     return summary
+
+
+def price_only_candidate_update(candidate: dict) -> dict:
+    item = annotate_candidate_live_price_freshness(dict(candidate))
+    item["dataCompleteness"] = candidate_data_completeness(item)
+    item["priceReadiness"] = candidate_price_readiness(item)
+    item["evaluationMode"] = candidate_evaluation_mode(item)
+    return item
+
+
+def price_only_selection_status(candidates: list[dict], base_summary: dict, base_integrations: dict) -> dict:
+    base_selection = (
+        copy.deepcopy(base_integrations.get("selection", {}))
+        if isinstance(base_integrations.get("selection"), dict)
+        else {}
+    )
+    price_readiness_counts: dict[str, int] = {}
+    evaluation_mode_counts: dict[str, int] = {}
+    final_decision_counts = {
+        "buy": 0,
+        "add": 0,
+        "hold": 0,
+        "trim": 0,
+        "stop": 0,
+        "pullback": 0,
+        "watch": 0,
+        "verify": 0,
+        "exclude": 0,
+    }
+    compression_counts: dict[str, int] = {}
+    validation_counts: dict[str, int] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        readiness = candidate.get("priceReadiness", {}) if isinstance(candidate.get("priceReadiness"), dict) else {}
+        evaluation = candidate.get("evaluationMode", {}) if isinstance(candidate.get("evaluationMode"), dict) else {}
+        final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+        compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+        validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
+        readiness_key = str(readiness.get("key", "collecting"))
+        evaluation_key = str(evaluation.get("key", "collecting"))
+        action_key = str(final_decision.get("actionKey", "verify"))
+        compression_key = str(compression.get("tier", "wait"))
+        validation_key = str(validation.get("key", "evidence_wait"))
+        price_readiness_counts[readiness_key] = price_readiness_counts.get(readiness_key, 0) + 1
+        evaluation_mode_counts[evaluation_key] = evaluation_mode_counts.get(evaluation_key, 0) + 1
+        final_decision_counts[action_key if action_key in final_decision_counts else "verify"] += 1
+        compression_counts[compression_key] = compression_counts.get(compression_key, 0) + 1
+        validation_counts[validation_key] = validation_counts.get(validation_key, 0) + 1
+
+    summary = base_summary if isinstance(base_summary, dict) else {}
+    status = {
+        **base_selection,
+        "source": "price-only-retained",
+        "enabled": True,
+        "message": "10초 가격 갱신은 후보 재선정 없이 기존 판단을 유지하고 가격·등락률만 보강합니다.",
+        "candidateCount": len(candidates),
+        "priceReadinessCounts": price_readiness_counts,
+        "evaluationModeCounts": evaluation_mode_counts,
+        "tradeEvaluationReadyCount": evaluation_mode_counts.get("entry_ready", 0),
+        "baselineEvaluationCount": evaluation_mode_counts.get("closed_baseline", 0),
+        "serverCollectingCount": (
+            evaluation_mode_counts.get("collecting_change", 0)
+            + evaluation_mode_counts.get("collecting_price", 0)
+            + evaluation_mode_counts.get("collecting", 0)
+        ),
+        "unavailableEvaluationCount": evaluation_mode_counts.get("unavailable", 0),
+        "entryDataReadyCount": price_readiness_counts.get("entry_ready", 0),
+        "closedBaselineCandidateCount": price_readiness_counts.get("closed_baseline", 0),
+        "displayDataReadyCount": (
+            price_readiness_counts.get("entry_ready", 0)
+            + price_readiness_counts.get("closed_baseline", 0)
+            + price_readiness_counts.get("display_ready", 0)
+        ),
+        "priceBasisWaitCount": price_readiness_counts.get("price_wait", 0),
+        "changeWaitCount": price_readiness_counts.get("change_wait", 0),
+        "decisionGroups": decision_group_counts(candidates),
+        "finalDecisionCounts": final_decision_counts,
+        "candidateCompressionCounts": compression_counts or summary.get("candidateCompressionCounts", {}),
+        "signalValidationCounts": validation_counts or summary.get("signalValidationCounts", {}),
+        "stableDecisionCount": len([
+            candidate
+            for candidate in candidates
+            if isinstance(candidate.get("finalDecision"), dict)
+            and bool(candidate.get("finalDecision", {}).get("stability", {}).get("held"))
+        ]),
+        "finalDecisionStabilitySeconds": SIGNAL_FINAL_DECISION_STABILITY_SECONDS if SIGNAL_FINAL_DECISION_STABILITY_ENABLED else 0,
+    }
+    return status
 
 
 def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "price") -> dict:
@@ -12820,8 +12909,15 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     for item in candidates:
         item["isWatched"] = str(item.get("symbol", "")) in watched
     market = copy.deepcopy(base_payload.get("market", seed_data().get("market", {})))
-    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
-    candidates = sort_candidates_for_mode(candidates, mode)
+    base_integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
+    if include_depth:
+        candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
+        candidates = sort_candidates_for_mode(candidates, mode)
+        selection_cycle = "full-analysis"
+    else:
+        candidates = [price_only_candidate_update(candidate) for candidate in candidates]
+        selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
+        selection_cycle = "price-only"
     live_state_write_status = update_live_state_from_candidates(candidates, mode)
     candidate_data_status = update_candidate_data_snapshots(candidates, mode, stage="live-price")
     market_data_status = market_data_latest_status()
@@ -12851,7 +12947,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "stableDecisionCount": selection_status.get("stableDecisionCount", 0),
         "finalDecisionStabilitySeconds": selection_status.get("finalDecisionStabilitySeconds", 0),
     })
-    integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
+    integrations = base_integrations
     integrations["selection"] = selection_status
     integrations["livePrice"] = {
         "source": "toss-dashboard-poll",
@@ -12868,6 +12964,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "stateWrite": live_state_write_status,
         "candidateData": candidate_data_status,
         "marketDataLatest": market_data_status,
+        "selectionCycle": selection_cycle,
         "updatedAt": summary["livePriceUpdatedAt"],
     }
     toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}
@@ -12885,6 +12982,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "mode": mode,
         "source": "live-price",
         "baseSource": base_source,
+        "selectionCycle": selection_cycle,
         "detail": "full" if include_depth else "price",
         "updatedAt": summary["livePriceUpdatedAt"],
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
