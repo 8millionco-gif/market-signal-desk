@@ -34,11 +34,15 @@ DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
 DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
+RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
+SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "500"))
+SIGNAL_RAW_EVENT_PAYLOAD_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_PAYLOAD_LIMIT", "40"))
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -208,6 +212,7 @@ DISCOVERY_BOT_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
+RAW_EVENT_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
@@ -220,6 +225,14 @@ DB_MIGRATION_STATUS: dict[str, object] = {
     "snapshotsInserted": 0,
     "snapshotsScanned": 0,
     "error": "",
+}
+RAW_EVENT_STATE: dict[str, object] = {
+    "enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED,
+    "lastStoredAt": "",
+    "lastSource": "",
+    "lastEventType": "",
+    "lastStorage": "",
+    "lastError": "",
 }
 SCHEDULER_STATE: dict[str, object] = {
     "started": False,
@@ -338,6 +351,20 @@ def ensure_database_schema() -> bool:
                     )
                     cur.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS signal_raw_events (
+                            id TEXT PRIMARY KEY,
+                            source TEXT NOT NULL,
+                            event_type TEXT NOT NULL,
+                            symbol TEXT NOT NULL DEFAULT '',
+                            query TEXT NOT NULL DEFAULT '',
+                            collected_at TIMESTAMPTZ NOT NULL,
+                            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
                         CREATE INDEX IF NOT EXISTS signal_snapshots_mode_created_idx
                         ON signal_snapshots (mode, created_at DESC)
                         """
@@ -346,6 +373,24 @@ def ensure_database_schema() -> bool:
                         """
                         CREATE INDEX IF NOT EXISTS signal_snapshots_trigger_created_idx
                         ON signal_snapshots (run_trigger, created_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_raw_events_source_collected_idx
+                        ON signal_raw_events (source, collected_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_raw_events_symbol_collected_idx
+                        ON signal_raw_events (symbol, collected_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_raw_events_type_collected_idx
+                        ON signal_raw_events (event_type, collected_at DESC)
                         """
                     )
             DB_SCHEMA_READY = True
@@ -368,6 +413,12 @@ def normalize_db_payload(value, fallback):
     return fallback
 
 
+def short_text(value: object, limit: int) -> str:
+    text = str(value or "")
+    limit = max(0, int(limit))
+    return text if len(text) <= limit else text[:limit]
+
+
 def db_storage_counts() -> dict:
     if not ensure_database_schema():
         return {}
@@ -379,6 +430,8 @@ def db_storage_counts() -> dict:
                 kv_count = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM signal_snapshots")
                 snapshot_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM signal_raw_events")
+                raw_event_count = cur.fetchone()[0]
                 cur.execute("SELECT payload FROM signal_kv WHERE key = 'candidate_pool'")
                 pool_row = cur.fetchone()
         pool_payload = normalize_db_payload(pool_row[0], {}) if pool_row else {}
@@ -392,6 +445,7 @@ def db_storage_counts() -> dict:
         return {
             "kvCount": bounded_int(kv_count, 0, 1_000_000),
             "snapshotCount": bounded_int(snapshot_count, 0, 1_000_000),
+            "rawEventCount": bounded_int(raw_event_count, 0, 10_000_000),
             "candidatePoolCount": len(pool_items),
             "candidatePoolActiveCount": active_pool,
         }
@@ -632,6 +686,251 @@ def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
     except Exception as error:
         set_db_error(error)
         return False
+
+
+def compact_raw_payload(value, list_limit: int | None = None, depth: int = 0):
+    list_limit = SIGNAL_RAW_EVENT_PAYLOAD_LIMIT if list_limit is None else max(1, int(list_limit))
+    if depth > 4:
+        return short_text(str(value), 500)
+    if isinstance(value, dict):
+        compacted = {}
+        for key, item in value.items():
+            text_key = short_text(str(key), 120)
+            compacted[text_key] = compact_raw_payload(item, list_limit=list_limit, depth=depth + 1)
+        return compacted
+    if isinstance(value, list):
+        return [compact_raw_payload(item, list_limit=list_limit, depth=depth + 1) for item in value[:list_limit]]
+    if isinstance(value, tuple):
+        return [compact_raw_payload(item, list_limit=list_limit, depth=depth + 1) for item in list(value)[:list_limit]]
+    if isinstance(value, (datetime, Decimal)):
+        return str(value)
+    if isinstance(value, str):
+        return short_text(value, 2000)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return short_text(str(value), 1000)
+
+
+def raw_event_id(source: str, event_type: str, symbol: str, query: str, collected_at: str, payload) -> str:
+    fingerprint = json.dumps(
+        {
+            "source": source,
+            "eventType": event_type,
+            "symbol": symbol,
+            "query": query,
+            "collectedAt": collected_at,
+            "payload": payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
+
+
+def db_write_raw_event(event: dict) -> bool:
+    if not ensure_database_schema():
+        return False
+    try:
+        psycopg, Jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO signal_raw_events (
+                        id, source, event_type, symbol, query, collected_at, payload
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        event["id"],
+                        event["source"],
+                        event["eventType"],
+                        event.get("symbol", ""),
+                        event.get("query", ""),
+                        event["collectedAt"],
+                        Jsonb(event.get("payload", {})),
+                    ),
+                )
+        set_db_error("")
+        return True
+    except Exception as error:
+        set_db_error(error)
+        RAW_EVENT_STATE["lastError"] = str(error)[:240]
+        return False
+
+
+def file_write_raw_event(event: dict) -> bool:
+    with RAW_EVENT_LOCK:
+        try:
+            existing = safe_read_json_file(RAW_EVENTS_FILE)
+            if isinstance(existing, dict):
+                events = existing.get("events", [])
+            elif isinstance(existing, list):
+                events = existing
+            else:
+                events = []
+            if not isinstance(events, list):
+                events = []
+            limit = max(1, SIGNAL_RAW_EVENT_FILE_LIMIT)
+            next_events = [event, *[item for item in events if isinstance(item, dict) and item.get("id") != event["id"]]][:limit]
+            write_json(
+                RAW_EVENTS_FILE,
+                {
+                    "version": 1,
+                    "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+                    "events": next_events,
+                },
+            )
+            return True
+        except OSError as error:
+            RAW_EVENT_STATE["lastError"] = str(error)[:240]
+            return False
+
+
+def write_raw_event(
+    source: str,
+    event_type: str,
+    payload,
+    symbol: str = "",
+    query: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    if not SIGNAL_RAW_EVENT_STORAGE_ENABLED:
+        return {"stored": False, "storage": "disabled"}
+    compact_payload = compact_raw_payload({
+        "data": payload,
+        "metadata": metadata or {},
+    })
+    source = short_text(str(source or "unknown").strip().lower(), 60) or "unknown"
+    event_type = short_text(str(event_type or "raw").strip().lower(), 80) or "raw"
+    symbol = short_text(str(symbol or "").strip(), 40)
+    query = short_text(str(query or "").strip(), 240)
+    collected_at = datetime.now(KST).isoformat(timespec="seconds")
+    event = {
+        "id": raw_event_id(source, event_type, symbol, query, collected_at, compact_payload),
+        "source": source,
+        "eventType": event_type,
+        "symbol": symbol,
+        "query": query,
+        "collectedAt": collected_at,
+        "payload": compact_payload,
+    }
+    stored = False
+    storage = "filesystem"
+    if database_storage_enabled():
+        stored = db_write_raw_event(event)
+        storage = "postgres" if stored else "filesystem-fallback"
+    if not stored:
+        stored = file_write_raw_event(event)
+    RAW_EVENT_STATE.update({
+        "enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED,
+        "lastStoredAt": collected_at if stored else "",
+        "lastSource": source,
+        "lastEventType": event_type,
+        "lastStorage": storage if stored else "",
+        "lastError": "" if stored else str(RAW_EVENT_STATE.get("lastError", "")),
+    })
+    return {"stored": stored, "storage": storage, "id": event["id"]}
+
+
+def db_raw_event_counts() -> dict:
+    if not ensure_database_schema():
+        return {}
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM signal_raw_events")
+                total_count = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT source, COUNT(*)
+                    FROM signal_raw_events
+                    GROUP BY source
+                    ORDER BY COUNT(*) DESC, source ASC
+                    LIMIT 8
+                    """
+                )
+                source_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT source, event_type, symbol, query, collected_at
+                    FROM signal_raw_events
+                    ORDER BY collected_at DESC
+                    LIMIT 1
+                    """
+                )
+                latest = cur.fetchone()
+        latest_record = {}
+        if latest:
+            collected_at = latest[4]
+            latest_record = {
+                "source": latest[0],
+                "eventType": latest[1],
+                "symbol": latest[2],
+                "query": latest[3],
+                "collectedAt": collected_at.isoformat(timespec="seconds") if hasattr(collected_at, "isoformat") else str(collected_at),
+            }
+        set_db_error("")
+        return {
+            "count": bounded_int(total_count, 0, 10_000_000),
+            "bySource": {str(source): bounded_int(count, 0, 10_000_000) for source, count in source_rows},
+            "latest": latest_record,
+        }
+    except Exception as error:
+        set_db_error(error)
+        return {}
+
+
+def file_raw_event_counts() -> dict:
+    existing = safe_read_json_file(RAW_EVENTS_FILE)
+    if isinstance(existing, dict):
+        events = existing.get("events", [])
+    elif isinstance(existing, list):
+        events = existing
+    else:
+        events = []
+    events = [event for event in events if isinstance(event, dict)]
+    by_source: dict[str, int] = {}
+    for event in events:
+        source = str(event.get("source") or "unknown")
+        by_source[source] = by_source.get(source, 0) + 1
+    latest = events[0] if events else {}
+    return {
+        "count": len(events),
+        "bySource": by_source,
+        "latest": {
+            "source": latest.get("source", ""),
+            "eventType": latest.get("eventType", ""),
+            "symbol": latest.get("symbol", ""),
+            "query": latest.get("query", ""),
+            "collectedAt": latest.get("collectedAt", ""),
+        } if latest else {},
+    }
+
+
+def raw_event_storage_status() -> dict:
+    db_counts = db_raw_event_counts() if SIGNAL_RAW_EVENT_STORAGE_ENABLED and database_storage_enabled() else {}
+    if db_counts:
+        counts = db_counts
+        implementation = "postgres"
+        persistent = True
+    else:
+        counts = file_raw_event_counts() if SIGNAL_RAW_EVENT_STORAGE_ENABLED else {"count": 0, "bySource": {}, "latest": {}}
+        implementation = "filesystem"
+        persistent = False
+    return {
+        "enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED,
+        "implementation": implementation,
+        "persistent": persistent,
+        "file": display_local_path(RAW_EVENTS_FILE),
+        "count": counts.get("count", 0),
+        "bySource": counts.get("bySource", {}),
+        "latest": counts.get("latest", {}),
+        "last": dict(RAW_EVENT_STATE),
+    }
 
 
 def db_recent_scheduler_runs(limit: int) -> list[dict]:
@@ -979,6 +1278,7 @@ def fetch_toss_prices(symbols: list[str]) -> dict:
         PRICE_CACHE["symbols"] = cache_key
         PRICE_CACHE["payload"] = payload
         PRICE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=TOSS_PRICE_CACHE_SECONDS)
+        write_raw_event("toss", "prices", payload, query=",".join(symbols), metadata={"symbolCount": len(symbols)})
         return payload
 
 
@@ -1010,6 +1310,7 @@ def fetch_toss_candles(symbol: str, interval: str = "1d", count: int = 20) -> di
             "payload": payload,
             "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_CANDLE_CACHE_SECONDS),
         }
+        write_raw_event("toss", "candles", payload, symbol=symbol, metadata={"interval": interval, "count": count})
         return payload
 
 
@@ -1037,6 +1338,7 @@ def fetch_toss_orderbook(symbol: str) -> dict:
             "payload": payload,
             "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_ORDERBOOK_CACHE_SECONDS),
         }
+        write_raw_event("toss", "orderbook", payload, symbol=symbol)
         return payload
 
 
@@ -1067,6 +1369,7 @@ def fetch_toss_trades(symbol: str, count: int | None = None) -> dict:
             "payload": payload,
             "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TOSS_TRADES_CACHE_SECONDS),
         }
+        write_raw_event("toss", "trades", payload, symbol=symbol, metadata={"count": count})
         return payload
 
 
@@ -2626,6 +2929,13 @@ def fetch_dart_disclosures(symbol: str, days: int | None = None) -> dict:
         "items": [normalize_dart_disclosure(item) for item in rows],
         "source": "opendart",
     }
+    write_raw_event(
+        "opendart",
+        "disclosures",
+        payload,
+        symbol=symbol,
+        metadata={"corpCode": corp["corpCode"], "lookbackDays": days, "normalizedItemCount": len(result["items"])},
+    )
     DISCLOSURE_CACHE[cache_key] = {
         "payload": result,
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=DART_DISCLOSURE_CACHE_SECONDS),
@@ -2761,6 +3071,13 @@ def fetch_naver_news(query: str, display: int | None = None, start: int = 1, sor
     )
     with urlopen(request, timeout=NAVER_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
+    write_raw_event(
+        "naver",
+        "news",
+        payload,
+        query=query,
+        metadata={"display": display, "start": start, "sort": sort, "itemCount": len(payload.get("items", []))},
+    )
     NEWS_CACHE[cache_key] = {
         "payload": payload,
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=NAVER_NEWS_CACHE_SECONDS),
@@ -2896,6 +3213,13 @@ def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | Non
     payload["query"] = query
     payload["display"] = display
     payload["timespan"] = timespan
+    write_raw_event(
+        "gdelt",
+        "news",
+        payload,
+        query=query,
+        metadata={"display": display, "timespan": timespan, "sort": sort, "articleCount": len(payload.get("articles", []))},
+    )
     GDELT_NEWS_CACHE[cache_key] = {
         "payload": payload,
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=GDELT_NEWS_CACHE_SECONDS),
@@ -8091,6 +8415,7 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 
 def snapshot_storage_status() -> dict:
     db_status = database_status()
+    raw_events = raw_event_storage_status()
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         return {
@@ -8104,6 +8429,7 @@ def snapshot_storage_status() -> dict:
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
             "database": db_status,
+            "rawEvents": raw_events,
             "message": "Postgres DB에 스냅샷과 후보 풀을 저장합니다.",
             "error": "",
         }
@@ -8132,6 +8458,7 @@ def snapshot_storage_status() -> dict:
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
         "database": db_status,
+        "rawEvents": raw_events,
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
@@ -9053,6 +9380,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/storage/status":
             self.send_json(snapshot_storage_status())
+            return
+
+        if parsed.path == "/api/raw-events/status":
+            self.send_json(raw_event_storage_status())
             return
 
         if parsed.path == "/api/performance":

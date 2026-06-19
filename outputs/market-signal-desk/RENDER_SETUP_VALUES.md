@@ -135,9 +135,12 @@ SIGNAL_STORAGE_BACKEND=auto
 DATABASE_URL=postgresql://...
 SIGNAL_DB_AUTO_MIGRATE=1
 SIGNAL_DB_MIGRATE_RUN_LIMIT=200
+SIGNAL_RAW_EVENT_STORAGE_ENABLED=1
+SIGNAL_RAW_EVENT_PAYLOAD_LIMIT=40
+SIGNAL_RAW_EVENT_FILE_LIMIT=500
 ```
 
-앱은 DB 연결이 가능하면 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 파일 저장소에 남은 후보 풀, 최신 발굴 결과, 최근 스냅샷을 DB에 한 번 자동 이관합니다. 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실행`을 누르면 같은 이관을 수동으로 재확인할 수 있습니다.
+앱은 DB 연결이 가능하면 `signal_kv`, `signal_snapshots`, `signal_raw_events` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 파일 저장소에 남은 후보 풀, 최신 발굴 결과, 최근 스냅샷을 DB에 한 번 자동 이관합니다. 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실행`을 누르면 같은 이관을 수동으로 재확인할 수 있습니다.
 
 DB에 저장되는 데이터:
 
@@ -145,9 +148,12 @@ DB에 저장되는 데이터:
 candidate_pool          후보 풀
 discovery_latest        상시 발굴 봇 최신 결과
 signal_snapshots        장전/장마감/장중 스냅샷과 성과 검증 기준 데이터
+signal_raw_events       시세/공시/뉴스 원천 이벤트와 판단 근거 데이터
 ```
 
-DB가 연결되지 않으면 기존처럼 `data/*.json`, `data/runs/*.json` 파일 저장소로 대체됩니다. Render 무료 웹 서비스의 파일 저장소는 재배포/재시작 시 유지가 보장되지 않으므로, 후보 풀과 성과 기록을 운영에 쓰려면 `DATABASE_URL` 연결이 필요합니다.
+DB가 연결되지 않으면 기존처럼 `data/*.json`, `data/raw-events.json`, `data/runs/*.json` 파일 저장소로 대체됩니다. Render 무료 웹 서비스의 파일 저장소는 재배포/재시작 시 유지가 보장되지 않으므로, 후보 풀과 성과 기록을 운영에 쓰려면 `DATABASE_URL` 연결이 필요합니다.
+
+원천 이벤트 저장은 이후 데이터 신뢰도, 후보 선정 사유 추적, 백테스트 검증에 쓰입니다. 운영에서는 `SIGNAL_RAW_EVENT_STORAGE_ENABLED=1`을 유지하고, payload가 과도하게 커지면 `SIGNAL_RAW_EVENT_PAYLOAD_LIMIT` 값을 낮춥니다.
 
 터미널에서는 아래처럼 DB 이관과 저장 건수를 함께 확인합니다.
 

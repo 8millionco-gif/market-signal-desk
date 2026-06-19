@@ -288,7 +288,14 @@ function statusFallbacks() {
       runsDir: "",
       writable: false,
       persistent: false,
-      recentRunCount: 0
+      recentRunCount: 0,
+      rawEvents: {
+        enabled: false,
+        implementation: "filesystem",
+        count: 0,
+        bySource: {},
+        latest: {}
+      }
     },
     portfolio: {
       enabled: false,
@@ -1787,6 +1794,7 @@ function renderStorageStatus() {
   const database = status.database ?? {};
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
+  const rawEvents = status.rawEvents ?? {};
   const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
@@ -1807,12 +1815,22 @@ function renderStorageStatus() {
   const recordText = counts.snapshotCount != null
     ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0}`
     : "-";
+  const rawSourceText = rawEvents.bySource && Object.keys(rawEvents.bySource).length
+    ? Object.entries(rawEvents.bySource)
+        .slice(0, 3)
+        .map(([source, count]) => `${source} ${count}`)
+        .join(" · ")
+    : "";
+  const rawEventText = rawEvents.enabled
+    ? `${rawEvents.count ?? 0}건${rawSourceText ? ` · ${rawSourceText}` : ""}`
+    : "꺼짐";
   const rows = [
     ["저장 방식", Boolean(status.mode), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
+    ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
     ["보존성", Boolean(status.persistent), persistenceText],
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
     ["다음", status.persistent && status.writable, nextText]

@@ -341,6 +341,7 @@ DB에 저장되는 핵심 데이터는 다음과 같습니다.
 - 후보 풀: `candidate_pool`
 - 상시 발굴 봇 최신 결과: `discovery_latest`
 - 장전/장마감/장중 스냅샷: `signal_snapshots`
+- 시세·공시·뉴스 원천 이벤트: `signal_raw_events`
 
 Render Postgres 또는 Supabase Postgres를 연결한 뒤 아래 값을 설정합니다.
 
@@ -349,9 +350,16 @@ $env:SIGNAL_STORAGE_BACKEND="auto"
 $env:DATABASE_URL="postgresql://..."
 $env:SIGNAL_DB_AUTO_MIGRATE="1"
 $env:SIGNAL_DB_MIGRATE_RUN_LIMIT="200"
+$env:SIGNAL_RAW_EVENT_STORAGE_ENABLED="1"
+$env:SIGNAL_RAW_EVENT_PAYLOAD_LIMIT="40"
+$env:SIGNAL_RAW_EVENT_FILE_LIMIT="500"
 ```
 
-앱은 시작 후 첫 저장/조회 시 `signal_kv`, `signal_snapshots` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 `data/candidate-pool.json`, `data/discovery-latest.json`, `data/runs/*.json` 기록을 DB에 한 번 자동 이관합니다. 운영에서는 이 값을 연결해야 후보 풀과 성과 검증 기록이 재배포 후에도 유지됩니다.
+앱은 시작 후 첫 저장/조회 시 `signal_kv`, `signal_snapshots`, `signal_raw_events` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 `data/candidate-pool.json`, `data/discovery-latest.json`, `data/runs/*.json` 기록을 DB에 한 번 자동 이관합니다. 운영에서는 이 값을 연결해야 후보 풀과 성과 검증 기록이 재배포 후에도 유지됩니다.
+
+`signal_raw_events`에는 Toss 시세/캔들/호가/체결, OpenDART 공시, 네이버/GDELT 뉴스 응답이 저장됩니다. 원천 payload는 `SIGNAL_RAW_EVENT_PAYLOAD_LIMIT` 범위로 잘라 저장하므로, 판단 근거 추적은 가능하게 두면서 DB가 불필요하게 커지는 것을 막습니다.
+
+DB 연결이 없을 때 원천 이벤트는 `data/raw-events.json`에 제한 개수만 보관됩니다. Render 무료 웹 서비스의 파일 저장소는 재배포/재시작 후 유지가 보장되지 않으므로 운영에서는 DB 저장을 기준으로 봅니다.
 
 DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실행`을 눌러 파일 저장소 기록을 다시 확인할 수 있습니다. 기존 DB 데이터는 덮어쓰지 않고, 아직 DB에 없는 스냅샷만 추가합니다.
 

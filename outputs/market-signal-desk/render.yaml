@@ -19,6 +19,12 @@ services:
         value: "1"
       - key: SIGNAL_DB_MIGRATE_RUN_LIMIT
         value: "200"
+      - key: SIGNAL_RAW_EVENT_STORAGE_ENABLED
+        value: "1"
+      - key: SIGNAL_RAW_EVENT_PAYLOAD_LIMIT
+        value: "40"
+      - key: SIGNAL_RAW_EVENT_FILE_LIMIT
+        value: "500"
       - key: SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS
         value: "600"
       - key: SIGNAL_DISCOVERY_BOT_MODE
