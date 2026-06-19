@@ -88,9 +88,13 @@ const els = {
   stockSearchResults: document.querySelector("#stockSearchResults"),
   principles: document.querySelector("#principles"),
   kospiValue: document.querySelector("#kospiValue"),
+  kospiChange: document.querySelector("#kospiChange"),
   kosdaqValue: document.querySelector("#kosdaqValue"),
+  kosdaqChange: document.querySelector("#kosdaqChange"),
   nasdaqValue: document.querySelector("#nasdaqValue"),
+  nasdaqChange: document.querySelector("#nasdaqChange"),
   usdKrwValue: document.querySelector("#usdKrwValue"),
+  usdKrwPair: document.querySelector("#usdKrwPair"),
   marketNote: document.querySelector("#marketNote"),
   metricCandidates: document.querySelector("#metricCandidates"),
   metricHighScore: document.querySelector("#metricHighScore"),
@@ -2431,12 +2435,29 @@ function renderNotificationStatus() {
   });
 }
 
+function marketIndexDisplay(market, key) {
+  const detail = market?.indexDetails?.[key] ?? {};
+  return {
+    value: detail.value || "-",
+    change: displayChangeText(detail.change || market?.[key] || "-")
+  };
+}
+
+function renderMarketIndex(valueNode, changeNode, data) {
+  if (valueNode) valueNode.textContent = data.value || "-";
+  if (changeNode) {
+    changeNode.textContent = data.change || "-";
+    changeNode.className = changeClass(data.change);
+  }
+}
+
 function renderMarket() {
   const market = state.dashboard?.market ?? {};
-  els.kospiValue.textContent = market.kospi ?? "-";
-  els.kosdaqValue.textContent = market.kosdaq ?? "-";
-  els.nasdaqValue.textContent = market.nasdaq ?? "-";
-  els.usdKrwValue.textContent = market.usdKrw ?? "-";
+  renderMarketIndex(els.kospiValue, els.kospiChange, marketIndexDisplay(market, "kospi"));
+  renderMarketIndex(els.kosdaqValue, els.kosdaqChange, marketIndexDisplay(market, "kosdaq"));
+  renderMarketIndex(els.nasdaqValue, els.nasdaqChange, marketIndexDisplay(market, "nasdaq"));
+  if (els.usdKrwValue) els.usdKrwValue.textContent = market.usdKrw ?? "-";
+  if (els.usdKrwPair) els.usdKrwPair.textContent = "USD/KRW";
   const fxSource = market.usdKrwSource;
   const fxText =
     fxSource?.source === "fx-api"
@@ -2463,7 +2484,7 @@ function renderMarket() {
   const liveText = state.livePrice?.updatedAt
     ? `라이브 가격: ${timeLabel(state.livePrice.updatedAt)}${state.livePrice.error ? " · 갱신 실패" : ""}`
     : "";
-  els.marketNote.textContent = [cacheText, snapshotText, liveText, market.note, fxText, indexText].filter(Boolean).join(" ");
+  els.marketNote.textContent = [fxText, indexText, liveText, snapshotText, cacheText, market.note].filter(Boolean).join("  ·  ");
 }
 
 function renderMetrics() {
