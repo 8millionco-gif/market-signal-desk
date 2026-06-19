@@ -6768,6 +6768,18 @@ def decision_group_counts(candidates: list[dict]) -> dict:
 def raw_event_reliability_context() -> dict:
     db_enabled = database_storage_enabled()
     persistent = bool(db_enabled and DB_SCHEMA_READY and not DB_LAST_ERROR)
+    candidate_data = candidate_data_snapshot_status()
+    market_data = market_data_latest_status()
+    candidate_persistent = bool(candidate_data.get("persistent"))
+    market_persistent = bool(market_data.get("persistent"))
+    candidate_items = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
+    market_items = bounded_int(market_data.get("itemCount", 0), 0, 1_000_000)
+    data_operation_ready = bool(
+        candidate_persistent
+        and market_persistent
+        and candidate_items > 0
+        and market_items > 0
+    )
     return {
         "enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED,
         "backend": "postgres" if db_enabled else "filesystem",
@@ -6775,6 +6787,17 @@ def raw_event_reliability_context() -> dict:
         "lastStoredAt": RAW_EVENT_STATE.get("lastStoredAt", ""),
         "lastSource": RAW_EVENT_STATE.get("lastSource", ""),
         "lastEventType": RAW_EVENT_STATE.get("lastEventType", ""),
+        "dataStorage": {
+            "operationReady": data_operation_ready,
+            "persistent": bool(candidate_persistent and market_persistent),
+            "candidatePersistent": candidate_persistent,
+            "marketPersistent": market_persistent,
+            "candidateItemCount": candidate_items,
+            "marketItemCount": market_items,
+            "candidateStorage": candidate_data.get("storage", ""),
+            "marketStorage": market_data.get("storage", ""),
+            "databaseReady": bool(candidate_data.get("databaseReady") and market_data.get("databaseReady")),
+        },
     }
 
 
@@ -6893,6 +6916,23 @@ def candidate_source_reliability(candidate: dict, raw_context: dict | None = Non
         blockers.append("원천 데이터 저장 비활성")
     components["rawStorage"] = reliability_component(raw_score, label, status, reason, weight=8)
 
+    data_storage = raw_context.get("dataStorage", {}) if isinstance(raw_context.get("dataStorage"), dict) else {}
+    candidate_items = bounded_int(data_storage.get("candidateItemCount", 0), 0, 1_000_000)
+    market_items = bounded_int(data_storage.get("marketItemCount", 0), 0, 1_000_000)
+    if data_storage.get("operationReady"):
+        data_score, label, status, reason = 94, "DB 수집값 저장", "persistent", "후보와 최신 시세를 DB 기준으로 읽음"
+        reasons.append("후보·시세 DB 저장 확인")
+    elif data_storage.get("persistent"):
+        data_score, label, status, reason = 66, "DB 수집값 대기", "partial", "DB는 연결됐지만 후보 또는 최신 시세 저장이 아직 부족"
+        warnings.append("다음 수집 주기에서 후보·시세 DB 저장 확인 필요")
+    elif candidate_items or market_items:
+        data_score, label, status, reason = 46, "파일 수집값", "filesystem", "후보 또는 최신 시세가 임시 파일 저장소 기준"
+        warnings.append("후보·시세가 DB가 아닌 파일 fallback에 있어 재배포 후 손실될 수 있음")
+    else:
+        data_score, label, status, reason = 24, "수집값 저장 대기", "missing", "후보·시세 저장값이 아직 충분하지 않음"
+        blockers.append("후보·시세 저장 확인 전")
+    components["serverData"] = reliability_component(data_score, label, status, reason, weight=15)
+
     weighted_total = sum(component["score"] * component["weight"] for component in components.values())
     weight_sum = sum(component["weight"] for component in components.values()) or 1
     score = bounded_int(round(weighted_total / weight_sum), 0, 100)
@@ -6926,6 +6966,16 @@ def candidate_source_reliability(candidate: dict, raw_context: dict | None = Non
             "enabled": bool(raw_context.get("enabled")),
             "persistent": bool(raw_context.get("persistent")),
             "backend": raw_context.get("backend", ""),
+        },
+        "dataStorage": {
+            "operationReady": bool(data_storage.get("operationReady")),
+            "persistent": bool(data_storage.get("persistent")),
+            "candidatePersistent": bool(data_storage.get("candidatePersistent")),
+            "marketPersistent": bool(data_storage.get("marketPersistent")),
+            "candidateItemCount": candidate_items,
+            "marketItemCount": market_items,
+            "candidateStorage": data_storage.get("candidateStorage", ""),
+            "marketStorage": data_storage.get("marketStorage", ""),
         },
     }
 
@@ -7047,6 +7097,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
     reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
+    data_storage = source_reliability.get("dataStorage", {}) if isinstance(source_reliability.get("dataStorage"), dict) else {}
+    storage_ready = bool(data_storage.get("operationReady"))
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
@@ -7077,6 +7129,9 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
+    elif group_key == "action" and not storage_ready:
+        key, label, priority = "defer", "저장 확인 대기", 3
+        reasons.append("후보·시세가 DB 기준으로 저장된 뒤 실전 진입 후보로 판단")
     elif not display_data_ready:
         key, label, priority = "defer", evaluation_mode["label"], 3
         reasons.append(evaluation_mode["message"])
@@ -7255,6 +7310,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
     reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
+    data_storage = source_reliability.get("dataStorage", {}) if isinstance(source_reliability.get("dataStorage"), dict) else {}
+    storage_ready = bool(data_storage.get("operationReady"))
     hot = change is not None and change >= Decimal("3")
     weak = change is not None and change <= Decimal("-2")
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
@@ -7323,6 +7380,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif reliability_score < 58:
         action_key, action, tone = "verify", "근거 보강 대기", "wait"
         summary = "후보 신호는 있으나 원천 데이터 신뢰도가 낮아 시세·뉴스·공시 보강 전까지 대기합니다."
+    elif group_key == "action" and not storage_ready:
+        action_key, action, tone = "verify", "저장 확인 대기", "wait"
+        summary = "서버가 수집한 후보·시세 데이터가 DB에 저장된 뒤 실전 진입 판단으로 승격합니다."
     elif official_signal.get("riskLevel") == "medium" and reaction_key not in {"strong", "confirmed"}:
         action_key, action, tone = "verify", "공시 확인 대기", "wait"
         summary = "공식 공시 영향이 아직 가격과 거래량으로 검증되지 않아 진입을 보류합니다."
@@ -8889,6 +8949,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "exclude": 0,
     }
     stable_decision_count = 0
+    reliability_context = raw_event_reliability_context()
     for candidate in candidates:
         item = annotate_candidate_live_price_freshness(dict(candidate))
         previous_final_decision = stable_final_decision_candidate(item)
@@ -8962,7 +9023,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         evaluation_mode_counts[evaluation_key] = evaluation_mode_counts.get(evaluation_key, 0) + 1
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
-        source_reliability = candidate_source_reliability(item)
+        source_reliability = candidate_source_reliability(item, reliability_context)
         reliability_score = bounded_int(source_reliability.get("score", 0), 0, 100)
         reliability_scores.append(reliability_score)
         if reliability_score >= 78:
