@@ -38,13 +38,15 @@ Health Check Path: /api/health
 
 ## 첫 배포에 반드시 넣을 비밀값
 
-초기 배포에서는 아래 하나만 실제 값으로 넣습니다.
+초기 배포에서는 아래 값들을 먼저 넣습니다. 실전 판단용으로 운영하려면 `DATABASE_URL`까지 함께 연결하는 것을 기준으로 봅니다.
 
 ```text
 ADMIN_TOKEN=직접_정한_긴_랜덤_문자열
+DATABASE_URL=postgresql://...
 ```
 
 권장 예시는 최소 24자 이상입니다. 브라우저에서 접속 후 같은 값을 관리자 토큰 입력창에 넣습니다.
+`DATABASE_URL`은 Render Postgres 또는 Supabase Postgres에서 발급한 연결 문자열을 사용합니다.
 
 ## 첫 배포에서는 비워도 되는 비밀값
 
@@ -59,17 +61,17 @@ NAVER_CLIENT_SECRET=
 OPENAI_API_KEY=
 ```
 
-## 첫 배포 기본 플래그
+## 운영 기본 플래그
 
-초기에는 외부 API 호출량을 막기 위해 아래 값이 `render.yaml`에서 꺼져 있습니다.
-수동 Web Service 생성으로 `render.yaml` 값이 일부 적용되지 않더라도, 스케줄러와 GDELT 글로벌 뉴스는 코드 기본값도 꺼짐으로 둡니다.
+현재 `render.yaml`은 후보 발굴 후 서버가 Toss 가격/차트/호가/체결을 보강하고 저장하도록 스케줄러와 Toss 라이브 수집을 켜 둡니다. 외부 API 호출량을 임시로 줄여야 할 때만 아래 값을 `0`으로 낮춥니다.
 
 ```text
-SIGNAL_SCHEDULER_ENABLED=0
-TOSS_LIVE_PRICES=0
-TOSS_LIVE_CANDLES=0
-TOSS_LIVE_ORDERBOOK=0
-TOSS_LIVE_TRADES=0
+SIGNAL_SCHEDULER_ENABLED=1
+SIGNAL_CANDIDATE_PREFETCH_ENABLED=1
+TOSS_LIVE_PRICES=1
+TOSS_LIVE_CANDLES=1
+TOSS_LIVE_ORDERBOOK=1
+TOSS_LIVE_TRADES=1
 TOSS_LIVE_PORTFOLIO=0
 DART_LIVE_DISCLOSURES=0
 NAVER_LIVE_NEWS=0
@@ -112,18 +114,18 @@ https://market-signal-desk.onrender.com
 
 ## 다음 활성화 순서
 
-첫 화면이 정상인 뒤 아래 순서대로 하나씩 켭니다.
+첫 화면이 정상인 뒤 아래 순서대로 하나씩 보강합니다.
 
 ```text
 0. DATABASE_URL / SIGNAL_STORAGE_BACKEND=auto
-1. SIGNAL_AUTO_CANDIDATES_ENABLED=1
-2. GDELT_LIVE_NEWS=1
-3. NAVER_CLIENT_ID / NAVER_CLIENT_SECRET / NAVER_LIVE_NEWS=1
-4. DART_API_KEY / DART_LIVE_DISCLOSURES=1
+1. Toss 키와 Toss live flags 확인
+2. NAVER_CLIENT_ID / NAVER_CLIENT_SECRET / NAVER_LIVE_NEWS=1
+3. DART_API_KEY / DART_LIVE_DISCLOSURES=1
+4. GDELT_LIVE_NEWS=1
 5. OPENAI_API_KEY / OPENAI_ANALYSIS_ENABLED=1
-6. Toss 키와 Toss live flags
+6. SIGNAL_AUTO_CANDIDATES_ENABLED=1 확인
 7. TOSS_LIVE_PORTFOLIO=1
-8. SIGNAL_SCHEDULER_ENABLED=1
+8. SIGNAL_SCHEDULER_ENABLED=1 / SIGNAL_CANDIDATE_PREFETCH_ENABLED=1 확인
 ```
 
 ## DB 저장소 활성화
@@ -150,6 +152,8 @@ DB에 저장되는 데이터:
 candidate_pool          후보 풀
 discovery_latest        상시 발굴 봇 최신 결과
 live_price_state        Toss 최신 가격·등락률·가격 반응 상태
+candidate_data_snapshots 후보별 최신 수신 데이터 묶음
+market_data_latest      후보별 최신 Toss 가격 기준
 signal_snapshots        장전/장마감/장중 스냅샷과 성과 검증 기준 데이터
 signal_raw_events       시세/공시/뉴스 원천 이벤트와 판단 근거 데이터
 ```

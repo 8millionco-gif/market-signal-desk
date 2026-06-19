@@ -349,6 +349,8 @@ DB에 저장되는 핵심 데이터는 다음과 같습니다.
 - 후보 풀: `candidate_pool`
 - 상시 발굴 봇 최신 결과: `discovery_latest`
 - 토스 최신 수신 상태: `live_price_state`
+- 후보별 최신 수신 데이터 묶음: `candidate_data_snapshots`
+- 후보별 최신 Toss 가격 기준: `market_data_latest`
 - 장전/장마감/장중 스냅샷: `signal_snapshots`
 - 시세·공시·뉴스 원천 이벤트: `signal_raw_events`
 
