@@ -911,6 +911,65 @@ function reactionCheckGridHtml(stage) {
     .join("");
 }
 
+function reactionLiveMetrics(item) {
+  const reaction = item?.priceReaction ?? {};
+  const metrics = reaction.metrics ?? {};
+  const freshness = priceFreshnessInfo(item);
+  const orderbook = item?.liveOrderbook ?? {};
+  const trades = item?.liveTrades ?? {};
+  const volumeValue = metrics.volumeSpike || volumeReactionText(item);
+  const orderbookValue = metrics.orderbookImbalance
+    ? `${orderbook.pressure || "호가"} ${metrics.orderbookImbalance}`
+    : orderbook.source === "toss"
+      ? orderbook.pressure || "반영"
+      : dataSourceLabel(orderbook.source || "");
+  const tradeValue = metrics.tradeBias
+    ? `${trades.pressure || "체결"} ${metrics.tradeBias}`
+    : trades.source === "toss"
+      ? trades.pressure || "반영"
+      : dataSourceLabel(trades.source || "");
+  return [
+    {
+      label: "현재가",
+      value: `${item?.price ?? "-"} ${displayCandidateChangeText(item)}`.trim(),
+      note: freshness.isFresh ? livePriceLabel(item) : freshness.message || "토스 현재가 대기",
+      tone: freshness.isFresh ? "ok" : freshness.isDelayed ? "warn" : "wait"
+    },
+    {
+      label: "거래량",
+      value: volumeValue || "-",
+      note: metrics.volumeConfirmed ? "거래량 반응 확인" : "거래량 확인 필요",
+      tone: metrics.volumeConfirmed ? "ok" : volumeValue && volumeValue !== "-" ? "warn" : "wait"
+    },
+    {
+      label: "호가",
+      value: orderbookValue || "-",
+      note: orderbook.source === "toss" ? `스프레드 ${orderbook.spreadPercent || "-"}` : orderbook.message || "호가 대기",
+      tone: metrics.hasOrderbook ? (metrics.liquidityConfirmed ? "ok" : "warn") : "wait"
+    },
+    {
+      label: "체결",
+      value: tradeValue || "-",
+      note: trades.source === "toss" ? `최근 체결 ${trades.count ?? "-"}건` : trades.message || "체결 대기",
+      tone: metrics.hasTrades ? (metrics.liquidityConfirmed ? "ok" : "warn") : "wait"
+    }
+  ];
+}
+
+function reactionLiveGridHtml(item) {
+  return reactionLiveMetrics(item)
+    .map(
+      (entry) => `
+        <div class="${escapeHtml(entry.tone)}">
+          <span>${escapeHtml(entry.label)}</span>
+          <strong>${escapeHtml(entry.value)}</strong>
+          <em>${escapeHtml(entry.note)}</em>
+        </div>
+      `
+    )
+    .join("");
+}
+
 function updatePriceReactionFragments(item) {
   const stage = reactionStageForDisplay(item);
   const label = document.querySelector("[data-reaction-label]");
@@ -918,12 +977,14 @@ function updatePriceReactionFragments(item) {
   const card = document.querySelector("[data-reaction-status-card]");
   const cardLabel = document.querySelector("[data-reaction-card-label]");
   const cardMeta = document.querySelector("[data-reaction-card-meta]");
+  const liveGrid = document.querySelector("[data-reaction-live-grid]");
   const checks = document.querySelector("[data-reaction-check-grid]");
   if (label) label.textContent = stage.label;
   if (summary) summary.textContent = stage.summary;
   if (card) card.className = `reaction-status-card reaction-${stage.tone}`;
   if (cardLabel) cardLabel.textContent = stage.label;
   if (cardMeta) cardMeta.textContent = priceMeta(item);
+  if (liveGrid) liveGrid.innerHTML = reactionLiveGridHtml(item);
   if (checks) checks.innerHTML = reactionCheckGridHtml(stage);
 }
 
@@ -5007,6 +5068,9 @@ function priceReactionSection(item) {
       <div class="reaction-status-card reaction-${escapeHtml(stage.tone)}" data-reaction-status-card>
         <strong data-reaction-card-label>${escapeHtml(stage.label)}</strong>
         <span data-reaction-card-meta>${escapeHtml(priceMeta(item))}</span>
+      </div>
+      <div class="reaction-live-grid" data-reaction-live-grid>
+        ${reactionLiveGridHtml(item)}
       </div>
       <details class="support-detail-section reaction-detail-toggle">
         <summary>
