@@ -6393,6 +6393,9 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     live_price = candidate.get("livePrice", {})
     live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     has_live_price = candidate_has_fresh_live_price(candidate)
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    entry_data_ready = bool(completeness.get("entryReady"))
+    missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
@@ -6407,6 +6410,12 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
+    elif group_key == "action" and not entry_data_ready:
+        key, label, priority = "defer", "데이터 보강 대기", 3
+        if missing_data:
+            reasons.append(f"진입 필수 데이터 미완성: {', '.join(str(item) for item in missing_data[:4])}")
+        else:
+            reasons.append("진입 판단 전 가격·등락률·거래 반응 데이터 보강 필요")
     elif reaction_gate == "blocked":
         key, label, priority = "exclude", "가격 반응 차단", 4
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
@@ -6584,6 +6593,10 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    display_data_ready = bool(completeness.get("displayReady"))
+    entry_data_ready = bool(completeness.get("entryReady"))
+    missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
     evidence = candidate_discovery_evidence_strength(candidate)
     profit_percent = display_number_to_decimal(holding.get("profitLossPercent") or holding.get("profitLossRate"))
     allocation_percent = display_number_to_decimal(holding.get("allocationPercent") or holding.get("allocation"))
@@ -6615,6 +6628,14 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif not has_price:
         action_key, action, tone = "verify", "확인 대기", "wait"
         summary = "현재가가 확인되지 않아 매수·대기·손절 기준을 확정하지 않습니다."
+    elif not display_data_ready:
+        action_key, action, tone = "verify", "데이터 보강 대기", "wait"
+        missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "필수 데이터"
+        summary = f"{missing_text} 확인 전까지 신규 진입 판단을 확정하지 않습니다."
+    elif gate_key == "actionable" and not entry_data_ready:
+        action_key, action, tone = "verify", "반응 데이터 대기", "wait"
+        missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "가격·거래 반응"
+        summary = f"{missing_text} 보강 전까지 매수 가능 후보로 올리지 않습니다."
     elif official_signal.get("riskLevel") == "high":
         action_key, action, tone = "exclude", "공시 리스크 제외", "risk"
         summary = "중대 공식 공시 리스크가 있어 가격 반응보다 공시 내용 확인을 우선합니다."
@@ -8082,6 +8103,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["totalScore"] = total
         item["triggerReadiness"] = readiness
         item["preopenPriority"] = preopen_priority
+        item["dataCompleteness"] = candidate_data_completeness(item)
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
         source_reliability = candidate_source_reliability(item)
