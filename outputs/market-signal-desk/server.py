@@ -3172,6 +3172,59 @@ def change_from_toss_price_row(price: dict) -> str | None:
     return display_change(((current - previous_close) / previous_close) * Decimal(100))
 
 
+def candles_from_market_data_record(record: dict) -> list[dict]:
+    row = market_data_record_payload_row(record)
+    if not isinstance(row, dict):
+        return []
+
+    candles = candle_rows(row)
+    if candles:
+        return candles
+
+    result = row.get("result")
+    if isinstance(result, dict):
+        candles = result.get("candles")
+        if isinstance(candles, list):
+            return [item for item in candles if isinstance(item, dict)]
+
+    for key in ("candles", "items", "data", "list"):
+        rows = row.get(key)
+        if isinstance(rows, list):
+            return [item for item in rows if isinstance(item, dict)]
+    return []
+
+
+def stored_candle_change_for_candidate(
+    candidate: dict,
+    current_price: str,
+    current_timestamp: str = "",
+    candle_records: dict[str, dict] | None = None,
+) -> tuple[str | None, dict]:
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None, {"source": "none", "message": "종목 코드가 없어 저장 캔들을 확인하지 못했습니다."}
+
+    candle_records = candle_records if isinstance(candle_records, dict) else stored_market_data_latest_records("toss", "candles")
+    record = candle_records.get(symbol)
+    if not isinstance(record, dict):
+        return None, {"source": "none", "message": "저장된 Toss 일봉 캔들이 없습니다."}
+
+    candles = candles_from_market_data_record(record)
+    if not candles:
+        return None, {"source": "none", "message": "저장된 Toss 일봉 캔들이 비어 있습니다."}
+
+    change = change_from_candles(current_price, candles, current_timestamp)
+    if not change:
+        return None, {"source": "none", "message": "저장된 Toss 일봉으로 등락률 기준가를 계산하지 못했습니다."}
+
+    timestamp = market_data_record_timestamp(record)
+    return change, {
+        "source": "stored-toss-candles",
+        "timestamp": timestamp,
+        "message": "토스 현재가의 등락률이 비어 있어 서버에 저장된 Toss 일봉 기준가로 보강했습니다.",
+    }
+
+
 def seconds_since_timestamp(value: str | None) -> int | None:
     parsed = parse_iso_datetime(str(value or ""))
     if parsed is None:
@@ -3390,9 +3443,12 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
     baseline_drift_count = 0
     retained_count = 0
     stored_fallback_count = 0
+    stored_candle_change_count = 0
+    change_pending_count = 0
     missing_count = 0
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     stored_market_records = stored_market_data_latest_records("toss", "prices")
+    stored_candle_records = stored_market_data_latest_records("toss", "candles")
     stored_candidate_records = stored_candidate_data_latest_records()
     for candidate in candidates:
         item = dict(candidate)
@@ -3422,15 +3478,31 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
             }
             item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text, str(item.get("market", "")))
             change = change_from_toss_price_row(price)
+            change_source = "toss-prices" if change else ""
+            if not change:
+                candle_change, candle_status = stored_candle_change_for_candidate(
+                    item,
+                    str(price.get("lastPrice", "")),
+                    str(price.get("timestamp") or now_text),
+                    stored_candle_records,
+                )
+                if candle_change:
+                    change = candle_change
+                    change_source = str(candle_status.get("source") or "stored-toss-candles")
+                    item["livePrice"]["changeMessage"] = str(candle_status.get("message") or "")
+                    if candle_status.get("timestamp"):
+                        item["livePrice"]["changeReferenceAt"] = str(candle_status.get("timestamp"))
+                    stored_candle_change_count += 1
             if change:
                 item["change"] = change
-                item["livePrice"]["changeSource"] = "toss-prices"
+                item["livePrice"]["changeSource"] = change_source or "toss-prices"
             elif candidate_change_text_usable(item.get("change")):
                 item["livePrice"]["changeSource"] = "retained-change"
                 item["livePrice"]["changeMessage"] = "토스 현재가 응답에 등락률이 없어 서버에 저장된 직전 등락률을 유지합니다."
             else:
                 item["livePrice"]["changeSource"] = "pending-change"
                 item["livePrice"]["changeMessage"] = "현재가는 수신했지만 등락률 기준가를 서버에서 추가 확인 중입니다."
+                change_pending_count += 1
             if baseline_warning and baseline_difference is not None:
                 item["livePrice"].update({
                     "baselineWarning": True,
@@ -3461,6 +3533,22 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                         item["change"] = stored_record.get("change", item.get("change", ""))
                         item["livePrice"]["changeSource"] = item["livePrice"].get("changeSource") or "stored-candidate-data"
                         item["livePrice"]["changeMessage"] = item["livePrice"].get("changeMessage") or "저장된 후보 데이터의 등락률을 유지합니다."
+                    if not candidate_data_has_change(item) and stored_live_price.get("lastPrice"):
+                        candle_change, candle_status = stored_candle_change_for_candidate(
+                            item,
+                            str(stored_live_price.get("lastPrice", "")),
+                            str(stored_live_price.get("timestamp") or stored_status.get("timestamp") or now_text),
+                            stored_candle_records,
+                        )
+                        if candle_change:
+                            item["change"] = candle_change
+                            item["livePrice"]["changeSource"] = str(candle_status.get("source") or "stored-toss-candles")
+                            item["livePrice"]["changeMessage"] = str(candle_status.get("message") or "")
+                            if candle_status.get("timestamp"):
+                                item["livePrice"]["changeReferenceAt"] = str(candle_status.get("timestamp"))
+                            stored_candle_change_count += 1
+                    if not candidate_data_has_change(item):
+                        change_pending_count += 1
                     stored_fallback_count += 1
                 else:
                     item["livePrice"] = {
@@ -3479,6 +3567,8 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
         "priceCount": len(prices),
         "retainedCount": retained_count,
         "storedFallbackCount": stored_fallback_count,
+        "storedCandleChangeCount": stored_candle_change_count,
+        "changePendingCount": change_pending_count,
         "missingCount": missing_count,
         "baselineDriftCount": baseline_drift_count,
         "sampleDriftThresholdPercent": (
