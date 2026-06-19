@@ -12486,6 +12486,95 @@ def write_discovery_latest_record(record: dict) -> None:
         write_json(DISCOVERY_LATEST_FILE, record)
 
 
+def refresh_discovery_payload_after_prefetch(payload: dict, mode: str, trigger: str) -> dict:
+    candidates = [
+        copy.deepcopy(item)
+        for item in payload.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    ]
+    if not candidates:
+        return {
+            "enabled": True,
+            "refreshed": False,
+            "candidateCount": 0,
+            "message": "prefetch 이후 다시 반영할 후보가 없습니다.",
+        }
+
+    candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
+    candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
+    watched = set(watchlist())
+    market = payload.get("market", seed_data().get("market", {}))
+    candidates, selection_status = apply_candidate_selection(
+        candidates,
+        market if isinstance(market, dict) else {},
+        watched,
+        stabilize_decisions=True,
+    )
+    candidates = sort_candidates_for_mode(candidates, mode)
+    candidate_data_status = update_candidate_data_snapshots(
+        candidates,
+        mode,
+        stage=f"discovery-post-prefetch-{trigger}",
+    )
+    candidate_latest_status = update_market_data_latest_from_candidates(
+        candidates,
+        mode=mode,
+        stage=f"discovery-post-prefetch-{trigger}",
+    )
+    live_state_status = update_live_state_from_candidates(candidates, mode)
+
+    payload["candidates"] = candidates
+    payload["selected"] = candidates[0] if candidates else None
+    integrations = payload.setdefault("integrations", {})
+    integrations["postPrefetchMerge"] = {
+        "candidateDataMerge": candidate_data_merge,
+        "marketDataMerge": market_data_merge,
+        "liveStateMerge": live_state_merge,
+        "selection": selection_status,
+        "candidateData": candidate_data_status,
+        "candidateMarketDataLatest": candidate_latest_status,
+        "liveState": live_state_status,
+    }
+    integrations["selection"] = selection_status
+    integrations["candidateData"] = candidate_data_status
+    integrations["candidateMarketDataLatest"] = candidate_latest_status
+    integrations["marketDataMerge"] = market_data_merge
+
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    summary.update({
+        "candidateCount": len(candidates),
+        "postPrefetchRefreshed": True,
+        "postPrefetchCandidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
+        "postPrefetchMarketDataMergedCount": market_data_merge.get("mergedCount", 0),
+        "postPrefetchLiveStateMergedCount": live_state_merge.get("mergedCount", 0),
+        "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
+        "candidateMarketDataLatestUpdatedCount": candidate_latest_status.get("updatedCount", 0),
+        "candidateMarketDataLatestStored": bool(candidate_latest_status.get("stored", False)),
+        "entryDataReadyCount": selection_status.get("entryDataReadyCount"),
+        "displayDataReadyCount": selection_status.get("displayDataReadyCount"),
+        "priceBasisWaitCount": selection_status.get("priceBasisWaitCount"),
+        "changeWaitCount": selection_status.get("changeWaitCount"),
+        "tradeEvaluationReadyCount": selection_status.get("tradeEvaluationReadyCount"),
+        "serverCollectingCount": selection_status.get("serverCollectingCount"),
+        "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
+        "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
+    })
+    payload["summary"] = summary
+
+    return {
+        "enabled": True,
+        "refreshed": True,
+        "candidateCount": len(candidates),
+        "candidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge.get("mergedCount", 0),
+        "liveStateMergedCount": live_state_merge.get("mergedCount", 0),
+        "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
+        "candidateMarketDataLatestUpdatedCount": candidate_latest_status.get("updatedCount", 0),
+        "message": "prefetch로 저장된 최신 후보 데이터를 발굴 결과에 다시 반영했습니다.",
+    }
+
+
 def discovery_bot_status() -> dict:
     with DISCOVERY_BOT_LOCK:
         state = {
@@ -12525,8 +12614,11 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             market=payload.get("market", {}),
         )
         payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
+        post_prefetch_status = refresh_discovery_payload_after_prefetch(payload, selected_mode, trigger)
+        payload.setdefault("integrations", {})["postPrefetchRefresh"] = post_prefetch_status
         summary = dashboard_summary(payload)
         summary["candidatePrefetch"] = prefetch_status
+        summary["postPrefetchMerge"] = post_prefetch_status
         run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{selected_mode}-discovery-{trigger}"
         record = {
             "id": run_id,
@@ -12535,6 +12627,7 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             "createdAt": now.isoformat(timespec="seconds"),
             "summary": summary,
             "prefetch": prefetch_status,
+            "postPrefetchMerge": post_prefetch_status,
             "dashboard": payload,
         }
         write_discovery_latest_record(record)
