@@ -775,6 +775,66 @@ function livePriceLabel(item) {
   return timestamp ? `실시간 ${timeLabel(timestamp)}` : "실시간";
 }
 
+function metricLooksReady(value) {
+  const text = String(value ?? "").trim();
+  return Boolean(text && text !== "-" && !["0", "0건", "없음", "대기"].includes(text));
+}
+
+function volumeReactionText(item) {
+  const trend = item?.trend ?? {};
+  return trend.volumeSpike || trend.dailyVolume || trend.tradePressure || "-";
+}
+
+function reactionStageForDisplay(item) {
+  const reaction = item?.priceReaction ?? {};
+  const metrics = reaction.metrics ?? {};
+  const confirmationCount = Number(metrics.confirmationCount ?? 0);
+  const requiredConfirmations = Number(metrics.requiredConfirmations ?? 2);
+  const change = parseDisplayPercent(item?.change);
+  const hasLivePrice = item?.livePrice?.source === "toss";
+  const hasPositivePrice = change != null && change > 0;
+  const hasPrice = Boolean(item?.price && item.price !== "-");
+  const hasVolume = metricLooksReady(volumeReactionText(item));
+  const confirmedFactors = uniqueTexts(metrics.confirmedFactors ?? [], 4);
+  const missingFactors = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
+  const gate = reaction.reactionGate || "";
+
+  let label = "반응 확인 중";
+  let tone = "wait";
+  let summary = "재료는 있으나 가격·거래량 반응이 충분한지 확인하는 단계입니다.";
+  if (gate === "confirmed" || confirmationCount >= requiredConfirmations || Number(reaction.score ?? 0) >= 65) {
+    label = "가격 반응 확인";
+    tone = "buy";
+    summary = "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
+  } else if (gate === "blocked" || reaction.entryBlock) {
+    label = "오늘 제외";
+    tone = "risk";
+    summary = "재료 대비 가격 또는 거래량 반응이 부족해 신규 진입을 막습니다.";
+  } else if (gate === "watch") {
+    label = "추가 관찰";
+    summary = "일부 반응은 있으나 진입 판단 전 한 번 더 확인합니다.";
+  } else if (hasPositivePrice && hasVolume) {
+    label = "반응 관찰";
+    summary = "가격과 거래량 단서는 있으나 확인 개수가 아직 부족합니다.";
+  }
+
+  const checks = [
+    ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
+    ["가격 방향", hasPositivePrice, change == null ? "등락률 확인 중" : item.change],
+    ["거래 반응", hasVolume, volumeReactionText(item)],
+    ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
+  ];
+  return {
+    label,
+    tone,
+    summary,
+    checks,
+    confirmedFactors,
+    missingFactors,
+    hasPrice
+  };
+}
+
 function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   const decision = item?.finalDecision ?? {};
   const gate = item?.qualityGate ?? {};
@@ -795,7 +855,8 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: "눌림 대기", detail: plan.summary || "가격 조정을 기다립니다." };
   }
   if (reaction.reactionGate === "wait" || reaction.entryBlock || decision.actionKey === "verify") {
-    return { key: "wait", label: "반응 확인 중", detail: "뉴스·공시는 있으나 실시간 가격/수급 반응이 아직 부족합니다." };
+    const stage = reactionStageForDisplay(item);
+    return { key: "wait", label: stage.label, detail: stage.summary };
   }
   if (gate.key === "watch" || decision.actionKey === "watch" || plan.tone === "wait") {
     return { key: "wait", label: "가격 대기", detail: plan.summary || "현재가와 거래 반응을 더 확인합니다." };
@@ -1107,15 +1168,15 @@ function renderTradeDecisionStatus() {
     return;
   }
   const plan = tradePlan(item);
-  const compression = compressionForDisplay(item);
-  const validation = signalValidationForDisplay(item);
+  const stage = reactionStageForDisplay(item);
+  const primary = primaryDecisionForDisplay(item, plan);
   const currentRow = plan.rows.find(([label]) => label === "관찰 매수")?.[1] ?? "-";
   const holdingRow = plan.holding ? `${plan.holding.judgement ?? "보유"} · ${plan.holding.profitLossRate ?? "-"}` : "미보유";
   const rows = [
     ["선택", true, item.name ?? item.symbol ?? "-"],
-    ["압축", compression.tier === "core", `${compression.label} · ${compression.score}/100`],
-    ["검증", validation.entryReady, `${validation.label} · ${validation.score}/100`],
-    ["액션", tradeActionOk(item), plan.action],
+    ["뉴스 시그널", Array.isArray(item.sources) && item.sources.length > 0, candidateSignalMeta(item) || "출처 확인 중"],
+    ["가격 반응", stage.tone === "buy", stage.label],
+    ["최종 판단", primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
     ["관찰 매수", plan.tone === "buy", currentRow],
     ["현재가", plan.hasPrice, `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
     ["보유", Boolean(plan.holding), holdingRow]
@@ -3993,8 +4054,7 @@ function statCard(label, value) {
 }
 
 function signalFlowStrip(item, plan, primaryDecision) {
-  const reaction = item?.priceReaction ?? {};
-  const reactionLabel = reaction.reactionGate ? reactionGateLabel(reaction.reactionGate) : "가격 확인";
+  const stage = reactionStageForDisplay(item);
   const sourceMeta = candidateSignalMeta(item) || "출처 확인 중";
   return `
     <div class="signal-flow-strip">
@@ -4005,8 +4065,8 @@ function signalFlowStrip(item, plan, primaryDecision) {
       </div>
       <div>
         <span>2. 가격 반응</span>
-        <strong>${escapeHtml(reactionLabel)}</strong>
-        <em>${escapeHtml(priceMeta(item))}</em>
+        <strong>${escapeHtml(stage.label)}</strong>
+        <em>${escapeHtml(stage.summary)}</em>
       </div>
       <div>
         <span>3. 최종 판단</span>
@@ -4042,24 +4102,32 @@ function newsSignalSection(item) {
 
 function priceReactionSection(item) {
   const reaction = item?.priceReaction ?? {};
-  const metrics = reaction.metrics ?? {};
-  const confirmed = uniqueTexts(metrics.confirmedFactors ?? [], 4);
-  const missing = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
+  const stage = reactionStageForDisplay(item);
+  const confirmed = stage.confirmedFactors;
+  const missing = stage.missingFactors;
   const reasons = uniqueTexts(reaction.reasons ?? [], 4);
-  const reactionLabel = reaction.reactionGate ? reactionGateLabel(reaction.reactionGate) : "가격 확인 중";
   return `
     <section class="detail-section price-reaction-section">
       <div class="section-title">
         <p class="eyebrow">가격 반응</p>
-        <h2>${escapeHtml(reactionLabel)}</h2>
+        <h2>${escapeHtml(stage.label)}</h2>
+        <p>${escapeHtml(stage.summary)}</p>
       </div>
-      <div class="stat-grid">
-        ${statCard("현재가", item.price || "-")}
-        ${statCard("등락률", item.change || "-")}
-        ${statCard("거래량", item.trend?.volumeSpike ?? item.trend?.dailyVolume ?? "-")}
-        ${statCard("체결/호가", [item.trend?.tradePressure, item.trend?.orderbookPressure].filter(Boolean).join(" · ") || "-")}
-        ${statCard("반응 점수", reaction.score != null ? `${reaction.score}/100` : "-")}
-        ${statCard("갱신", livePriceLabel(item) || item.updated || "-")}
+      <div class="reaction-status-card reaction-${escapeHtml(stage.tone)}">
+        <strong>${escapeHtml(stage.label)}</strong>
+        <span>${escapeHtml(priceMeta(item))}</span>
+      </div>
+      <div class="reaction-check-grid">
+        ${stage.checks
+          .map(
+            ([label, ok, value]) => `
+              <div class="${ok ? "ok" : "wait"}">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+              </div>
+            `
+          )
+          .join("")}
       </div>
       ${
         confirmed.length || reasons.length
