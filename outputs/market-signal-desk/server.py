@@ -13921,15 +13921,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         candidates = [price_only_candidate_update(candidate) for candidate in candidates]
         selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
         selection_cycle = "price-only"
-    if include_depth:
-        storage_candidates = candidates
-    else:
-        refreshed_symbols = set(refreshed_by_symbol.keys())
-        storage_candidates = [
-            candidate
-            for candidate in candidates
-            if str(candidate.get("symbol", "")).strip().upper() in refreshed_symbols
-        ]
+    storage_candidates = candidates
     live_state_write_status = update_live_state_from_candidates(storage_candidates, mode)
     candidate_data_status = update_candidate_data_snapshots(storage_candidates, mode, stage="live-price")
     candidate_latest_status = update_market_data_latest_from_candidates(storage_candidates, mode=mode, stage="live-price")
