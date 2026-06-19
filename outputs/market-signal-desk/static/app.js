@@ -650,7 +650,7 @@ function mergeLivePricePayload(payload) {
   const incomingSymbols = new Set(incomingBySymbol.keys());
   const merged = existing.map((item) => {
     const next = incomingBySymbol.get(item.symbol);
-    return next ? { ...item, ...next } : item;
+    return next ? mergeLiveCandidate(item, next) : item;
   });
   incoming.forEach((item) => {
     if (!existingBySymbol.has(item.symbol)) merged.push(item);
@@ -673,6 +673,49 @@ function mergeLivePricePayload(payload) {
     state.selectedLookup = merged.find((item) => item.symbol === state.selectedLookup.symbol) || null;
   }
   return true;
+}
+
+function mergeLiveCandidate(current, incoming) {
+  const merged = { ...current };
+  const liveFields = [
+    "price",
+    "change",
+    "chart",
+    "updated",
+    "livePrice",
+    "liveCandles",
+    "liveOrderbook",
+    "liveTrades",
+    "priceReaction"
+  ];
+  liveFields.forEach((key) => {
+    if (incoming[key] !== undefined) merged[key] = incoming[key];
+  });
+  if (incoming.trend) {
+    merged.trend = {
+      ...(current.trend ?? {}),
+      ...incoming.trend
+    };
+  }
+  if (incoming.finalDecision) {
+    merged.finalDecision = mergeLiveFinalDecision(current.finalDecision, incoming.finalDecision);
+  }
+  merged.liveUpdate = {
+    updatedAt: incoming.livePrice?.updatedAt || incoming.updated || new Date().toISOString(),
+    source: incoming.livePrice?.source || "live-price"
+  };
+  return merged;
+}
+
+function mergeLiveFinalDecision(current = {}, incoming = {}) {
+  if (!current || !Object.keys(current).length) return incoming;
+  const merged = { ...current };
+  ["priceLevels", "rows", "signalCards"].forEach((key) => {
+    if (incoming[key] !== undefined) merged[key] = incoming[key];
+  });
+  if (incoming.reactionGate !== undefined) merged.reactionGate = incoming.reactionGate;
+  if (incoming.tradeAllowed !== undefined) merged.tradeAllowed = incoming.tradeAllowed;
+  return merged;
 }
 
 function livePriceSummaryPatch(summary) {
