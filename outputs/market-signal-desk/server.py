@@ -6361,7 +6361,7 @@ def decorate_candidate(candidate: dict, watched: set[str]) -> dict:
 
 
 def normalized_search_text(value: str) -> str:
-    return re.sub(r"\s+", "", str(value or "")).lower()
+    return re.sub(r"[^0-9a-zA-Z가-힣ㄱ-ㅎㅏ-ㅣ]+", "", str(value or "")).lower()
 
 
 HANGUL_INITIALS = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
@@ -6403,6 +6403,21 @@ def hangul_initials(value: str) -> str:
         elif char.strip():
             letters.append(char.lower())
     return normalized_search_text("".join(letters))
+
+
+def search_query_is_initials(query: str) -> bool:
+    text = normalized_search_text(query)
+    return bool(text) and all("ㄱ" <= char <= "ㅎ" for char in text)
+
+
+def search_text_subsequence(needle: str, haystack: str) -> bool:
+    if not needle:
+        return False
+    cursor = 0
+    for char in haystack:
+        if cursor < len(needle) and needle[cursor] == char:
+            cursor += 1
+    return cursor == len(needle)
 
 
 def expanded_stock_aliases(symbol: str, aliases: list[str] | None = None) -> list[str]:
@@ -6492,6 +6507,7 @@ def stock_search_match_info(query: str, item: dict) -> dict:
     if not normalized_query:
         return {"matched": False, "rank": 99, "field": "", "text": ""}
 
+    initials_query = search_query_is_initials(query)
     best = {"matched": False, "rank": 99, "field": "", "text": ""}
     for field, raw_text in search_terms_for_item(item):
         text = str(raw_text or "")
@@ -6499,31 +6515,47 @@ def stock_search_match_info(query: str, item: dict) -> dict:
         if not normalized_text:
             continue
         initials = hangul_initials(text)
+        allow_initials = field != "테마"
         rank = None
         if normalized_query == normalized_text:
             rank = 0
         elif normalized_text.startswith(normalized_query):
             rank = 1
-        elif initials and initials.startswith(normalized_query):
+        elif allow_initials and initials and initials.startswith(normalized_query):
             rank = 2
         elif normalized_query in normalized_text:
             rank = 3
-        elif initials and normalized_query in initials:
+        elif allow_initials and initials and normalized_query in initials:
             rank = 4
+        elif allow_initials and initials_query and initials and search_text_subsequence(normalized_query, initials):
+            rank = 5
         if rank is not None and rank < best["rank"]:
             best = {"matched": True, "rank": rank, "field": field, "text": text}
     return best
 
 
-def search_relevance_rank(query: str, item: dict) -> tuple[int, int, int]:
+def stock_search_field_priority(field: str) -> int:
+    return {
+        "코드": 0,
+        "종목명": 1,
+        "별칭": 1,
+        "영문명": 2,
+        "테마": 3,
+    }.get(str(field), 4)
+
+
+def search_relevance_rank(query: str, item: dict) -> tuple[int, ...]:
     match = item.get("match")
     if not isinstance(match, dict) or normalized_search_text(match.get("query", "")) != normalized_search_text(query):
         match = stock_search_match_info(query, item)
     bucket = bounded_int(match.get("rank", 99), 0, 99)
+    field_priority = stock_search_field_priority(str(match.get("field", "")))
     score = bounded_int(item.get("score", item.get("totalScore", 0)), 0, 100)
     name = normalized_search_text(item.get("name", ""))
     symbol = normalized_search_text(item.get("symbol", ""))
-    return bucket, -score, len(name or symbol)
+    in_candidates = 0 if item.get("inCandidates") else 1
+    watched = 0 if item.get("isWatched") else 1
+    return bucket, field_priority, in_candidates, watched, -score, len(name or symbol)
 
 
 def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list[dict]:

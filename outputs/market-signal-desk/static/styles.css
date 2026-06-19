@@ -503,6 +503,12 @@ h3 {
   border-color: rgba(123, 216, 143, 0.32);
 }
 
+.stock-result.active,
+.stock-result[aria-selected="true"] {
+  border-color: rgba(123, 216, 143, 0.42);
+  background: rgba(123, 216, 143, 0.1);
+}
+
 .stock-result .logo-mark {
   width: 32px;
   height: 32px;

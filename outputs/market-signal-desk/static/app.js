@@ -35,7 +35,8 @@ const state = {
     items: [],
     message: "",
     status: null,
-    analyzingSymbol: null
+    analyzingSymbol: null,
+    activeIndex: -1
   },
   selectedLookup: null,
   searchTimer: null,
@@ -2947,6 +2948,23 @@ function shouldSearchStocks(query) {
   return text.length >= 2;
 }
 
+function stockSearchActiveItem() {
+  const items = state.stockSearch.items ?? [];
+  if (!items.length) return null;
+  const visibleCount = Math.min(items.length, 8);
+  const index = Math.min(Math.max(Number(state.stockSearch.activeIndex ?? 0), 0), visibleCount - 1);
+  return items[index] ?? items[0] ?? null;
+}
+
+function setStockSearchActiveIndex(index) {
+  const items = state.stockSearch.items ?? [];
+  if (!items.length) return;
+  const visibleCount = Math.min(items.length, 8);
+  const next = ((index % visibleCount) + visibleCount) % visibleCount;
+  state.stockSearch = { ...state.stockSearch, activeIndex: next };
+  renderStockSearchResults();
+}
+
 async function openSearchResult(symbol) {
   const item = (state.stockSearch.items ?? []).find((entry) => entry.symbol === symbol);
   if (!item) return;
@@ -3010,6 +3028,7 @@ function renderStockSearchResults() {
   const stale = payload.query !== query;
   const loading = payload.loading || stale;
   const message = payload.message || payload.status?.message || "";
+  const activeIndex = items.length ? Math.min(Math.max(Number(payload.activeIndex ?? 0), 0), items.length - 1) : -1;
   els.stockSearchResults.hidden = false;
   els.stockSearchResults.innerHTML = `
     <div class="stock-search-head">
@@ -3022,8 +3041,8 @@ function renderStockSearchResults() {
             ${items
               .slice(0, 8)
               .map(
-                (item) => `
-                  <button class="stock-result" type="button" data-search-symbol="${escapeHtml(item.symbol)}">
+                (item, index) => `
+                  <button class="stock-result ${index === activeIndex ? "active" : ""}" type="button" data-search-symbol="${escapeHtml(item.symbol)}" data-search-index="${index}" aria-selected="${index === activeIndex ? "true" : "false"}">
                     <span class="logo-mark">${escapeHtml(initials(item.name || item.symbol))}</span>
                     <span>
                       <strong>${escapeHtml(item.name || item.symbol)} <small>${escapeHtml(item.symbol)}</small></strong>
@@ -3044,6 +3063,12 @@ function renderStockSearchResults() {
 
   els.stockSearchResults.querySelectorAll("[data-search-symbol]").forEach((button) => {
     button.addEventListener("click", () => openSearchResult(button.dataset.searchSymbol));
+    button.addEventListener("mouseenter", () => {
+      const index = Number(button.dataset.searchIndex ?? -1);
+      if (index >= 0) {
+        state.stockSearch = { ...state.stockSearch, activeIndex: index };
+      }
+    });
   });
 }
 
@@ -3056,7 +3081,8 @@ async function loadStockSearch() {
       items: [],
       message: "",
       status: null,
-      analyzingSymbol: null
+      analyzingSymbol: null,
+      activeIndex: -1
     };
     renderStockSearchResults();
     return;
@@ -3066,7 +3092,8 @@ async function loadStockSearch() {
     ...state.stockSearch,
     query,
     loading: true,
-    message: ""
+    message: "",
+    activeIndex: -1
   };
   renderStockSearchResults();
 
@@ -3082,7 +3109,8 @@ async function loadStockSearch() {
     items: Array.isArray(payload.items) ? payload.items : [],
     message: payload.message || "",
     status: payload.status || null,
-    analyzingSymbol: state.stockSearch.analyzingSymbol
+    analyzingSymbol: state.stockSearch.analyzingSymbol,
+    activeIndex: Array.isArray(payload.items) && payload.items.length ? 0 : -1
   };
   renderStockSearchResults();
 }
@@ -4066,12 +4094,28 @@ els.searchInput.addEventListener("input", (event) => {
 });
 
 els.searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown" && shouldSearchStocks(state.query)) {
+    event.preventDefault();
+    if ((state.stockSearch.items ?? []).length) {
+      setStockSearchActiveIndex(Number(state.stockSearch.activeIndex ?? -1) + 1);
+    } else {
+      loadStockSearch();
+    }
+    return;
+  }
+  if (event.key === "ArrowUp" && shouldSearchStocks(state.query)) {
+    event.preventDefault();
+    if ((state.stockSearch.items ?? []).length) {
+      setStockSearchActiveIndex(Number(state.stockSearch.activeIndex ?? 0) - 1);
+    }
+    return;
+  }
   if (event.key === "Enter") {
     const currentQuery = state.query.trim();
-    const first = state.stockSearch.query === currentQuery ? state.stockSearch.items?.[0] : null;
-    if (first?.symbol) {
+    const selected = state.stockSearch.query === currentQuery ? stockSearchActiveItem() : null;
+    if (selected?.symbol) {
       event.preventDefault();
-      openSearchResult(first.symbol);
+      openSearchResult(selected.symbol);
     } else if (shouldSearchStocks(state.query)) {
       event.preventDefault();
       loadStockSearch();
