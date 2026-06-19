@@ -10,7 +10,7 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: SIGNAL_SCHEDULER_ENABLED
-        value: "0"
+        value: "1"
       - key: SIGNAL_DISCOVERY_BOT_ENABLED
         value: "1"
       - key: SIGNAL_STORAGE_BACKEND
@@ -84,13 +84,13 @@ services:
       - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
         value: "3"
       - key: TOSS_LIVE_PRICES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_CANDLES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_ORDERBOOK
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_TRADES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_PORTFOLIO
         value: "0"
       - key: DART_LIVE_DISCLOSURES

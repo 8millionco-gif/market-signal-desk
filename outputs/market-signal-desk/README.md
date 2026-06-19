@@ -58,21 +58,22 @@ HOST=0.0.0.0
 
 `PORT`는 Render가 제공하는 값을 서버가 자동으로 읽습니다. 로컬에서는 기본 `8787`을 사용합니다.
 
-초기 스테이징에서는 외부 API 호출량을 보호하기 위해 다음 값이 꺼져 있습니다.
-수동 Web Service 생성으로 일부 값을 넣지 않아도 스케줄러와 GDELT 글로벌 뉴스는 코드 기본값이 꺼짐입니다.
+운영 배포에서는 후보 발굴 이후 서버가 Toss 가격/차트/호가/체결을 사전 보강하고 저장하도록 다음 값이 켜져 있습니다.
+페이지 새로고침은 저장된 최신 후보와 보강 데이터를 먼저 읽고, 서버 스케줄러가 백그라운드에서 부족한 데이터를 채우는 구조입니다.
 
 ```text
-SIGNAL_SCHEDULER_ENABLED=0
-TOSS_LIVE_PRICES=0
-TOSS_LIVE_CANDLES=0
-TOSS_LIVE_ORDERBOOK=0
-TOSS_LIVE_TRADES=0
+SIGNAL_SCHEDULER_ENABLED=1
+TOSS_LIVE_PRICES=1
+TOSS_LIVE_CANDLES=1
+TOSS_LIVE_ORDERBOOK=1
+TOSS_LIVE_TRADES=1
 TOSS_LIVE_PORTFOLIO=0
 DART_LIVE_DISCLOSURES=0
 NAVER_LIVE_NEWS=0
 OPENAI_ANALYSIS_ENABLED=0
 ```
 
+API 호출량을 임시로 줄여야 할 때만 위 라이브 수집 값을 `0`으로 낮추세요.
 실제 API 키는 Render Dashboard의 Environment에서 입력합니다. 키를 `render.yaml`에 직접 쓰지 마세요.
 
 Render에서 스냅샷 히스토리와 성과 검증 데이터를 오래 보존하려면 Persistent Disk 또는 DB 연결이 필요합니다. 디스크/DB를 붙이기 전까지는 배포 재시작, 재배포, 인스턴스 교체 시 런타임 파일이 사라질 수 있습니다.
