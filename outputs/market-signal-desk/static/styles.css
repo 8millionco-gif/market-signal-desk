@@ -303,6 +303,49 @@ h3 {
   line-height: 1.35;
 }
 
+.candidate-source-card {
+  display: grid;
+  gap: 7px;
+  margin: -4px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(17, 21, 29, 0.72);
+}
+
+.candidate-source-card div {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.candidate-source-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.candidate-source-card strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 900;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-source-card strong.ok {
+  color: var(--green);
+}
+
+.candidate-source-card strong.warn {
+  color: var(--amber);
+}
+
 .status-dot {
   width: 10px;
   height: 10px;

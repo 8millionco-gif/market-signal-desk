@@ -70,6 +70,7 @@ const els = {
   settingsView: document.querySelector("#settingsView"),
   candidateCount: document.querySelector("#candidateCount"),
   candidateSource: document.querySelector("#candidateSource"),
+  candidateSourceDetail: document.querySelector("#candidateSourceDetail"),
   searchInput: document.querySelector("#searchInput"),
   quickSearch: document.querySelector("#quickSearch"),
   stockSearchResults: document.querySelector("#stockSearchResults"),
@@ -463,6 +464,11 @@ function renderLoadError(error) {
   const message = error?.name === "AbortError" ? "외부 API 응답이 지연되고 있습니다." : "백엔드 서버 응답을 받지 못했습니다.";
   els.candidateCount.textContent = "0개";
   if (els.candidateSource) els.candidateSource.textContent = "연결 실패";
+  renderCandidateSourceDetail([
+    ["후보 출처", false, "연결 실패"],
+    ["저장 상태", false, "불러오기 실패"],
+    ["다음 조치", false, "새로고침 또는 서버 확인"]
+  ]);
   els.metricCandidates.textContent = 0;
   els.metricHighScore.textContent = 0;
   els.metricReady.textContent = 0;
@@ -999,6 +1005,69 @@ function renderCandidatePoolStatus() {
     .join("");
 }
 
+function candidateSourceLabel(summary = {}) {
+  const cache = state.dashboard?.cache ?? {};
+  if (cache.cached && cache.source === "discovery_latest") return "저장 발굴본";
+  if (cache.cached) return "저장 스냅샷";
+  if (summary.candidateSourceStored) return "저장 발굴 후보";
+  if (summary.candidateSource === "candidate-pool") return "후보 풀 재점검";
+  if (summary.candidateSource === "auto-discovery") return "실시간 발굴";
+  if (summary.candidateSource === "auto-news") return "자동 뉴스 선정";
+  if (summary.candidateSource === "auto-universe") return "자동 유니버스 선정";
+  if (summary.candidateSource === "sample") return "샘플 후보";
+  return summary.candidateSource || "후보 출처 확인 중";
+}
+
+function candidateSourceDetailRows(summary = {}) {
+  const cache = state.dashboard?.cache ?? {};
+  const discovery = state.dashboard?.integrations?.discovery ?? {};
+  const storage = state.storageStatus ?? {};
+  const stockMaster = state.stockMasterStatus ?? {};
+  const generated = stockMaster.generated ?? {};
+  const activeMaster = stockMaster.active ?? {};
+  const storageLabel =
+    storage.implementation === "database" || storage.mode === "database"
+      ? "DB"
+      : storage.implementation === "filesystem" || storage.mode === "filesystem"
+        ? "파일"
+        : "미확인";
+  const storageOk = Boolean(storage.persistent || storage.implementation === "database" || storage.mode === "database" || storage.recentRunCount);
+  const sourceLabel = candidateSourceLabel(summary);
+  const cachedAt = cache.createdAt || summary.dashboardCacheCreatedAt || summary.storedDiscoveryCreatedAt || state.dashboard?.generatedAt || "";
+  const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
+  const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
+  const filtered = Number(summary.filteredNewsCount ?? discovery.filteredNewsCount ?? 0);
+  const generatedCount = Number(generated.count ?? 0);
+  const activeCount = Number(activeMaster.count ?? 0);
+  const masterCount = activeCount || generatedCount;
+  const masterStorage = stockMasterStorageLabel(stockMaster.storage);
+  const masterGeneratedAt = generated.generatedAt ? ` · ${timeLabel(generated.generatedAt)}` : "";
+  const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
+  return [
+    ["후보 출처", sourceLabel !== "샘플 후보", `${sourceLabel}${cacheSuffix}`],
+    ["기준 시각", Boolean(cachedAt), cachedAt ? timeLabel(cachedAt) : "-"],
+    ["발굴 근거", scanned > 0, `${scanned}종목 · 재료뉴스 ${materialNews}건 · 제외 ${filtered}건`],
+    ["저장 상태", storageOk, `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
+    ["검색 마스터", masterCount > 0, `${masterCount}개 · ${masterStorage}${masterGeneratedAt}`]
+  ];
+}
+
+function renderCandidateSourceDetail(rows = null) {
+  if (!els.candidateSourceDetail) return;
+  const sourceRows = rows ?? candidateSourceDetailRows(state.dashboard?.summary ?? {});
+  els.candidateSourceDetail.innerHTML = sourceRows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function render() {
   updateShellView();
   renderMarket();
@@ -1073,6 +1142,11 @@ function renderAuthGate() {
   renderAuthStatus();
   els.candidateCount.textContent = "보호됨";
   if (els.candidateSource) els.candidateSource.textContent = "관리자 토큰 필요";
+  renderCandidateSourceDetail([
+    ["후보 출처", false, "잠금"],
+    ["저장 상태", false, "토큰 필요"],
+    ["다음 조치", false, "설정에서 토큰 입력"]
+  ]);
   els.metricCandidates.textContent = 0;
   els.metricHighScore.textContent = 0;
   els.metricReady.textContent = 0;
@@ -1463,12 +1537,7 @@ function renderMetrics() {
   const averageOpportunityScore = Number(summary.averageOpportunityScore ?? 0);
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
   if (els.candidateSource) {
-    const sourceLabel =
-      summary.candidateSource === "auto-news"
-        ? "자동 뉴스 선정"
-        : summary.candidateSource === "auto-universe"
-          ? "자동 유니버스 선정"
-          : "샘플 후보";
+    const sourceLabel = candidateSourceLabel(summary);
     const scanned = summary.scannedCount ?? discovery.scannedCount;
     const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
     const materialNews = summary.selectedMaterialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? summary.materialNewsCount ?? discovery.materialNewsItemCount;
@@ -1577,8 +1646,16 @@ function renderMetrics() {
     const cacheText = cache.cached
       ? `${cache.source === "discovery_latest" ? "저장 발굴본" : "저장 스냅샷"}${cache.createdAt ? ` · ${timeLabel(cache.createdAt)}` : ""}`
       : "";
-    els.candidateSource.textContent = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
+    const briefSplitText =
+      domestic || overseas
+        ? `국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
+        : "";
+    const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
+    const briefText = [cacheText, sourceLabel, scanned ? `${scanned}종목 점검` : "", briefSplitText, briefMaterialText].filter(Boolean).join(" · ");
+    els.candidateSource.textContent = briefText || sourceLabel;
+    els.candidateSource.title = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
   }
+  renderCandidateSourceDetail();
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
   els.metricHighScore.textContent = summary.highScoreCount ?? 0;
   els.metricReady.textContent = summary.readyCount ?? 0;
