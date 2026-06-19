@@ -1403,17 +1403,75 @@ def stored_live_price_for_candidate(
     return None, {"source": "none", "message": "저장된 토스 가격이 없습니다."}
 
 
+def stored_candles_from_market_data_record(record: dict) -> dict | None:
+    candles = candles_from_market_data_record(record)
+    if not candles:
+        return None
+    latest_timestamp = latest_candle_datetime(candles)
+    if candles_are_stale(candles):
+        return {
+            "source": "stale",
+            "interval": "1d",
+            "count": len(candles),
+            "latestTimestamp": latest_timestamp.isoformat(timespec="seconds") if latest_timestamp else "",
+            "dataSource": "market_data_latest",
+            "retained": True,
+            "message": "서버 저장 Toss 일봉이 오래되어 참고값으로만 유지합니다.",
+        }
+    return {
+        "source": "toss",
+        "interval": "1d",
+        "count": len(candles),
+        "latestTimestamp": latest_timestamp.isoformat(timespec="seconds") if latest_timestamp else "",
+        "dataSource": "market_data_latest",
+        "retained": True,
+        "message": "서버에 저장된 Toss 일봉을 후보 판단에 다시 반영했습니다.",
+    }
+
+
+def stored_orderbook_from_market_data_record(record: dict) -> dict | None:
+    payload = market_data_record_payload_row(record)
+    summary = summarize_orderbook(payload)
+    if not summary:
+        return None
+    return {
+        **summary,
+        "dataSource": "market_data_latest",
+        "retained": True,
+        "message": "서버에 저장된 Toss 호가를 후보 판단에 다시 반영했습니다.",
+    }
+
+
+def stored_trades_from_market_data_record(record: dict) -> dict | None:
+    payload = market_data_record_payload_row(record)
+    summary = summarize_trades(payload)
+    if not summary:
+        return None
+    return {
+        **summary,
+        "dataSource": "market_data_latest",
+        "retained": True,
+        "message": "서버에 저장된 Toss 체결을 후보 판단에 다시 반영했습니다.",
+    }
+
+
 def merge_market_data_latest_into_candidates(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return candidates, {"enabled": False, "mergedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
     records = stored_market_data_latest_records("toss", "prices")
-    if not records:
-        return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 가격이 아직 없습니다."}
+    candle_records = stored_market_data_latest_records("toss", "candles")
+    orderbook_records = stored_market_data_latest_records("toss", "orderbook")
+    trade_records = stored_market_data_latest_records("toss", "trades")
+    if not (records or candle_records or orderbook_records or trade_records):
+        return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 수집값이 아직 없습니다."}
 
     merged: list[dict] = []
     merged_count = 0
     price_merged_count = 0
     change_merged_count = 0
+    candle_merged_count = 0
+    orderbook_merged_count = 0
+    trade_merged_count = 0
     retained_count = 0
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -1422,48 +1480,109 @@ def merge_market_data_latest_into_candidates(candidates: list[dict]) -> tuple[li
         item = copy.deepcopy(candidate)
         symbol = str(item.get("symbol", "")).strip().upper()
         record = records.get(symbol)
-        if not record:
-            merged.append(item)
-            continue
+        record_timestamp = ""
+        merged_any = False
+        if record:
+            record_live_price = live_price_from_market_data_record(record, item.get("updated", ""), str(item.get("market", "")))
+            if record_live_price is not None:
+                current_live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+                current_timestamp = str(current_live_price.get("timestamp") or current_live_price.get("updatedAt") or "")
+                record_timestamp = market_data_record_timestamp(record)
+                has_current_price = candidate_has_toss_last_price(item)
+                should_merge_price = not has_current_price or timestamp_is_newer(record_timestamp, current_timestamp)
+                if should_merge_price:
+                    item["price"] = display_price(str(record_live_price["lastPrice"]), str(record_live_price["currency"]))
+                    item["livePrice"] = record_live_price
+                    price_merged_count += 1
+                    merged_any = True
+                else:
+                    retained_count += 1
 
-        record_live_price = live_price_from_market_data_record(record, item.get("updated", ""), str(item.get("market", "")))
-        if record_live_price is None:
-            merged.append(item)
-            continue
+                row = market_data_record_payload_row(record)
+                change = change_from_toss_price_row(row)
+                if change and (not candidate_data_has_change(item) or should_merge_price):
+                    item["change"] = change
+                    if isinstance(item.get("livePrice"), dict):
+                        item["livePrice"] = {
+                            **item["livePrice"],
+                            "changeSource": "market-data-latest",
+                            "changeMessage": "DB에 저장된 토스 최신 가격 기준 등락률을 반영했습니다.",
+                        }
+                    change_merged_count += 1
+                    merged_any = True
 
-        current_live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
-        current_timestamp = str(current_live_price.get("timestamp") or current_live_price.get("updatedAt") or "")
-        record_timestamp = market_data_record_timestamp(record)
-        has_current_price = candidate_has_toss_last_price(item)
-        should_merge_price = not has_current_price or timestamp_is_newer(record_timestamp, current_timestamp)
-        if should_merge_price:
-            item["price"] = display_price(str(record_live_price["lastPrice"]), str(record_live_price["currency"]))
-            item["livePrice"] = record_live_price
-            price_merged_count += 1
-        else:
-            retained_count += 1
+        candle_record = candle_records.get(symbol)
+        if candle_record and not candidate_data_source_ok(item.get("liveCandles", {})):
+            stored_candles = stored_candles_from_market_data_record(candle_record)
+            if stored_candles:
+                item["liveCandles"] = stored_candles
+                candles = candles_from_market_data_record(candle_record)
+                chart = candle_chart_points(candles)
+                if chart:
+                    item["chart"] = chart
+                volume_spike = candle_volume_spike(candles)
+                if volume_spike is not None:
+                    trend = dict(item.get("trend", {})) if isinstance(item.get("trend"), dict) else {}
+                    trend["volumeSpike"] = display_multiplier(volume_spike)
+                    trend["volumeSource"] = "저장 Toss 일봉"
+                    latest_volume = decimal_or_none(candles_chronological(candles)[-1].get("volume")) if candles else None
+                    trend["dailyVolume"] = display_compact_volume(latest_volume)
+                    item["trend"] = trend
+                live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+                if live_price.get("source") == "toss" and live_price.get("lastPrice") and not candidate_data_has_change(item):
+                    change = change_from_candles(
+                        str(live_price.get("lastPrice")),
+                        candles,
+                        str(live_price.get("timestamp") or record_timestamp or ""),
+                    )
+                    if change:
+                        item["change"] = change
+                        item["livePrice"] = {
+                            **live_price,
+                            "changeSource": "market-data-latest-candles",
+                            "changeMessage": "저장된 Toss 일봉 기준가로 등락률을 보강했습니다.",
+                    }
+                        change_merged_count += 1
+                        merged_any = True
+                candle_merged_count += 1
+                merged_any = True
 
-        row = market_data_record_payload_row(record)
-        change = change_from_toss_price_row(row)
-        if change and (not candidate_data_has_change(item) or should_merge_price):
-            item["change"] = change
-            if isinstance(item.get("livePrice"), dict):
-                item["livePrice"] = {
-                    **item["livePrice"],
-                    "changeSource": "market-data-latest",
-                    "changeMessage": "DB에 저장된 토스 최신 가격 기준 등락률을 반영했습니다.",
-                }
-            change_merged_count += 1
+        orderbook_record = orderbook_records.get(symbol)
+        if orderbook_record and not candidate_data_source_ok(item.get("liveOrderbook", {})):
+            stored_orderbook = stored_orderbook_from_market_data_record(orderbook_record)
+            if stored_orderbook:
+                item["liveOrderbook"] = stored_orderbook
+                trend = dict(item.get("trend", {})) if isinstance(item.get("trend"), dict) else {}
+                trend["orderbookPressure"] = stored_orderbook.get("pressure", "")
+                trend["orderbookImbalance"] = stored_orderbook.get("imbalancePercent", "")
+                trend["spread"] = stored_orderbook.get("spreadPercent") or "-"
+                item["trend"] = trend
+                orderbook_merged_count += 1
+                merged_any = True
 
-        item["marketDataLatest"] = {
-            "source": "market_data_latest",
-            "eventType": record.get("eventType", ""),
-            "collectedAt": record.get("collectedAt", ""),
-            "updatedAt": record.get("updatedAt", ""),
-            "ageSeconds": seconds_since_timestamp(record_timestamp),
-            "message": "서버가 수집해 저장한 최신 원천 가격을 우선 반영했습니다.",
-        }
-        merged_count += 1
+        trade_record = trade_records.get(symbol)
+        if trade_record and not candidate_data_source_ok(item.get("liveTrades", {})):
+            stored_trades = stored_trades_from_market_data_record(trade_record)
+            if stored_trades:
+                item["liveTrades"] = stored_trades
+                trend = dict(item.get("trend", {})) if isinstance(item.get("trend"), dict) else {}
+                trend["tradePressure"] = stored_trades.get("pressure", "")
+                trend["tradeBias"] = stored_trades.get("biasPercent", "")
+                trend["recentTradeVolume"] = display_compact_volume(decimal_or_none(stored_trades.get("totalVolume")))
+                item["trend"] = trend
+                trade_merged_count += 1
+                merged_any = True
+
+        if merged_any:
+            item["marketDataLatest"] = {
+                "source": "market_data_latest",
+                "eventType": "prices/depth",
+                "collectedAt": record.get("collectedAt", "") if record else "",
+                "updatedAt": record.get("updatedAt", "") if record else "",
+                "ageSeconds": seconds_since_timestamp(record_timestamp),
+                "message": "서버가 수집해 저장한 최신 원천 데이터를 우선 반영했습니다.",
+            }
+            merged_count += 1
         merged.append(item)
 
     return merged, {
@@ -1472,9 +1591,17 @@ def merge_market_data_latest_into_candidates(candidates: list[dict]) -> tuple[li
         "mergedCount": merged_count,
         "priceMergedCount": price_merged_count,
         "changeMergedCount": change_merged_count,
+        "candleMergedCount": candle_merged_count,
+        "orderbookMergedCount": orderbook_merged_count,
+        "tradeMergedCount": trade_merged_count,
+        "depthMergedCount": candle_merged_count + orderbook_merged_count + trade_merged_count,
         "retainedCount": retained_count,
-        "availableCount": len(records),
-        "message": f"DB 최신 토스 가격 {merged_count}개를 후보 판단에 반영했습니다.",
+        "availablePriceCount": len(records),
+        "availableCandleCount": len(candle_records),
+        "availableOrderbookCount": len(orderbook_records),
+        "availableTradeCount": len(trade_records),
+        "availableCount": len(records) + len(candle_records) + len(orderbook_records) + len(trade_records),
+        "message": f"DB 최신 토스 수집값 {merged_count}개를 후보 판단에 반영했습니다.",
     }
 
 
