@@ -764,13 +764,10 @@ function livePricePriority(item) {
   return priority;
 }
 
-function candidateLiveRenderSignature(item = {}) {
-  const plan = tradePlan(item);
-  const primary = primaryDecisionForDisplay(item, plan);
+function candidateLiveRenderSignature(item = {}, options = {}) {
   const livePrice = item.livePrice ?? {};
   const freshness = livePrice.freshness ?? {};
-  const finalDecision = item.finalDecision ?? {};
-  return JSON.stringify({
+  const priceSignature = {
     price: item.price || "",
     change: displayCandidateChangeText(item),
     updated: item.updated || "",
@@ -779,7 +776,15 @@ function candidateLiveRenderSignature(item = {}) {
     liveSource: livePrice.source || "",
     liveTimestamp: freshness.timestamp || livePrice.timestamp || livePrice.updatedAt || "",
     retained: Boolean(livePrice.retained),
-    retainedChange: Boolean(livePrice.retainedChange),
+    retainedChange: Boolean(livePrice.retainedChange)
+  };
+  if (options.priceOnly) return JSON.stringify(priceSignature);
+
+  const plan = tradePlan(item);
+  const primary = primaryDecisionForDisplay(item, plan);
+  const finalDecision = item.finalDecision ?? {};
+  return JSON.stringify({
+    ...priceSignature,
     action: plan.action,
     tone: plan.tone,
     decision: primary.key || primary.label || "",
@@ -794,7 +799,8 @@ function mergeLivePricePayload(payload) {
   const priceOnly = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const existing = state.dashboard.candidates ?? [];
   const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
-  const previousSignatures = new Map(existing.map((item) => [item.symbol, candidateLiveRenderSignature(item)]));
+  const signatureOptions = { priceOnly };
+  const previousSignatures = new Map(existing.map((item) => [item.symbol, candidateLiveRenderSignature(item, signatureOptions)]));
   const incomingBySymbol = new Map(incoming.map((item) => [item.symbol, item]));
   const incomingSymbols = new Set(incomingBySymbol.keys());
   const merged = existing.map((item) => {
@@ -807,7 +813,7 @@ function mergeLivePricePayload(payload) {
     });
   }
   const changedSymbols = merged
-    .filter((item) => previousSignatures.get(item.symbol) !== candidateLiveRenderSignature(item))
+    .filter((item) => previousSignatures.get(item.symbol) !== candidateLiveRenderSignature(item, signatureOptions))
     .map((item) => item.symbol);
   state.dashboard = {
     ...state.dashboard,
@@ -1022,21 +1028,23 @@ function livePriceIntegrationsPatch(integrations) {
 }
 
 function renderLivePriceUpdate(payload = {}) {
+  const priceOnly = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const changedSymbols = new Set(state.livePrice?.changedSymbols || []);
   const selectedChanged = state.selectedSymbol && changedSymbols.has(state.selectedSymbol);
-  if (selectedChanged || payload.detail !== "price") {
+  if (!priceOnly && (selectedChanged || payload.detail !== "price")) {
     renderTradeDecisionStatus();
   }
   renderLivePriceStatus();
-  updateLivePriceFragments({ detail: payload.detail || "price" });
+  updateLivePriceFragments({ detail: payload.detail || "price", priceOnly });
 }
 
 function updateLivePriceFragments(options = {}) {
-  updateFeedPriceFragments();
+  updateFeedPriceFragments(options);
   updateSelectedPriceFragments(options);
 }
 
-function updateFeedPriceFragments() {
+function updateFeedPriceFragments(options = {}) {
+  const priceOnly = Boolean(options.priceOnly);
   const candidates = state.dashboard?.candidates ?? [];
   const bySymbol = new Map(candidates.map((item) => [item.symbol, item]));
   document.querySelectorAll(".feed-item[data-symbol]").forEach((button) => {
@@ -1051,11 +1059,11 @@ function updateFeedPriceFragments() {
     const decision = button.querySelector("[data-feed-decision]");
     const liveData = button.querySelector("[data-feed-live]");
     const primary = primaryDecisionForDisplay(item, plan);
-    if (action) {
+    if (!priceOnly && action) {
       setTextIfChanged(action, feedActionLabel(item, plan));
       setClassIfChanged(action, `feed-action ${plan.tone}`);
     }
-    if (score) {
+    if (!priceOnly && score) {
       setTextIfChanged(score, item.totalScore ?? "-");
       setClassIfChanged(score, `score-pill ${scoreClass(item.totalScore)}`);
     }
@@ -1065,7 +1073,7 @@ function updateFeedPriceFragments() {
       setTextIfChanged(change, displayCandidateChangeText(item));
       setClassIfChanged(change, candidateChangeClass(item));
     }
-    if (decision) {
+    if (!priceOnly && decision) {
       setTextIfChanged(decision, primary.label);
       setClassIfChanged(decision, `feed-badge decision-badge decision-${primary.key}`);
     }
@@ -1076,6 +1084,7 @@ function updateFeedPriceFragments() {
 function updateSelectedPriceFragments(options = {}) {
   const item = selectedCandidate();
   if (!item) return;
+  const priceOnly = Boolean(options.priceOnly);
   const plan = tradePlan(item);
   const primaryDecision = primaryDecisionForDisplay(item, plan);
   const priceNode = document.querySelector("[data-selected-price]");
@@ -1092,6 +1101,10 @@ function updateSelectedPriceFragments(options = {}) {
   }
   setTextIfChanged(sourceNode, priceMeta(item));
   setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item));
+  if (priceOnly) {
+    updateSelectedLivePriceOnlyFragments(item);
+    return;
+  }
   setClassIfChanged(decisionNode, `decision-summary decision-${primaryDecision.key}`);
   setTextIfChanged(decisionLabelNode, primaryDecision.label);
   setTextIfChanged(decisionDetailNode, primaryDecision.detail);
@@ -1101,6 +1114,13 @@ function updateSelectedPriceFragments(options = {}) {
   if (options.detail && options.detail !== "price") {
     drawChart(item.chart);
   }
+}
+
+function updateSelectedLivePriceOnlyFragments(item) {
+  const cardMeta = document.querySelector("[data-reaction-card-meta]");
+  const liveGrid = document.querySelector("[data-reaction-live-grid]");
+  setTextIfChanged(cardMeta, priceMeta(item));
+  setHtmlIfChanged(liveGrid, reactionLiveGridHtml(item));
 }
 
 function updateSignalFlowFragments(item, plan, primaryDecision) {
