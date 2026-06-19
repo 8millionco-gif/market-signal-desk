@@ -30,6 +30,7 @@ DATA_DIR = BASE_DIR / "data"
 SEED_FILE = DATA_DIR / "seed.json"
 UNIVERSE_FILE = DATA_DIR / "candidate-universe.json"
 STOCK_SEARCH_MASTER_FILE = DATA_DIR / "stock-search-master.json"
+STOCK_SEARCH_GENERATED_FILE = DATA_DIR / "stock-search-generated.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
@@ -44,6 +45,9 @@ SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "500"))
 SIGNAL_RAW_EVENT_PAYLOAD_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_PAYLOAD_LIMIT", "40"))
+SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH = os.getenv("SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS = int(os.getenv("SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS", "86400"))
+STOCK_SEARCH_MASTER_KV_KEY = "stock_search_master"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
@@ -214,6 +218,7 @@ CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
 RAW_EVENT_LOCK = threading.Lock()
+STOCK_SEARCH_MASTER_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
@@ -233,6 +238,12 @@ RAW_EVENT_STATE: dict[str, object] = {
     "lastSource": "",
     "lastEventType": "",
     "lastStorage": "",
+    "lastError": "",
+}
+STOCK_SEARCH_MASTER_STATE: dict[str, object] = {
+    "autoRefreshEnabled": SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH,
+    "lastCheckedAt": "",
+    "lastRefresh": {},
     "lastError": "",
 }
 SCHEDULER_STATE: dict[str, object] = {
@@ -1094,6 +1105,17 @@ def universe_data() -> dict:
 
 def stock_search_master_data() -> dict:
     return read_json(STOCK_SEARCH_MASTER_FILE, {"symbols": []})
+
+
+def stock_search_generated_data() -> tuple[dict, str]:
+    if database_storage_enabled():
+        payload = db_read_kv(STOCK_SEARCH_MASTER_KV_KEY, {})
+        if isinstance(payload, dict) and isinstance(payload.get("symbols"), list):
+            return payload, "database"
+    payload = read_json(STOCK_SEARCH_GENERATED_FILE, {})
+    if isinstance(payload, dict) and isinstance(payload.get("symbols"), list):
+        return payload, "filesystem"
+    return {"symbols": []}, "none"
 
 
 def watchlist() -> list[str]:
@@ -6906,6 +6928,29 @@ def dart_stock_search_entries() -> list[dict]:
     return entries
 
 
+def normalize_stock_search_entry(entry: dict, default_source: str, default_label: str) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    name = str(entry.get("name") or symbol).strip()
+    if not symbol or not name:
+        return None
+    item = dict(entry)
+    market = str(item.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,6}", symbol) else "KR")).strip().upper()
+    item["symbol"] = symbol
+    item["name"] = name
+    item["market"] = market
+    if not item.get("category"):
+        item["category"] = "overseas" if market in {"US", "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"} else "domestic"
+    item["securityType"] = item.get("securityType", "STOCK")
+    item["aliases"] = expanded_stock_aliases(symbol, text_list(item.get("aliases", []), limit=16))
+    item["themes"] = text_list(item.get("themes", []), limit=8)
+    item["focusWeight"] = bounded_int(item.get("focusWeight", 3), 0, 15)
+    item["source"] = item.get("source", default_source)
+    item["sourceLabel"] = item.get("sourceLabel", default_label)
+    return item
+
+
 def stock_search_master_entries() -> list[dict]:
     payload = stock_search_master_data()
     raw_entries = payload.get("symbols", []) if isinstance(payload, dict) else []
@@ -6913,49 +6958,159 @@ def stock_search_master_entries() -> list[dict]:
         return []
     entries = []
     for entry in raw_entries:
-        if not isinstance(entry, dict):
-            continue
-        symbol = str(entry.get("symbol", "")).strip().upper()
-        name = str(entry.get("name") or symbol).strip()
-        if not symbol or not name:
-            continue
-        item = dict(entry)
-        item["symbol"] = symbol
-        item["name"] = name
-        item["market"] = item.get("market", "US" if re.fullmatch(r"[A-Z.\-]{1,6}", symbol) else "KR")
-        item["category"] = item.get("category", "overseas" if item.get("market") == "US" else "domestic")
-        item["securityType"] = item.get("securityType", "STOCK")
-        item["aliases"] = expanded_stock_aliases(symbol, text_list(item.get("aliases", []), limit=16))
-        item["themes"] = text_list(item.get("themes", []), limit=8)
-        item["focusWeight"] = bounded_int(item.get("focusWeight", 3), 0, 15)
-        item["source"] = item.get("source", "stock-search-master")
-        item["sourceLabel"] = item.get("sourceLabel", "검색 확장 마스터")
-        entries.append(item)
+        item = normalize_stock_search_entry(entry, "stock-search-master", "검색 확장 마스터")
+        if item:
+            entries.append(item)
     return entries
+
+
+def stock_search_generated_entries() -> list[dict]:
+    payload, _storage = stock_search_generated_data()
+    raw_entries = payload.get("symbols", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+    entries = []
+    for entry in raw_entries:
+        item = normalize_stock_search_entry(entry, "stock-search-generated", "저장 검색 마스터")
+        if item:
+            entries.append(item)
+    return entries
+
+
+def stock_search_source_lists(include_generated: bool = False) -> list[tuple[str, list[dict]]]:
+    sources = []
+    if include_generated:
+        sources.append(("stock-search-generated", stock_search_generated_entries()))
+    sources.extend(
+        [
+            ("candidate-universe", candidate_universe_entries()),
+            ("stock-search-master", stock_search_master_entries()),
+            ("manual-etf", STOCK_SEARCH_MANUAL_UNIVERSE),
+            ("opendart-corp-code", dart_stock_search_entries()),
+        ]
+    )
+    return sources
+
+
+def merge_stock_search_entries(source_lists: list[tuple[str, list[dict]]]) -> tuple[list[dict], dict]:
+    entries = []
+    seen: set[str] = set()
+    source_counts: dict[str, int] = {}
+    for source_name, source_entries in source_lists:
+        source_counts[source_name] = len(source_entries) if isinstance(source_entries, list) else 0
+        for entry in source_entries:
+            default_label = {
+                "candidate-universe": "감시 유니버스",
+                "stock-search-master": "검색 확장 마스터",
+                "manual-etf": "수동 ETF 마스터",
+                "opendart-corp-code": "OpenDART 종목마스터",
+                "stock-search-generated": "저장 검색 마스터",
+            }.get(source_name, source_name)
+            item = normalize_stock_search_entry(entry, source_name, default_label)
+            if not item:
+                continue
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if symbol in seen:
+                continue
+            entries.append(item)
+            seen.add(symbol)
+    return entries, source_counts
+
+
+def build_stock_search_master_payload(trigger: str = "manual") -> dict:
+    entries, source_counts = merge_stock_search_entries(stock_search_source_lists(include_generated=False))
+    generated_at = datetime.now(KST).isoformat(timespec="seconds")
+    return {
+        "version": 1,
+        "trigger": trigger,
+        "generatedAt": generated_at,
+        "count": len(entries),
+        "sourceCounts": source_counts,
+        "sources": list(source_counts.keys()),
+        "symbols": entries,
+    }
+
+
+def write_stock_search_generated_data(payload: dict) -> str:
+    if db_write_kv(STOCK_SEARCH_MASTER_KV_KEY, payload):
+        return "database"
+    write_json(STOCK_SEARCH_GENERATED_FILE, payload)
+    return "filesystem"
+
+
+def refresh_stock_search_master(trigger: str = "manual") -> dict:
+    global STOCK_SEARCH_UNIVERSE_CACHE
+    with STOCK_SEARCH_MASTER_LOCK:
+        try:
+            payload = build_stock_search_master_payload(trigger=trigger)
+            storage = write_stock_search_generated_data(payload)
+            STOCK_SEARCH_UNIVERSE_CACHE = None
+            status = {
+                "ok": True,
+                "storage": storage,
+                "generatedAt": payload.get("generatedAt", ""),
+                "count": payload.get("count", 0),
+                "sourceCounts": payload.get("sourceCounts", {}),
+                "trigger": trigger,
+            }
+            STOCK_SEARCH_MASTER_STATE["lastRefresh"] = status
+            STOCK_SEARCH_MASTER_STATE["lastError"] = ""
+            return status
+        except Exception as error:
+            message = str(error)[:240]
+            STOCK_SEARCH_MASTER_STATE["lastError"] = message
+            return {"ok": False, "error": "stock-search-master-refresh-failed", "message": message}
+
+
+def stock_search_master_refresh_due(now: datetime | None = None) -> bool:
+    if not SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH:
+        return False
+    now = now or datetime.now(KST)
+    payload, _storage = stock_search_generated_data()
+    generated_at = parse_iso_datetime(str(payload.get("generatedAt", ""))) if isinstance(payload, dict) else None
+    if generated_at is None:
+        return True
+    elapsed = (now - generated_at).total_seconds()
+    return elapsed >= max(3600, SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS)
+
+
+def stock_search_master_status() -> dict:
+    payload, storage = stock_search_generated_data()
+    generated_symbols = payload.get("symbols", []) if isinstance(payload, dict) else []
+    generated_count = len(generated_symbols) if isinstance(generated_symbols, list) else 0
+    live_entries = stock_search_universe_entries()
+    with STOCK_SEARCH_MASTER_LOCK:
+        state = dict(STOCK_SEARCH_MASTER_STATE)
+    return {
+        "ok": True,
+        "storage": storage,
+        "generated": {
+            "exists": storage != "none",
+            "count": generated_count,
+            "generatedAt": payload.get("generatedAt", "") if isinstance(payload, dict) else "",
+            "trigger": payload.get("trigger", "") if isinstance(payload, dict) else "",
+            "sourceCounts": payload.get("sourceCounts", {}) if isinstance(payload, dict) else {},
+        },
+        "active": {
+            "count": len(live_entries),
+            "usesGeneratedMaster": generated_count > 0,
+        },
+        "config": {
+            "autoRefreshEnabled": SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH,
+            "refreshSeconds": SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS,
+            "databaseEnabled": database_storage_enabled(),
+            "databaseReady": ensure_database_schema() if database_storage_enabled() else False,
+            "fallbackFile": str(STOCK_SEARCH_GENERATED_FILE),
+        },
+        "state": state,
+    }
 
 
 def stock_search_universe_entries() -> list[dict]:
     global STOCK_SEARCH_UNIVERSE_CACHE
     if STOCK_SEARCH_UNIVERSE_CACHE is not None:
         return STOCK_SEARCH_UNIVERSE_CACHE
-    entries = []
-    seen: set[str] = set()
-    for source_entries in [
-        candidate_universe_entries(),
-        stock_search_master_entries(),
-        STOCK_SEARCH_MANUAL_UNIVERSE,
-        dart_stock_search_entries(),
-    ]:
-        for entry in source_entries:
-            if not isinstance(entry, dict):
-                continue
-            symbol = str(entry.get("symbol", "")).strip().upper()
-            if not symbol or symbol in seen:
-                continue
-            item = dict(entry)
-            item["symbol"] = symbol
-            entries.append(item)
-            seen.add(symbol)
+    entries, _source_counts = merge_stock_search_entries(stock_search_source_lists(include_generated=True))
     STOCK_SEARCH_UNIVERSE_CACHE = entries
     return entries
 
@@ -7031,6 +7186,8 @@ def stock_search(query: str, limit: int = 8) -> dict:
     query = query.strip()
     limit = max(1, min(int(limit), 20))
     watched = set(watchlist())
+    generated_master, generated_storage = stock_search_generated_data()
+    generated_count = len(generated_master.get("symbols", [])) if isinstance(generated_master, dict) and isinstance(generated_master.get("symbols", []), list) else 0
     search_master_count = len(stock_search_universe_entries())
     candidate_items = seed_candidate_search(query, watched, limit=limit)
     items = list(candidate_items)
@@ -7102,7 +7259,10 @@ def stock_search(query: str, limit: int = 8) -> dict:
         "status": {
             **toss_status,
             "searchMasterCount": search_master_count,
-            "searchMasterSources": ["candidate-universe", "stock-search-master", "manual-etf", "opendart-corp-code"],
+            "searchMasterStorage": generated_storage,
+            "generatedMasterCount": generated_count,
+            "usingGeneratedMaster": generated_count > 0,
+            "searchMasterSources": ["stock-search-generated", "candidate-universe", "stock-search-master", "manual-etf", "opendart-corp-code"],
         },
         "message": " ".join(unique_texts(messages, limit=3)),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -9931,6 +10091,9 @@ def scheduler_loop() -> None:
         now = datetime.now(KST)
         with SCHEDULER_LOCK:
             SCHEDULER_STATE["lastCheckedAt"] = now.isoformat(timespec="seconds")
+        STOCK_SEARCH_MASTER_STATE["lastCheckedAt"] = now.isoformat(timespec="seconds")
+        if stock_search_master_refresh_due(now):
+            refresh_stock_search_master(trigger="scheduled")
         if SIGNAL_SCHEDULER_ENABLED:
             for job in scheduler_jobs():
                 if not job_is_due(job, now):
@@ -10046,6 +10209,10 @@ class AppHandler(BaseHTTPRequestHandler):
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/stocks/master/status":
+            self.send_json(stock_search_master_status())
             return
 
         if parsed.path == "/api/stocks/search":
@@ -10299,6 +10466,10 @@ class AppHandler(BaseHTTPRequestHandler):
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/stocks/master/refresh":
+            self.send_json(refresh_stock_search_master(trigger="manual"))
             return
 
         if parsed.path == "/api/storage/migrate":
