@@ -235,6 +235,24 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function setTextIfChanged(node, value) {
+  if (!node) return;
+  const next = String(value ?? "");
+  if (node.textContent !== next) node.textContent = next;
+}
+
+function setClassIfChanged(node, value) {
+  if (!node) return;
+  const next = String(value ?? "");
+  if (node.className !== next) node.className = next;
+}
+
+function setHtmlIfChanged(node, value) {
+  if (!node) return;
+  const next = String(value ?? "");
+  if (node.innerHTML !== next) node.innerHTML = next;
+}
+
 function dashboardBrowserCacheKey(mode) {
   return `${DASHBOARD_BROWSER_CACHE_PREFIX}${mode || state.mode || "close"}`;
 }
@@ -861,24 +879,24 @@ function updateFeedPriceFragments() {
     const liveData = button.querySelector("[data-feed-live]");
     const primary = primaryDecisionForDisplay(item, plan);
     if (action) {
-      action.textContent = feedActionLabel(item, plan);
-      action.className = `feed-action ${plan.tone}`;
+      setTextIfChanged(action, feedActionLabel(item, plan));
+      setClassIfChanged(action, `feed-action ${plan.tone}`);
     }
     if (score) {
-      score.textContent = item.totalScore ?? "-";
-      score.className = `score-pill ${scoreClass(item.totalScore)}`;
+      setTextIfChanged(score, item.totalScore ?? "-");
+      setClassIfChanged(score, `score-pill ${scoreClass(item.totalScore)}`);
     }
-    if (time) time.textContent = livePriceLabel(item) || item.updated || "";
-    if (price) price.textContent = item.price || "-";
+    setTextIfChanged(time, livePriceLabel(item) || item.updated || "");
+    setTextIfChanged(price, item.price || "-");
     if (change) {
-      change.textContent = displayCandidateChangeText(item);
-      change.className = candidateChangeClass(item);
+      setTextIfChanged(change, displayCandidateChangeText(item));
+      setClassIfChanged(change, candidateChangeClass(item));
     }
     if (decision) {
-      decision.textContent = primary.label;
-      decision.className = `feed-badge decision-badge decision-${primary.key}`;
+      setTextIfChanged(decision, primary.label);
+      setClassIfChanged(decision, `feed-badge decision-badge decision-${primary.key}`);
     }
-    if (liveData) liveData.innerHTML = liveDataCoverageChips(item, true);
+    setHtmlIfChanged(liveData, liveDataCoverageChips(item, true));
   });
 }
 
@@ -894,16 +912,16 @@ function updateSelectedPriceFragments(options = {}) {
   const decisionNode = document.querySelector("[data-selected-decision-summary]");
   const decisionLabelNode = decisionNode?.querySelector("strong");
   const decisionDetailNode = decisionNode?.querySelector("span");
-  if (priceNode) priceNode.textContent = item.price || "-";
+  setTextIfChanged(priceNode, item.price || "-");
   if (changeNode) {
-    changeNode.textContent = displayCandidateChangeText(item);
-    changeNode.className = candidateChangeClass(item);
+    setTextIfChanged(changeNode, displayCandidateChangeText(item));
+    setClassIfChanged(changeNode, candidateChangeClass(item));
   }
-  if (sourceNode) sourceNode.textContent = priceMeta(item);
-  if (liveDataNode) liveDataNode.innerHTML = liveDataCoverageChips(item);
-  if (decisionNode) decisionNode.className = `decision-summary decision-${primaryDecision.key}`;
-  if (decisionLabelNode) decisionLabelNode.textContent = primaryDecision.label;
-  if (decisionDetailNode) decisionDetailNode.textContent = primaryDecision.detail;
+  setTextIfChanged(sourceNode, priceMeta(item));
+  setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item));
+  setClassIfChanged(decisionNode, `decision-summary decision-${primaryDecision.key}`);
+  setTextIfChanged(decisionLabelNode, primaryDecision.label);
+  setTextIfChanged(decisionDetailNode, primaryDecision.detail);
   updateSignalFlowFragments(item, plan, primaryDecision);
   updatePriceReactionFragments(item);
   updateTradePlanFragments(item);
@@ -920,11 +938,11 @@ function updateSignalFlowFragments(item, plan, primaryDecision) {
   const priceSummary = document.querySelector("[data-flow-price-summary]");
   const finalLabel = document.querySelector("[data-flow-final-label]");
   const finalAction = document.querySelector("[data-flow-final-action]");
-  if (newsMeta) newsMeta.textContent = sourceMeta;
-  if (priceLabel) priceLabel.textContent = stage.label;
-  if (priceSummary) priceSummary.textContent = stage.summary;
-  if (finalLabel) finalLabel.textContent = primaryDecision.label;
-  if (finalAction) finalAction.textContent = plan.action;
+  setTextIfChanged(newsMeta, sourceMeta);
+  setTextIfChanged(priceLabel, stage.label);
+  setTextIfChanged(priceSummary, stage.summary);
+  setTextIfChanged(finalLabel, primaryDecision.label);
+  setTextIfChanged(finalAction, plan.action);
 }
 
 function reactionCheckGridHtml(stage) {
@@ -1008,13 +1026,13 @@ function updatePriceReactionFragments(item) {
   const cardMeta = document.querySelector("[data-reaction-card-meta]");
   const liveGrid = document.querySelector("[data-reaction-live-grid]");
   const checks = document.querySelector("[data-reaction-check-grid]");
-  if (label) label.textContent = stage.label;
-  if (summary) summary.textContent = stage.summary;
-  if (card) card.className = `reaction-status-card reaction-${stage.tone}`;
-  if (cardLabel) cardLabel.textContent = stage.label;
-  if (cardMeta) cardMeta.textContent = priceMeta(item);
-  if (liveGrid) liveGrid.innerHTML = reactionLiveGridHtml(item);
-  if (checks) checks.innerHTML = reactionCheckGridHtml(stage);
+  setTextIfChanged(label, stage.label);
+  setTextIfChanged(summary, stage.summary);
+  setClassIfChanged(card, `reaction-status-card reaction-${stage.tone}`);
+  setTextIfChanged(cardLabel, stage.label);
+  setTextIfChanged(cardMeta, priceMeta(item));
+  setHtmlIfChanged(liveGrid, reactionLiveGridHtml(item));
+  setHtmlIfChanged(checks, reactionCheckGridHtml(stage));
 }
 
 function tradeZoneGridHtml(plan) {
@@ -1043,18 +1061,18 @@ function updateTradePlanFragments(item) {
   const nowCurrent = document.querySelector("[data-now-current]");
   const nowFocus = document.querySelector("[data-now-focus]");
   const zoneGrid = document.querySelector("[data-trade-zone-grid]");
-  if (action) action.textContent = plan.action;
-  if (summary) summary.textContent = plan.summary;
+  setTextIfChanged(action, plan.action);
+  setTextIfChanged(summary, plan.summary);
   if (pill) {
-    pill.textContent = plan.action;
-    pill.className = `action-pill ${plan.tone}`;
+    setTextIfChanged(pill, plan.action);
+    setClassIfChanged(pill, `action-pill ${plan.tone}`);
   }
-  if (nowCard) nowCard.className = `decision-now-card decision-${now.tone}`;
-  if (nowTitle) nowTitle.textContent = now.title;
-  if (nowSummary) nowSummary.textContent = now.summary;
-  if (nowCurrent) nowCurrent.textContent = now.current || "-";
-  if (nowFocus) nowFocus.textContent = `기준 ${now.focus || "-"}`;
-  if (zoneGrid) zoneGrid.innerHTML = tradeZoneGridHtml(plan);
+  setClassIfChanged(nowCard, `decision-now-card decision-${now.tone}`);
+  setTextIfChanged(nowTitle, now.title);
+  setTextIfChanged(nowSummary, now.summary);
+  setTextIfChanged(nowCurrent, now.current || "-");
+  setTextIfChanged(nowFocus, `기준 ${now.focus || "-"}`);
+  setHtmlIfChanged(zoneGrid, tradeZoneGridHtml(plan));
 }
 
 async function refreshLivePrices() {
@@ -1907,7 +1925,7 @@ function renderTradeDecisionStatus() {
     ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayCandidateChangeText(item)}`.trim()],
     ["보유", Boolean(plan.holding), holdingRow]
   ];
-  els.tradeDecisionStatus.innerHTML = rows
+  setHtmlIfChanged(els.tradeDecisionStatus, rows
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
@@ -1917,7 +1935,7 @@ function renderTradeDecisionStatus() {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function parseTimeMs(value) {
@@ -2008,7 +2026,7 @@ function renderLivePriceStatus() {
     ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
     ["메시지", !diag.message || diag.ok, diag.message || diag.source]
   ];
-  els.livePriceStatus.innerHTML = rows
+  setHtmlIfChanged(els.livePriceStatus, rows
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
@@ -2018,7 +2036,7 @@ function renderLivePriceStatus() {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function renderCandidatePoolStatus() {
@@ -2136,7 +2154,7 @@ function candidateSourceDetailRows(summary = {}) {
 function renderCandidateSourceDetail(rows = null) {
   if (!els.candidateSourceDetail) return;
   const sourceRows = rows ?? candidateSourceDetailRows(state.dashboard?.summary ?? {});
-  els.candidateSourceDetail.innerHTML = sourceRows
+  setHtmlIfChanged(els.candidateSourceDetail, sourceRows
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
@@ -2146,7 +2164,7 @@ function renderCandidateSourceDetail(rows = null) {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function render() {
@@ -3903,7 +3921,7 @@ function renderTossStatus() {
         : tossSourceLabel(tradesStatus, status.liveTradesEnabled, "tradeCount")
     ]
   ];
-  els.tossStatus.innerHTML = rows
+  setHtmlIfChanged(els.tossStatus, rows
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
@@ -3913,7 +3931,7 @@ function renderTossStatus() {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function tossSourceLabel(status, liveEnabled, countKey) {
