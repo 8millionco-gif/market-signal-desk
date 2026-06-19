@@ -2860,7 +2860,7 @@ function renderMetrics() {
     const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
     const domestic = summary.domesticSelected ?? discovery.domesticSelected;
     const overseas = summary.overseasSelected ?? discovery.overseasSelected;
-    const target = summary.targetCandidateCount ?? discovery.targetCandidateCount;
+    const target = summary.selectionLimit ?? discovery.selectionLimit ?? summary.targetCandidateCount ?? discovery.targetCandidateCount;
     const domesticShortfall = Number(summary.domesticShortfall ?? discovery.domesticShortfall ?? 0);
     const overseasShortfall = Number(summary.overseasShortfall ?? discovery.overseasShortfall ?? 0);
     const shortfallText =
@@ -2869,7 +2869,7 @@ function renderMetrics() {
         : "";
     const splitText =
       domestic || overseas
-        ? ` · 목표 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}${shortfallText}`
+        ? ` · 선별폭 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}${shortfallText}`
         : "";
     const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
     const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
@@ -2969,7 +2969,7 @@ function renderMetrics() {
       : "";
     const briefSplitText =
       domestic || overseas
-        ? `국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
+        ? `선별 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
         : "";
     const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
     const briefText = [cacheText || sourceLabel, briefSplitText, briefMaterialText].filter(Boolean).join(" · ");

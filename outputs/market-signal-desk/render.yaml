@@ -32,9 +32,9 @@ services:
       - key: SIGNAL_CANDIDATE_POOL_ENABLED
         value: "1"
       - key: SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT
-        value: "8"
+        value: "40"
       - key: SIGNAL_CANDIDATE_POOL_SCAN_LIMIT
-        value: "60"
+        value: "200"
       - key: SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE
         value: "58"
       - key: SIGNAL_CANDIDATE_POOL_TOP_LIMIT
@@ -47,12 +47,18 @@ services:
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT
         value: "20"
+      - key: SIGNAL_DISCOVERY_SELECTION_LIMIT
+        value: "80"
       - key: SIGNAL_DOMESTIC_CANDIDATE_LIMIT
         value: "10"
       - key: SIGNAL_OVERSEAS_CANDIDATE_LIMIT
         value: "10"
       - key: SIGNAL_DISCOVERY_MAX_SYMBOLS
-        value: "40"
+        value: "160"
+      - key: SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED
+        value: "1"
+      - key: SIGNAL_LIVE_PRICE_SYMBOL_LIMIT
+        value: "80"
       - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
         value: "3"
       - key: TOSS_LIVE_PRICES

@@ -314,14 +314,17 @@ Render에서는 OpenAI 키를 넣은 뒤 `test-render-deploy.ps1`로 상태, 대
 
 대시보드는 `data/candidate-universe.json`의 감시 유니버스를 기준으로 오늘 후보를 자동 구성합니다. 네이버 뉴스가 준비되어 있으면 유니버스 종목별 최신 뉴스를 먼저 스캔하고, 뉴스 건수·관심 가중치·관심 등록 여부를 반영해 상위 후보를 고릅니다. 뉴스 제목이나 요약에 종목명, 티커, 별칭이 맞지 않는 검색 결과는 제외하고 후보 점수에 반영하지 않습니다. 네이버 뉴스가 꺼져 있으면 유니버스 기본 점수와 기존 샘플 후보 정보를 이용해 후보를 구성합니다.
 
-기본 후보 목표는 국내 10개와 해외 10개입니다. 관련 뉴스가 확인된 1차 후보를 우선 선별하고, 부족한 경우 유니버스 관심도와 가격 반응을 확인할 보조 후보로 채웁니다. 화면의 `진입` 탭은 전체 후보 중에서도 현재가, 준비도, 리스크, 과열도를 다시 통과한 후보만 보여 주므로 목록이 적거나 비어 있을 수 있습니다.
+기본 화면 목표는 국내 10개와 해외 10개지만, 봇의 실제 발굴·저장 대상은 `SIGNAL_DISCOVERY_SELECTION_LIMIT`까지 넓게 유지합니다. 관련 뉴스가 확인된 1차 후보를 우선 선별하고, 부족한 경우 후보 풀과 유니버스 관심도까지 계속 재검토합니다. 화면의 `진입` 탭은 전체 후보 중에서도 현재가, 준비도, 리스크, 과열도를 다시 통과한 후보만 보여 주므로 목록이 적거나 비어 있을 수 있습니다.
 
 ```powershell
 $env:SIGNAL_AUTO_CANDIDATES_ENABLED="1"
 $env:SIGNAL_AUTO_CANDIDATE_LIMIT="20"
+$env:SIGNAL_DISCOVERY_SELECTION_LIMIT="80"
 $env:SIGNAL_DOMESTIC_CANDIDATE_LIMIT="10"
 $env:SIGNAL_OVERSEAS_CANDIDATE_LIMIT="10"
-$env:SIGNAL_DISCOVERY_MAX_SYMBOLS="40"
+$env:SIGNAL_DISCOVERY_MAX_SYMBOLS="160"
+$env:SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED="1"
+$env:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT="80"
 $env:SIGNAL_DISCOVERY_NEWS_DISPLAY="3"
 $env:SIGNAL_DISCOVERY_CACHE_SECONDS="600"
 ```
@@ -378,7 +381,7 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 .\test-render-deploy.ps1 -RunDatabaseMigration
 ```
 
-후보 풀은 단순 저장 기록이 아니라 상시 감시 대상입니다. 봇이 발견한 종목은 풀에 누적되고, 상태가 `진입 후보`, `검증중`, `눌림 대기`, `관찰중`으로 관리됩니다. 저장 가능한 풀 크기는 `SIGNAL_CANDIDATE_POOL_MAX_ITEMS`, 다음 스캔에 다시 올릴 재점검 폭은 `SIGNAL_CANDIDATE_POOL_SCAN_LIMIT`, 실제 오늘 후보 압축 개수는 `SIGNAL_AUTO_CANDIDATE_LIMIT`으로 분리됩니다. 각 종목에는 근거 점수, 가격 반응, 신뢰도, 후보 풀 성과를 묶은 `재검토 우선도`가 붙고, 이 점수가 높은 종목은 다음 스캔 때 다시 분석됩니다. 최종 후보 압축과 정렬에는 후보 풀 누적 점수, 관측 횟수, 최근 개선/약화 흐름, 사후 성과가 제한 가중치로 반영됩니다. 리스크, 데이터 신뢰도, 가격 반응 기준은 후보 풀 가중치보다 우선합니다.
+후보 풀은 단순 저장 기록이 아니라 상시 감시 대상입니다. 봇이 발견한 종목은 풀에 누적되고, 상태가 `진입 후보`, `검증중`, `눌림 대기`, `관찰중`으로 관리됩니다. 저장 가능한 풀 크기는 `SIGNAL_CANDIDATE_POOL_MAX_ITEMS`, 다음 스캔에 다시 올릴 재점검 폭은 `SIGNAL_CANDIDATE_POOL_SCAN_LIMIT`, 봇이 한 번에 선별해 저장·재평가하는 폭은 `SIGNAL_DISCOVERY_SELECTION_LIMIT`, 메인 화면의 기본 목표는 `SIGNAL_AUTO_CANDIDATE_LIMIT`으로 분리됩니다. 각 종목에는 근거 점수, 가격 반응, 신뢰도, 후보 풀 성과를 묶은 `재검토 우선도`가 붙고, 이 점수가 높은 종목은 다음 스캔 때 다시 분석됩니다. 최종 후보 압축과 정렬에는 후보 풀 누적 점수, 관측 횟수, 최근 개선/약화 흐름, 사후 성과가 제한 가중치로 반영됩니다. 리스크, 데이터 신뢰도, 가격 반응 기준은 후보 풀 가중치보다 우선합니다.
 
 성과 검증이 실행되면 저장된 스냅샷 후보의 기준가와 현재가를 비교하고, 연결된 후보 풀 종목에는 관측 횟수, 승률, 평균 변화율, 최근 성과가 누적됩니다. 이 값은 같은 종목을 다시 볼지, 더 낮출지 판단하는 보조 신호이며 단독 매수 신호로 쓰지 않습니다.
 
@@ -388,8 +391,8 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 
 ```powershell
 $env:SIGNAL_CANDIDATE_POOL_ENABLED="1"
-$env:SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT="8"
-$env:SIGNAL_CANDIDATE_POOL_SCAN_LIMIT="60"
+$env:SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT="40"
+$env:SIGNAL_CANDIDATE_POOL_SCAN_LIMIT="200"
 $env:SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE="58"
 $env:SIGNAL_CANDIDATE_POOL_TOP_LIMIT="5"
 ```

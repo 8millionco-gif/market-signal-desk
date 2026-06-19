@@ -87,7 +87,7 @@ SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS",
 SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
 SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS = int(os.getenv("SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 7)))
-SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
+SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "80"))
 SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
 SIGNAL_LIVE_STATE_MAX_ITEMS = int(os.getenv("SIGNAL_LIVE_STATE_MAX_ITEMS", "240"))
@@ -187,14 +187,19 @@ SIGNAL_AUTO_CANDIDATE_LIMIT = max(
     int(os.getenv("SIGNAL_AUTO_CANDIDATE_LIMIT", "20")),
     SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
 )
-SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
-    int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "40")),
+SIGNAL_DISCOVERY_SELECTION_LIMIT = max(
+    int(os.getenv("SIGNAL_DISCOVERY_SELECTION_LIMIT", "80")),
     SIGNAL_AUTO_CANDIDATE_LIMIT,
-    SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT + 20,
+)
+SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
+    int(os.getenv("SIGNAL_DISCOVERY_MAX_SYMBOLS", "160")),
+    SIGNAL_DISCOVERY_SELECTION_LIMIT,
+    SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT + 80,
 )
 SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
+SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED = os.getenv("SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DISCOVERY_QUALITY_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_QUALITY_MIN_SCORE", "55"))
 SIGNAL_DISCOVERY_RESERVE_MIN_SCORE = int(os.getenv("SIGNAL_DISCOVERY_RESERVE_MIN_SCORE", "42"))
 SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE = int(os.getenv("SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE", "68"))
@@ -203,8 +208,8 @@ SIGNAL_CANDIDATE_POOL_ENABLED = os.getenv("SIGNAL_CANDIDATE_POOL_ENABLED", "1").
 SIGNAL_CANDIDATE_POOL_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS", "500"))
 SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
 SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
-SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "8"))
-SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "60"))
+SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "40"))
+SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "200"))
 SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
@@ -9824,9 +9829,12 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
         {
             "enabled": SIGNAL_AUTO_CANDIDATES_ENABLED,
             "limit": SIGNAL_AUTO_CANDIDATE_LIMIT,
+            "selectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
             "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
             "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+            "scanRotation": SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED,
+            "scanBucket": discovery_scan_bucket(),
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
             "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
             "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
@@ -9843,6 +9851,43 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def discovery_scan_bucket() -> int:
+    interval = max(60, SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS, SIGNAL_DISCOVERY_CACHE_SECONDS)
+    return int(datetime.now(KST).timestamp() // interval)
+
+
+def discovery_scan_entries(entries: list[dict]) -> tuple[list[dict], dict]:
+    total = len(entries)
+    limit = max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)
+    if total <= limit:
+        return entries, {
+            "rotationEnabled": False,
+            "offset": 0,
+            "limit": limit,
+            "total": total,
+            "wrapped": False,
+        }
+    if not SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED:
+        return entries[:limit], {
+            "rotationEnabled": False,
+            "offset": 0,
+            "limit": limit,
+            "total": total,
+            "wrapped": False,
+        }
+    bucket = discovery_scan_bucket()
+    offset = (bucket * limit) % total
+    rotated = [*entries[offset:], *entries[:offset]]
+    return rotated[:limit], {
+        "rotationEnabled": True,
+        "bucket": bucket,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "wrapped": offset + limit > total,
+    }
 
 
 def candidate_bucket(candidate: dict) -> str:
@@ -9975,6 +10020,9 @@ def prepare_quality_candidates(discovered: list[dict], watched: set[str]) -> tup
 
 def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> tuple[list[dict], dict]:
     quality_candidates, quality_counts = prepare_quality_candidates(discovered, watched)
+    selection_limit = max(1, SIGNAL_DISCOVERY_SELECTION_LIMIT)
+    domestic_target = max(SIGNAL_DOMESTIC_CANDIDATE_LIMIT, selection_limit // 2)
+    overseas_target = max(SIGNAL_OVERSEAS_CANDIDATE_LIMIT, selection_limit // 2)
     selectable = [
         item
         for item in quality_candidates
@@ -10001,16 +10049,16 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
             existing.add(symbol)
             bucket_count += 1
 
-    add_from_bucket(domestic, SIGNAL_DOMESTIC_CANDIDATE_LIMIT, "primary")
-    add_from_bucket(overseas, SIGNAL_OVERSEAS_CANDIDATE_LIMIT, "primary")
-    add_from_bucket(domestic, SIGNAL_DOMESTIC_CANDIDATE_LIMIT, "reserve")
-    add_from_bucket(overseas, SIGNAL_OVERSEAS_CANDIDATE_LIMIT, "reserve")
-    add_from_bucket(domestic_all, SIGNAL_DOMESTIC_CANDIDATE_LIMIT)
-    add_from_bucket(overseas_all, SIGNAL_OVERSEAS_CANDIDATE_LIMIT)
+    add_from_bucket(domestic, domestic_target, "primary")
+    add_from_bucket(overseas, overseas_target, "primary")
+    add_from_bucket(domestic, domestic_target, "reserve")
+    add_from_bucket(overseas, overseas_target, "reserve")
+    add_from_bucket(domestic_all, domestic_target)
+    add_from_bucket(overseas_all, overseas_target)
 
     seen = {str(item.get("symbol", "")).upper() for item in selected}
     for item in selectable:
-        if len(selected) >= SIGNAL_AUTO_CANDIDATE_LIMIT:
+        if len(selected) >= selection_limit:
             break
         symbol = str(item.get("symbol", "")).upper()
         if symbol in seen:
@@ -10020,31 +10068,31 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
 
     fallback_selected = 0
     if not selected and quality_candidates:
-        selected = quality_candidates[: min(SIGNAL_AUTO_CANDIDATE_LIMIT, 6)]
+        selected = quality_candidates[: min(selection_limit, 12)]
         fallback_selected = len(selected)
 
     domestic_selected = sorted(
         [item for item in selected if candidate_bucket(item) == "domestic"],
         key=discovery_selection_sort_key,
         reverse=True,
-    )[:SIGNAL_DOMESTIC_CANDIDATE_LIMIT]
+    )
     overseas_selected = sorted(
         [item for item in selected if candidate_bucket(item) == "overseas"],
         key=discovery_selection_sort_key,
         reverse=True,
-    )[:SIGNAL_OVERSEAS_CANDIDATE_LIMIT]
+    )
     final_selected = [*domestic_selected, *overseas_selected]
     seen_final = {str(item.get("symbol", "")).upper() for item in final_selected}
-    if len(final_selected) < SIGNAL_AUTO_CANDIDATE_LIMIT:
+    if len(final_selected) < selection_limit:
         for item in sorted(selected, key=discovery_selection_sort_key, reverse=True):
-            if len(final_selected) >= SIGNAL_AUTO_CANDIDATE_LIMIT:
+            if len(final_selected) >= selection_limit:
                 break
             symbol = str(item.get("symbol", "")).upper()
             if symbol in seen_final:
                 continue
             final_selected.append(item)
             seen_final.add(symbol)
-    final_selected = sorted(final_selected[:SIGNAL_AUTO_CANDIDATE_LIMIT], key=discovery_selection_sort_key, reverse=True)
+    final_selected = sorted(final_selected[:selection_limit], key=discovery_selection_sort_key, reverse=True)
     selected_tiers = {
         "primary": len([item for item in final_selected if item.get("discovery", {}).get("qualityTier") == "primary"]),
         "reserve": len([item for item in final_selected if item.get("discovery", {}).get("qualityTier") == "reserve"]),
@@ -10070,11 +10118,12 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
         "averageEvidenceScore": quality_counts.get("averageEvidenceScore", 0),
         "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
         "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
-        "targetCandidateCount": SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
+        "targetCandidateCount": selection_limit,
+        "selectionLimit": selection_limit,
         "domesticSelected": domestic_selected_count,
         "overseasSelected": overseas_selected_count,
-        "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
-        "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
+        "domesticLimit": domestic_target,
+        "overseasLimit": overseas_target,
         "domesticShortfall": max(0, SIGNAL_DOMESTIC_CANDIDATE_LIMIT - domestic_selected_count),
         "overseasShortfall": max(0, SIGNAL_OVERSEAS_CANDIDATE_LIMIT - overseas_selected_count),
     }
@@ -10082,6 +10131,8 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
 
 DISCOVERY_STATUS_SUMMARY_KEYS = [
     "universeCount",
+    "scanTargetCount",
+    "scanRotation",
     "scannedCount",
     "domesticSelected",
     "overseasSelected",
@@ -10101,6 +10152,7 @@ DISCOVERY_STATUS_SUMMARY_KEYS = [
     "evidenceWeakCount",
     "averageEvidenceScore",
     "targetCandidateCount",
+    "selectionLimit",
     "domesticShortfall",
     "overseasShortfall",
     "discoveryNewsCount",
@@ -10168,7 +10220,7 @@ def stored_discovery_initial_candidates(mode: str, watched: set[str]) -> tuple[l
 
 
 def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[str], mode: str) -> tuple[list[dict], dict] | None:
-    pool_records = candidate_pool_retainable_records(limit=SIGNAL_AUTO_CANDIDATE_LIMIT)
+    pool_records = candidate_pool_retainable_records(limit=SIGNAL_DISCOVERY_SELECTION_LIMIT)
     if not pool_records:
         return None
     candidates = []
@@ -10243,9 +10295,10 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         return cached["candidates"], cached["status"]
 
     base_entries = candidate_universe_entries()
+    scan_entries, scan_rotation_status = discovery_scan_entries(base_entries)
     pool_records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_POOL_SCAN_LIMIT)
     entries, pool_input_status = merge_candidate_pool_scan_entries(
-        base_entries[: max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)],
+        scan_entries,
         pool_records,
     )
     if not entries:
@@ -10274,7 +10327,7 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         reverse=True,
     )
     pool_scan_status = update_candidate_pool(discovered, mode=mode, stage="discovered") if discovered else {}
-    selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_AUTO_CANDIDATE_LIMIT], {})
+    selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_DISCOVERY_SELECTION_LIMIT], {})
     pool_selected = [
         item
         for item in selected
@@ -10305,6 +10358,7 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         ),
         "universeCount": len(base_entries),
         "scanTargetCount": len(entries),
+        "scanRotation": scan_rotation_status,
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
         "candidatePoolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
@@ -10708,6 +10762,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "storedDiscoveryCreatedAt": discovery_status.get("storedCreatedAt", ""),
             "storedDiscoveryModeMatched": discovery_status.get("modeMatched"),
             "universeCount": discovery_status.get("universeCount"),
+            "scanTargetCount": discovery_status.get("scanTargetCount"),
+            "scanRotation": discovery_status.get("scanRotation"),
             "scannedCount": discovery_status.get("scannedCount"),
             "domesticSelected": discovery_status.get("domesticSelected"),
             "overseasSelected": discovery_status.get("overseasSelected"),
@@ -10727,6 +10783,7 @@ def build_dashboard_payload(context: dict) -> dict:
             "evidenceWeakCount": discovery_status.get("evidenceWeakCount"),
             "averageEvidenceScore": discovery_status.get("averageEvidenceScore"),
             "targetCandidateCount": discovery_status.get("targetCandidateCount"),
+            "selectionLimit": discovery_status.get("selectionLimit"),
             "domesticShortfall": discovery_status.get("domesticShortfall"),
             "overseasShortfall": discovery_status.get("overseasShortfall"),
             "discoveryNewsCount": discovery_status.get("newsItemCount"),
