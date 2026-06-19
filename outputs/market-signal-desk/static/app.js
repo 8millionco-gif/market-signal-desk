@@ -133,6 +133,8 @@ const QUICK_SEARCH_PRESETS = [
 ];
 
 const LIVE_PRICE_MIN_POLL_MS = 5000;
+const LIVE_PRICE_FOCUS_LIMIT = 8;
+const LIVE_PRICE_VISIBLE_LIMIT = 4;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -449,13 +451,52 @@ async function loadDashboard(options = {}) {
 }
 
 function livePriceSymbols() {
-  const symbols = [];
   const candidates = state.dashboard?.candidates ?? [];
-  if (state.selectedSymbol) symbols.push(state.selectedSymbol);
-  candidates.forEach((item) => {
-    if (item?.symbol) symbols.push(item.symbol);
-  });
-  return [...new Set(symbols.filter(Boolean))].slice(0, 30);
+  const selected = state.selectedSymbol ? [state.selectedSymbol] : [];
+  const visible = filteredCandidates()
+    .slice(0, LIVE_PRICE_VISIBLE_LIMIT)
+    .map((item) => item?.symbol);
+  const ranked = [...candidates]
+    .filter((item) => item?.symbol)
+    .sort((a, b) => livePricePriority(a) - livePricePriority(b))
+    .slice(0, LIVE_PRICE_FOCUS_LIMIT)
+    .map((item) => item.symbol);
+  return [...new Set([...selected, ...visible, ...ranked].filter(Boolean))]
+    .slice(0, LIVE_PRICE_FOCUS_LIMIT + 1);
+}
+
+function livePricePriority(item) {
+  const symbol = item?.symbol || "";
+  if (state.selectedSymbol && symbol === state.selectedSymbol) return -1000;
+  const gate = item?.qualityGate?.key || "";
+  const group = decisionGroupForDisplay(item).key;
+  const plan = tradePlan(item);
+  const compression = compressionForDisplay(item).tier;
+  const score = Number(item?.totalScore ?? 0);
+  const readiness = Number(item?.triggerReadiness ?? 0);
+  const confidence = Number(item?.confidence?.score ?? 0);
+  const reaction = Number(item?.priceReaction?.score ?? 0);
+  const risk = Number(item?.score?.riskPenalty ?? 0);
+  const heat = Number(item?.score?.heatPenalty ?? 0);
+  let priority = 100;
+
+  if (gate === "actionable") priority -= 40;
+  if (group === "action") priority -= 24;
+  if (plan.tone === "buy") priority -= 22;
+  if (compression === "core") priority -= 18;
+  if (compression === "review") priority -= 10;
+  if (state.strategy === "pullback" && isPullbackCandidate(item)) priority -= 14;
+  if (state.strategy === "portfolio" && isHoldingCandidate(item)) priority -= 16;
+  if (gate === "defer" || plan.tone === "wait") priority += 10;
+  if (gate === "exclude" || plan.tone === "risk") priority += 40;
+
+  priority -= Math.min(16, Math.max(0, score - 60) / 2);
+  priority -= Math.min(12, Math.max(0, readiness - 55) / 2);
+  priority -= Math.min(10, Math.max(0, confidence - 55) / 3);
+  priority -= Math.min(10, Math.max(0, reaction - 45) / 3);
+  priority += Math.min(18, risk / 2);
+  priority += Math.min(12, heat / 2);
+  return priority;
 }
 
 function mergeLivePricePayload(payload) {
@@ -463,24 +504,25 @@ function mergeLivePricePayload(payload) {
   if (!state.dashboard || !incoming.length) return false;
   const existing = state.dashboard.candidates ?? [];
   const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
-  const incomingSymbols = new Set(incoming.map((item) => item.symbol));
-  const merged = incoming.map((item) => ({
-    ...(existingBySymbol.get(item.symbol) || {}),
-    ...item
-  }));
-  existing.forEach((item) => {
-    if (!incomingSymbols.has(item.symbol)) merged.push(item);
+  const incomingBySymbol = new Map(incoming.map((item) => [item.symbol, item]));
+  const incomingSymbols = new Set(incomingBySymbol.keys());
+  const merged = existing.map((item) => {
+    const next = incomingBySymbol.get(item.symbol);
+    return next ? { ...item, ...next } : item;
+  });
+  incoming.forEach((item) => {
+    if (!existingBySymbol.has(item.symbol)) merged.push(item);
   });
   state.dashboard = {
     ...state.dashboard,
     generatedAt: payload.updatedAt || state.dashboard.generatedAt,
     summary: {
       ...(state.dashboard.summary ?? {}),
-      ...(payload.summary ?? {})
+      ...livePriceSummaryPatch(payload.summary)
     },
     integrations: {
       ...(state.dashboard.integrations ?? {}),
-      ...(payload.integrations ?? {})
+      ...livePriceIntegrationsPatch(payload.integrations)
     },
     candidates: merged,
     selected: merged.find((item) => item.symbol === state.selectedSymbol) || payload.selected || state.dashboard.selected
@@ -489,6 +531,34 @@ function mergeLivePricePayload(payload) {
     state.selectedLookup = merged.find((item) => item.symbol === state.selectedLookup.symbol) || null;
   }
   return true;
+}
+
+function livePriceSummaryPatch(summary) {
+  const source = summary && typeof summary === "object" ? summary : {};
+  const allowedKeys = [
+    "livePriceUpdatedAt",
+    "livePricePollSeconds",
+    "livePriceFreshnessCounts",
+    "livePriceRequestedCount",
+    "livePriceRefreshedCount"
+  ];
+  return allowedKeys.reduce((patch, key) => {
+    if (source[key] !== undefined) patch[key] = source[key];
+    return patch;
+  }, {});
+}
+
+function livePriceIntegrationsPatch(integrations) {
+  const source = integrations && typeof integrations === "object" ? integrations : {};
+  const patch = {};
+  if (source.livePrice) patch.livePrice = source.livePrice;
+  if (source.toss) {
+    patch.toss = {
+      ...(state.dashboard?.integrations?.toss ?? {}),
+      ...source.toss
+    };
+  }
+  return patch;
 }
 
 function renderLivePriceUpdate() {
@@ -513,7 +583,9 @@ async function refreshLivePrices() {
     ...state.livePrice,
     loading: true,
     attemptAt: new Date().toISOString(),
-    error: ""
+    error: "",
+    symbols,
+    symbolCount: symbols.length
   };
   renderLivePriceStatus();
   renderCandidateSourceDetail();
@@ -528,7 +600,9 @@ async function refreshLivePrices() {
     integrations: {},
     pollSeconds: state.livePrice.pollSeconds,
     message: "라이브 가격 갱신 실패",
-    error: "unavailable"
+    error: "unavailable",
+    symbols,
+    requestedCount: symbols.length
   };
   const payload = await safeFetchJson(`/api/dashboard/live-prices?${params.toString()}`, fallback, 12000);
   const merged = mergeLivePricePayload(payload);
@@ -539,7 +613,9 @@ async function refreshLivePrices() {
     message: payload.message || (merged ? "라이브 가격 반영" : "라이브 가격 대기"),
     source: payload.source || state.livePrice.source,
     error: payload.error || "",
-    pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 10)
+    pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 10),
+    symbols: Array.isArray(payload.symbols) && payload.symbols.length ? payload.symbols : symbols,
+    symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length)
   };
   if (merged) {
     renderLivePriceUpdate();
@@ -959,6 +1035,8 @@ function candidatePoolStateForDisplay(item) {
 }
 
 function isActionCandidate(item) {
+  const freshness = priceFreshnessInfo(item);
+  if (!freshness.isFresh) return false;
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return true;
   if (["defer", "exclude"].includes(gate?.key)) return false;
@@ -1294,6 +1372,7 @@ function livePriceDiagnostics() {
     tossCount,
     total,
     pollSeconds,
+    symbolCount: Number(live.symbolCount || live.symbols?.length || 0),
     updatedAt: live.updatedAt,
     attemptAt: live.attemptAt,
     message: live.error ? live.message || live.error : live.message || "",
@@ -1306,6 +1385,7 @@ function renderLivePriceStatus() {
   const diag = livePriceDiagnostics();
   const rows = [
     ["상태", diag.ok, diag.label],
+    ["폴링 대상", diag.symbolCount > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
     ["실시간 종목", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["지연/저장", diag.delayedCount + diag.snapshotCount === 0, `${diag.delayedCount + diag.snapshotCount}/${diag.total || 0}`],
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
@@ -3466,6 +3546,7 @@ function renderFeed() {
       renderFeed();
       renderTradeDecisionStatus();
       renderDetail();
+      refreshLivePrices();
     });
   });
 }
@@ -3605,6 +3686,7 @@ async function openSearchResult(symbol) {
     renderFeed();
     renderTradeDecisionStatus();
     renderDetail();
+    refreshLivePrices();
     return;
   } else {
     state.selectedLookup = candidateFromSearchResult(item, { analysisLoading: true });

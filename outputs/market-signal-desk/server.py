@@ -2592,6 +2592,20 @@ def candidate_has_fresh_live_price(candidate: dict) -> bool:
     return str(live_price.get("source", "")) == "toss" and bool(freshness.get("usableForReaction"))
 
 
+def live_price_freshness_counts(candidates: list[dict]) -> dict:
+    counts = {"live": 0, "delayed": 0, "stale": 0, "snapshot": 0, "missing": 0, "unknown": 0}
+    for candidate in candidates:
+        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+        freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+        status = str(freshness.get("status") or "unknown")
+        if status not in counts:
+            counts[status] = 0
+        counts[status] += 1
+    counts["fresh"] = counts.get("live", 0)
+    counts["total"] = len(candidates)
+    return counts
+
+
 def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not TOSS_LIVE_PRICES:
         return candidates, {
@@ -10404,7 +10418,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         if isinstance(item, dict) and str(item.get("symbol", "")).strip()
     ]
     requested = unique_symbols(symbols)
-    if not requested:
+    has_requested_symbols = bool(requested)
+    if not has_requested_symbols:
         requested = unique_symbols([str(item.get("symbol", "")) for item in base_candidates])
     requested = requested[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
     requested_priority = {symbol: index for index, symbol in enumerate(requested)}
@@ -10415,7 +10430,13 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
             pair[0],
         )
     )
-    candidates = [item for _, item in indexed_candidates][: max(SIGNAL_LIVE_PRICE_SYMBOL_LIMIT, len(requested))]
+    if has_requested_symbols:
+        candidates = [
+            item for _, item in indexed_candidates
+            if str(item.get("symbol", "")) in requested_priority
+        ][:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    else:
+        candidates = [item for _, item in indexed_candidates][:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
     if not candidates:
         return {
             "mode": mode,
@@ -10454,7 +10475,13 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     market = copy.deepcopy(base_payload.get("market", seed_data().get("market", {})))
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
     candidates = sort_candidates_for_mode(candidates, mode)
+    freshness_counts = live_price_freshness_counts(candidates)
     summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
+    summary.update({
+        "livePriceFreshnessCounts": freshness_counts,
+        "livePriceRequestedCount": len(requested),
+        "livePriceRefreshedCount": len(candidates),
+    })
     integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     integrations["selection"] = selection_status
     integrations["livePrice"] = {
@@ -10462,6 +10489,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "baseSource": base_source,
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
+        "requestedCount": len(requested),
+        "refreshedCount": len(candidates),
+        "freshnessCounts": freshness_counts,
         "updatedAt": summary["livePriceUpdatedAt"],
     }
     toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}
@@ -10481,11 +10511,13 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "updatedAt": summary["livePriceUpdatedAt"],
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "symbols": requested,
+        "requestedCount": len(requested),
+        "refreshedCount": len(candidates),
         "summary": summary,
         "integrations": integrations,
         "candidates": candidates,
         "selected": candidates[0] if candidates else None,
-        "message": "저장 후보의 토스 라이브 가격과 가격 반응 판단을 갱신했습니다.",
+        "message": "선택 종목과 상위 후보의 토스 라이브 가격을 갱신했습니다.",
     }
 
 
