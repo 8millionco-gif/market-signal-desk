@@ -726,26 +726,11 @@ function candidateNeedsMarketDepth(item) {
   );
 }
 
-function livePriceRefreshDetail(symbols) {
-  const depthInterval = Number(LIVE_MARKET_DEPTH_REFRESH_EVERY || 0);
-  if (depthInterval <= 0) return "price";
-
-  const refreshCount = Number(state.livePrice?.refreshCount || 0);
-  const depthDue = refreshCount === 0 || refreshCount % Math.max(1, depthInterval) === 0;
-  if (!depthDue) return "price";
-
-  const symbolSet = new Set((symbols || []).map(normalizeLiveSymbol).filter(Boolean));
-  const candidates = state.dashboard?.candidates ?? [];
-  const selected = selectedCandidate();
-  if (selected && symbolSet.has(candidateLiveSymbol(selected)) && candidateNeedsMarketDepth(selected)) {
-    return "full";
-  }
-
-  const needsDepth = candidates.some((item) => {
-    const symbol = candidateLiveSymbol(item);
-    return symbolSet.has(symbol) && candidateNeedsMarketDepth(item);
-  });
-  return needsDepth ? "full" : "price";
+function livePriceRefreshDetail() {
+  // Automatic 10-second polling must not trigger full candidate re-analysis.
+  // Full depth/decision refresh is handled by scheduler/manual refresh so the
+  // visible candidate and final judgement do not jump on every price tick.
+  return "price";
 }
 
 function livePricePriority(item) {

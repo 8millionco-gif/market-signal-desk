@@ -14913,7 +14913,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "summary": summary,
         "integrations": integrations,
         "candidates": candidates,
-        "selected": candidates[0] if candidates else None,
+        "selected": candidates[0] if include_depth and candidates else None,
         "message": "현재 후보 전체의 토스 라이브 가격을 갱신했습니다.",
     }
 
