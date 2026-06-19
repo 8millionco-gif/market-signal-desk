@@ -5403,8 +5403,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         key, label, priority = "exclude", "공시 리스크", 4
         reasons.append("중대 공식 공시가 있어 신규 진입 제외")
     elif reliability_score < 45:
-        key, label, priority = "exclude", "원천 신뢰 부족", 4
-        reasons.append("가격·뉴스·공시 원천 신뢰도가 낮아 오늘 제외")
+        key, label, priority = "defer", "원천 확인 대기", 3
+        reasons.append("가격·뉴스·공시 원천 신뢰도가 낮아 보강 전까지 진입 보류")
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
@@ -5420,9 +5420,12 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif official_signal.get("riskLevel") == "medium" and group_key == "action":
         key, label, priority = "defer", "공시 확인 대기", 3
         reasons.append("공식 공시 영향 확인 전까지 진입 보류")
-    elif risk >= 24 or total < 45 or group_key == "exclude":
+    elif risk >= 24:
         key, label, priority = "exclude", "오늘 제외", 4
         reasons.append("리스크 또는 종합 점수가 기준 미달")
+    elif total < 45 or group_key == "exclude":
+        key, label, priority = "defer", "후보 보강 대기", 3
+        reasons.append("후보 점수는 낮지만 리스크 차단은 아니므로 다음 가격·뉴스 갱신까지 대기")
     elif (
         group_key == "action"
         and has_live_price
@@ -5582,6 +5585,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
+    evidence = candidate_discovery_evidence_strength(candidate)
     profit_percent = display_number_to_decimal(holding.get("profitLossPercent") or holding.get("profitLossRate"))
     allocation_percent = display_number_to_decimal(holding.get("allocationPercent") or holding.get("allocation"))
     holding_judgement = str(holding.get("judgement", "보유 유지"))
@@ -5616,8 +5620,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         action_key, action, tone = "exclude", "공시 리스크 제외", "risk"
         summary = "중대 공식 공시 리스크가 있어 가격 반응보다 공시 내용 확인을 우선합니다."
     elif reliability_score < 45:
-        action_key, action, tone = "exclude", "원천 신뢰 부족", "risk"
-        summary = "가격·뉴스·공시 원천 신뢰도가 부족해 오늘 신규 진입 대상에서 제외합니다."
+        action_key, action, tone = "verify", "원천 확인 대기", "wait"
+        summary = "가격·뉴스·공시 원천 신뢰도가 낮아 신규 진입보다 데이터 보강을 기다립니다."
     elif reliability_score < 58:
         action_key, action, tone = "verify", "근거 보강 대기", "wait"
         summary = "후보 신호는 있으나 원천 데이터 신뢰도가 낮아 시세·뉴스·공시 보강 전까지 대기합니다."
@@ -5630,9 +5634,15 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif reaction_entry_block and reaction.get("hasEvent"):
         action_key, action, tone = "verify", "반응 검증 대기", "wait"
         summary = "뉴스·공시 재료는 있으나 가격·거래량·수급 확인이 부족해 진입을 보류합니다."
-    elif gate_key == "exclude" or risk >= 24 or total < 45:
+    elif gate_key == "exclude" or risk >= 24:
         action_key, action, tone = "exclude", "오늘 제외", "risk"
         summary = "리스크 또는 점수 기준이 부족해 신규 진입 대상에서 제외합니다."
+    elif total < 45:
+        action_key, action, tone = "verify", "후보 보강 대기", "wait"
+        if evidence.get("qualified") or reaction.get("hasEvent"):
+            summary = "재료는 있으나 점수와 가격 반응이 부족해 다음 가격·뉴스 갱신까지 대기합니다."
+        else:
+            summary = "후보 점수가 낮아 신규 진입은 보류하고 추가 근거가 생기는지 확인합니다."
     elif reaction_key == "missing" and reaction.get("hasEvent"):
         action_key, action, tone = "verify", "반응 확인 대기", "wait"
         summary = "뉴스·공시 재료는 있으나 가격·거래량 반응이 부족해 추가 확인 전까지 대기합니다."
@@ -5831,7 +5841,7 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     if reaction_gate == "blocked":
         key, label, priority = "blocked", "가격 반응 차단", 4
         blockers.append("재료 이후 가격·거래량 반응이 부정적")
-    elif official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or gate_key == "exclude" or risk >= 24:
+    elif official.get("riskLevel") == "high" or action_key == "stop" or risk >= 24:
         key, label, priority = "blocked", "리스크 차단", 4
         blockers.append("리스크 또는 제외 판단이 우선")
     elif strong_evidence and price_confirmed and confidence_score >= 68 and risk < 18 and heat < 10:
@@ -5982,14 +5992,24 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         reaction = item.get("priceReaction", {}) if isinstance(item.get("priceReaction"), dict) else {}
         confidence = item.get("dataConfidence", {}) if isinstance(item.get("dataConfidence"), dict) else {}
         score_detail = item.get("score", {}) if isinstance(item.get("score"), dict) else {}
+        official = item.get("officialSignal", {}) if isinstance(item.get("officialSignal"), dict) else {}
         action_key = str(final_decision.get("actionKey", "verify"))
         gate_key = str(gate.get("key", "defer"))
+        reaction_gate = str(reaction.get("reactionGate", "wait"))
         risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
         validation = item.get("signalValidation", {}) if isinstance(item.get("signalValidation"), dict) else {}
         validation_key = str(validation.get("key", "insufficient"))
         validation_counts[validation_key] = validation_counts.get(validation_key, 0) + 1
         compression_score = candidate_compression_score(item)
         pool_bonus = candidate_pool_decision_bonus(item)
+        evidence = candidate_discovery_evidence_strength(item)
+        hard_exclude = (
+            official.get("riskLevel") == "high"
+            or action_key == "stop"
+            or reaction_gate == "blocked"
+            or risk >= 24
+        )
+        soft_exclude = action_key == "exclude" or gate_key == "exclude"
 
         if id(item) in core_item_ids:
             tier, label = "core", "핵심"
@@ -5997,9 +6017,15 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
                 reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
             else:
                 reason = "강한 뉴스·공시 근거와 신뢰도 기준으로 우선 추적할 핵심 후보"
-        elif action_key in {"exclude", "stop"} or gate_key == "exclude" or risk >= 24:
+        elif hard_exclude:
             tier, label = "exclude", "제외"
             reason = "리스크나 최종 판단 기준으로 오늘 신규 진입 제외"
+        elif soft_exclude and (evidence["qualified"] or validation_key in {"evidence_wait", "reaction_only"}):
+            tier, label = "review", "검토"
+            reason = "재료는 있으나 가격·거래량 또는 원천 데이터 확인 전이라 검토로 유지"
+        elif soft_exclude:
+            tier, label = "wait", "대기"
+            reason = "리스크 차단은 아니지만 근거와 가격 반응이 부족해 대기"
         elif candidate_is_portfolio_linked(item):
             tier, label = "portfolio", "보유"
             reason = "보유 자산 기준으로 추가매수·보유·매도 판단 대상"
@@ -6174,7 +6200,7 @@ def candidate_pool_state(candidate: dict, stage: str = "selected", existing: dic
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     previous_state = str((existing or {}).get("stateKey", ""))
 
-    if official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or compression_tier == "exclude" or risk >= 24:
+    if official.get("riskLevel") == "high" or action_key == "stop" or compression_tier == "exclude" or risk >= 24:
         return "excluded", "리스크 또는 제외 판단으로 신규 진입 대상에서 제외"
     if candidate_is_portfolio_linked(candidate):
         return "portfolio", "보유 자산과 연결되어 추가매수·보유·매도 판단 대상"

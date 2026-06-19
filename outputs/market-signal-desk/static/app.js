@@ -1304,7 +1304,10 @@ function renderLoadError(error) {
 }
 
 function filteredCandidates() {
-  return sortCandidatesForStrategy(applyStrategyFilter(baseFilteredCandidates()), state.strategy);
+  const base = baseFilteredCandidates();
+  const resolved = resolveCandidateStrategy(base, state.strategy);
+  state.strategy = resolved.strategy;
+  return sortCandidatesForStrategy(resolved.candidates, state.strategy);
 }
 
 function selectionLockedByLookup() {
@@ -1346,17 +1349,40 @@ function baseFilteredCandidates() {
 }
 
 function applyStrategyFilter(candidates = []) {
-  if (state.strategy === "all") return candidates;
-  if (state.strategy === "core") return candidates.filter(isCoreCandidate);
-  if (state.strategy === "review") return candidates.filter(isReviewCandidate);
-  if (state.strategy === "wait") return candidates.filter(isWaitBucketCandidate);
-  if (state.strategy === "pullback") return candidates.filter(isPullbackCandidate);
-  if (state.strategy === "hidden") return candidates.filter(isHiddenOpportunity);
-  if (state.strategy === "momentum") return candidates.filter(hasMomentumSignal);
-  if (state.strategy === "holding") return candidates.filter(isHoldingCandidate);
-  if (state.strategy === "exclude") return candidates.filter(isExcludeCandidate);
-  if (state.strategy === "action") return candidates.filter(isActionCandidate);
+  return candidatesForStrategy(candidates, state.strategy);
+}
+
+function candidatesForStrategy(candidates = [], strategy = "all") {
+  if (strategy === "all") return candidates;
+  if (strategy === "core") return candidates.filter(isCoreCandidate);
+  if (strategy === "review") return candidates.filter(isReviewCandidate);
+  if (strategy === "wait") return candidates.filter(isWaitBucketCandidate);
+  if (strategy === "pullback") return candidates.filter(isPullbackCandidate);
+  if (strategy === "hidden") return candidates.filter(isHiddenOpportunity);
+  if (strategy === "momentum") return candidates.filter(hasMomentumSignal);
+  if (strategy === "holding") return candidates.filter(isHoldingCandidate);
+  if (strategy === "exclude") return candidates.filter(isExcludeCandidate);
+  if (strategy === "action") return candidates.filter(isActionCandidate);
   return candidates;
+}
+
+function resolveCandidateStrategy(candidates = [], preferred = "core") {
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return { strategy: preferred || "all", candidates: [] };
+  }
+  const preferredCandidates = candidatesForStrategy(candidates, preferred);
+  if (preferredCandidates.length || preferred === "all") {
+    return { strategy: preferred, candidates: preferredCandidates };
+  }
+  const fallbackOrder = ["core", "action", "review", "wait", "pullback", "hidden", "momentum", "holding"];
+  for (const strategy of fallbackOrder) {
+    if (strategy === preferred) continue;
+    const matched = candidatesForStrategy(candidates, strategy);
+    if (matched.length) {
+      return { strategy, candidates: matched };
+    }
+  }
+  return { strategy: "all", candidates };
 }
 
 function compressionForDisplay(item) {
@@ -4332,8 +4358,8 @@ function candidateSignalMeta(item) {
 }
 
 function renderFeed() {
-  renderStrategyCounts();
   const candidates = filteredCandidates();
+  renderStrategyCounts();
   const selectionChanged = syncSelectedToVisibleCandidates(candidates);
   renderQuickSearch();
   renderStockSearchResults();
@@ -4451,6 +4477,7 @@ function renderStrategyCounts() {
     const count = counts[strategy] ?? 0;
     button.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(count)}</strong>`;
     button.title = `${strategyLabel(strategy)} ${count}개`;
+    button.classList.toggle("active", strategy === state.strategy);
   });
 }
 
