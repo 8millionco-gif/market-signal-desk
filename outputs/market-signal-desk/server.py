@@ -4423,6 +4423,56 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         and (volume_confirmed or liquidity_positive)
         and confirmation_count >= required_confirmations
     )
+    market_response_confirmed = volume_confirmed or liquidity_positive
+    entry_criteria = [
+        {
+            "key": "live_price",
+            "label": "실시간 가격",
+            "ok": has_live_price,
+            "value": str(candidate.get("price", "")) if has_live_price else "토스 가격 대기",
+            "required": True,
+        },
+        {
+            "key": "price_direction",
+            "label": "가격 방향",
+            "ok": price_reaction_confirmed,
+            "value": display_change(change) if change is not None else "등락률 확인 중",
+            "required": True,
+        },
+        {
+            "key": "market_response",
+            "label": "거래·수급",
+            "ok": market_response_confirmed,
+            "value": (
+                f"거래량 {volume.quantize(Decimal('0.1'))}배"
+                if volume_confirmed and volume is not None
+                else "호가·체결 우위" if liquidity_positive
+                else "거래량·체결 대기"
+            ),
+            "required": True,
+        },
+        {
+            "key": "confirmation_count",
+            "label": "확인 조건",
+            "ok": confirmation_count >= required_confirmations,
+            "value": f"{confirmation_count}/{required_confirmations}",
+            "required": True,
+        },
+    ]
+    if supports_entry:
+        next_check = "가격·거래량 반응이 확인되었습니다. 매수 구간과 리스크 기준만 점검하세요."
+    elif blockers:
+        next_check = blockers[0]
+    elif not has_live_price:
+        next_check = "토스 실시간 현재가 수신을 기다립니다."
+    elif not price_reaction_confirmed:
+        next_check = "뉴스 방향과 같은 가격 반응이 확인될 때까지 대기합니다."
+    elif not market_response_confirmed:
+        next_check = "거래량 증가 또는 호가·체결 우위가 확인될 때까지 대기합니다."
+    elif confirmation_count < required_confirmations:
+        next_check = f"가격·거래량·수급 중 {required_confirmations}개 이상 확인이 필요합니다."
+    else:
+        next_check = "가격 반응과 리스크 기준을 한 번 더 확인합니다."
 
     return {
         "key": key,
@@ -4432,6 +4482,9 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         "reactionGate": reaction_gate,
         "entryBlock": entry_block,
         "supportsEntry": supports_entry,
+        "entryReady": supports_entry,
+        "entryCriteria": entry_criteria,
+        "nextCheck": next_check,
         "hasEvent": has_event,
         "metrics": {
             "priceChange": display_change(change) if change is not None else "",
@@ -4955,7 +5008,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction_gate = str(reaction.get("reactionGate", "wait"))
     reaction_entry_block = bool(reaction.get("entryBlock"))
     reaction_supports_entry = bool(reaction.get("supportsEntry"))
-    reaction_supports_entry = bool(reaction.get("supportsEntry"))
+    reaction_entry_ready = bool(reaction.get("entryReady", reaction_supports_entry))
     live_price = candidate.get("livePrice", {})
     has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
     official_signal = candidate.get("officialSignal", {})
@@ -4975,9 +5028,12 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reaction_gate == "blocked":
         key, label, priority = "exclude", "가격 반응 차단", 4
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
+    elif group_key == "action" and not has_live_price:
+        key, label, priority = "defer", "실시간 가격 대기", 3
+        reasons.append("토스 실시간 현재가 확인 전까지 진입 판단 보류")
     elif reaction_entry_block and reaction.get("hasEvent"):
         key, label, priority = "defer", "반응 검증 대기", 3
-        reasons.append("재료는 있으나 진입 전 가격·거래량 검증 필요")
+        reasons.append(str(reaction.get("nextCheck") or "재료는 있으나 진입 전 가격·거래량 검증 필요"))
     elif official_signal.get("riskLevel") == "medium" and group_key == "action":
         key, label, priority = "defer", "공시 확인 대기", 3
         reasons.append("공식 공시 영향 확인 전까지 진입 보류")
@@ -4988,7 +5044,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         group_key == "action"
         and has_live_price
         and confidence_score >= 68
-        and reaction_supports_entry
+        and reaction_entry_ready
         and reaction_score >= 62
         and risk < 18
         and heat < 10
@@ -5139,6 +5195,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reaction_key = str(reaction.get("key", "missing"))
     reaction_gate = str(reaction.get("reactionGate", "wait"))
     reaction_entry_block = bool(reaction.get("entryBlock"))
+    reaction_supports_entry = bool(reaction.get("entryReady", reaction.get("supportsEntry")))
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)

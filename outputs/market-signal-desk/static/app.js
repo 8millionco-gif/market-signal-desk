@@ -794,6 +794,7 @@ function volumeReactionText(item) {
 function reactionStageForDisplay(item) {
   const reaction = item?.priceReaction ?? {};
   const metrics = reaction.metrics ?? {};
+  const serverCriteria = Array.isArray(reaction.entryCriteria) ? reaction.entryCriteria.filter(Boolean) : [];
   const confirmationCount = Number(metrics.confirmationCount ?? 0);
   const requiredConfirmations = Number(metrics.requiredConfirmations ?? 2);
   const change = parseDisplayPercent(item?.change);
@@ -807,29 +808,39 @@ function reactionStageForDisplay(item) {
 
   let label = "반응 확인 중";
   let tone = "wait";
-  let summary = "재료는 있으나 가격·거래량 반응이 충분한지 확인하는 단계입니다.";
-  if (gate === "confirmed" || confirmationCount >= requiredConfirmations || Number(reaction.score ?? 0) >= 65) {
-    label = "가격 반응 확인";
-    tone = "buy";
-    summary = "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
-  } else if (gate === "blocked" || reaction.entryBlock) {
+  let summary = reaction.nextCheck || "재료는 있으나 가격·거래량 반응이 충분한지 확인하는 단계입니다.";
+  if (gate === "blocked") {
     label = "오늘 제외";
     tone = "risk";
-    summary = "재료 대비 가격 또는 거래량 반응이 부족해 신규 진입을 막습니다.";
+    summary = reaction.nextCheck || "재료 대비 가격 또는 거래량 반응이 부정적이라 신규 진입을 막습니다.";
+  } else if (reaction.entryReady || reaction.supportsEntry || (gate === "confirmed" && !reaction.entryBlock)) {
+    label = "가격 반응 확인";
+    tone = "buy";
+    summary = reaction.nextCheck || "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
+  } else if (reaction.entryBlock || gate === "wait") {
+    label = "반응 검증 대기";
+    tone = "wait";
+    summary = reaction.nextCheck || "실시간 가격·거래량·수급 중 부족한 조건을 기다립니다.";
   } else if (gate === "watch") {
     label = "추가 관찰";
-    summary = "일부 반응은 있으나 진입 판단 전 한 번 더 확인합니다.";
+    summary = reaction.nextCheck || "일부 반응은 있으나 진입 판단 전 한 번 더 확인합니다.";
   } else if (hasPositivePrice && hasVolume) {
     label = "반응 관찰";
-    summary = "가격과 거래량 단서는 있으나 확인 개수가 아직 부족합니다.";
+    summary = reaction.nextCheck || "가격과 거래량 단서는 있으나 확인 개수가 아직 부족합니다.";
   }
 
-  const checks = [
-    ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
-    ["가격 방향", hasPositivePrice, change == null ? "등락률 확인 중" : item.change],
-    ["거래 반응", hasVolume, volumeReactionText(item)],
-    ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
-  ];
+  const checks = serverCriteria.length
+    ? serverCriteria.map((criterion) => [
+        criterion.label || criterion.key || "확인",
+        Boolean(criterion.ok),
+        criterion.value || (criterion.ok ? "확인" : "대기")
+      ])
+    : [
+        ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
+        ["가격 방향", hasPositivePrice, change == null ? "등락률 확인 중" : item.change],
+        ["거래 반응", hasVolume, volumeReactionText(item)],
+        ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
+      ];
   return {
     label,
     tone,
