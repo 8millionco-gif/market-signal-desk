@@ -770,6 +770,7 @@ function updateFeedPriceFragments() {
     const score = button.querySelector("[data-feed-score]");
     const time = button.querySelector("[data-feed-time]");
     const decision = button.querySelector("[data-feed-decision]");
+    const liveData = button.querySelector("[data-feed-live]");
     const primary = primaryDecisionForDisplay(item, plan);
     if (action) {
       action.textContent = feedActionLabel(item, plan);
@@ -784,6 +785,7 @@ function updateFeedPriceFragments() {
       decision.textContent = primary.label;
       decision.className = `feed-badge decision-badge decision-${primary.key}`;
     }
+    if (liveData) liveData.innerHTML = liveDataCoverageChips(item, true);
   });
 }
 
@@ -795,6 +797,7 @@ function updateSelectedPriceFragments() {
   const priceNode = document.querySelector("[data-selected-price]");
   const changeNode = document.querySelector("[data-selected-change]");
   const sourceNode = document.querySelector("[data-selected-price-meta]");
+  const liveDataNode = document.querySelector("[data-selected-live-data]");
   const decisionNode = document.querySelector("[data-selected-decision-summary]");
   const decisionLabelNode = decisionNode?.querySelector("strong");
   const decisionDetailNode = decisionNode?.querySelector("span");
@@ -804,6 +807,7 @@ function updateSelectedPriceFragments() {
     changeNode.className = changeClass(item.change);
   }
   if (sourceNode) sourceNode.textContent = priceMeta(item);
+  if (liveDataNode) liveDataNode.innerHTML = liveDataCoverageChips(item);
   if (decisionNode) decisionNode.className = `decision-summary decision-${primaryDecision.key}`;
   if (decisionLabelNode) decisionLabelNode.textContent = primaryDecision.label;
   if (decisionDetailNode) decisionDetailNode.textContent = primaryDecision.detail;
@@ -1146,6 +1150,89 @@ function livePriceLabel(item) {
   if (info.isDelayed) return info.ageText ? `${info.label} ${info.ageText}` : info.label;
   if (info.isSnapshot) return "저장가";
   return "실시간 대기";
+}
+
+function dataSourceTone(source, message = "") {
+  if (source === "toss") return "ok";
+  if (["stale", "error"].includes(source)) return "warn";
+  if (["skipped", "retained"].includes(source)) return "wait";
+  if (String(message).includes("응답이 비어")) return "wait";
+  return "wait";
+}
+
+function dataSourceLabel(source, fallback = "대기") {
+  if (source === "toss") return "반영";
+  if (source === "stale") return "오래됨";
+  if (source === "skipped") return "제한";
+  if (source === "retained") return "유지";
+  if (source === "sample") return "대기";
+  if (source === "lookup") return "검색";
+  if (source === "error") return "오류";
+  return fallback;
+}
+
+function liveDataCoverage(item) {
+  const freshness = priceFreshnessInfo(item);
+  const candles = item?.liveCandles ?? {};
+  const orderbook = item?.liveOrderbook ?? {};
+  const trades = item?.liveTrades ?? {};
+  const priceTone = freshness.isFresh ? "ok" : freshness.isDelayed ? "warn" : "wait";
+  const candleSource = candles.source || "";
+  const orderbookSource = orderbook.source || "";
+  const tradesSource = trades.source || "";
+  return [
+    {
+      key: "price",
+      label: "가격",
+      short: "가",
+      tone: priceTone,
+      value: freshness.isFresh ? "실시간" : freshness.label || "대기",
+      title: priceMeta(item)
+    },
+    {
+      key: "candles",
+      label: "차트",
+      short: "차",
+      tone: dataSourceTone(candleSource, candles.message),
+      value: candleSource === "toss" ? `${candles.count ?? 0}개` : dataSourceLabel(candleSource),
+      title: candleSource === "toss"
+        ? `토스 일봉 ${candles.count ?? 0}개 반영`
+        : candles.message || "토스 차트 반영 대기"
+    },
+    {
+      key: "orderbook",
+      label: "호가",
+      short: "호",
+      tone: dataSourceTone(orderbookSource, orderbook.message),
+      value: orderbookSource === "toss" ? orderbook.pressure || "반영" : dataSourceLabel(orderbookSource),
+      title: orderbookSource === "toss"
+        ? `호가 ${orderbook.pressure || "반영"} · 스프레드 ${orderbook.spreadPercent || "-"}`
+        : orderbook.message || "토스 호가 반영 대기"
+    },
+    {
+      key: "trades",
+      label: "체결",
+      short: "체",
+      tone: dataSourceTone(tradesSource, trades.message),
+      value: tradesSource === "toss" ? trades.pressure || "반영" : dataSourceLabel(tradesSource),
+      title: tradesSource === "toss"
+        ? `최근 체결 ${trades.pressure || "반영"} · ${trades.biasPercent || "-"}`
+        : trades.message || "토스 체결 반영 대기"
+    }
+  ];
+}
+
+function liveDataCoverageChips(item, compact = false) {
+  return liveDataCoverage(item)
+    .map(
+      (entry) => `
+        <span class="live-data-chip ${escapeHtml(entry.tone)}" title="${escapeHtml(entry.title)}">
+          <b>${escapeHtml(compact ? entry.short : entry.label)}</b>
+          <em>${escapeHtml(entry.value)}</em>
+        </span>
+      `
+    )
+    .join("");
 }
 
 function metricLooksReady(value) {
@@ -3806,6 +3893,9 @@ function renderFeed() {
               <strong>뉴스 시그널</strong>
               <em>${escapeHtml(shortText(signalMeta || priceGuide, 40))}</em>
             </span>
+            <span class="live-data-strip feed-live-data-strip" data-feed-live>
+              ${liveDataCoverageChips(item, true)}
+            </span>
           </span>
           <span class="feed-meta">
             <span class="feed-action ${escapeHtml(plan.tone)}" data-feed-action>${escapeHtml(actionLabel)}</span>
@@ -4182,6 +4272,9 @@ function renderDetail() {
           <span>${escapeHtml(primaryDecision.detail)}</span>
         </p>
         <p class="data-source" data-selected-price-meta>${escapeHtml(priceMeta(item))}</p>
+        <div class="live-data-strip detail-live-data-strip" data-selected-live-data>
+          ${liveDataCoverageChips(item)}
+        </div>
         <div class="chips">
           ${item.tags.map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
         </div>
