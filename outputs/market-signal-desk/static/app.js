@@ -4053,6 +4053,69 @@ function statCard(label, value) {
   `;
 }
 
+function tradeNowGuide(item, plan) {
+  const current = `${item?.price ?? "-"} ${item?.change ?? ""}`.trim();
+  const entry = rowValue(plan, "관찰 매수");
+  const pullback = rowValue(plan, "눌림 대기");
+  const rebound = rowValue(plan, "반등 확인");
+  const stop = rowValue(plan, "손절 점검");
+  const trim = rowValue(plan, "분할매도");
+
+  if (plan.tone === "buy") {
+    return {
+      tone: "buy",
+      title: "매수 관찰",
+      summary: `${entry} 구간에서 가격·거래량 조건이 유지되는지 확인합니다.`,
+      current,
+      focus: entry
+    };
+  }
+  if (plan.tone === "sell") {
+    return {
+      tone: "sell",
+      title: "분할매도 점검",
+      summary: `${trim} 기준에서 일부 이익 실현 또는 보유 유지 여부를 결정합니다.`,
+      current,
+      focus: trim
+    };
+  }
+  if (plan.tone === "risk") {
+    return {
+      tone: "risk",
+      title: "신규 진입 금지",
+      summary: `${stop} 기준을 먼저 확인하고, 무리한 추가 매수는 피합니다.`,
+      current,
+      focus: stop
+    };
+  }
+  if (String(plan.action).includes("반등")) {
+    return {
+      tone: "wait",
+      title: "반등 확인",
+      summary: `${rebound} 조건을 회복하기 전까지는 대기합니다.`,
+      current,
+      focus: rebound
+    };
+  }
+  return {
+    tone: "wait",
+    title: String(plan.action).includes("눌림") ? "눌림 대기" : "가격 대기",
+    summary: `${pullback} 또는 ${entry} 근처에서 재반응을 확인합니다.`,
+    current,
+    focus: pullback !== "-" ? pullback : entry
+  };
+}
+
+function tradeZoneCards(plan) {
+  return [
+    ["매수 관찰", rowValue(plan, "관찰 매수"), "조건 유지 시"],
+    ["눌림 확인", rowValue(plan, "눌림 대기"), "추격 대신 대기"],
+    ["추격 금지", rowValue(plan, "추격 금지"), "이상은 관망"],
+    ["손절 기준", rowValue(plan, "손절 점검"), "이탈 시 중단"],
+    ["분할매도", rowValue(plan, "분할매도"), "과열·보유 수익 점검"]
+  ];
+}
+
 function signalFlowStrip(item, plan, primaryDecision) {
   const stage = reactionStageForDisplay(item);
   const sourceMeta = candidateSignalMeta(item) || "출처 확인 중";
@@ -4179,6 +4242,7 @@ function riskDecisionSection(item) {
 
 function tradePlanSection(item) {
   const plan = tradePlan(item);
+  const now = tradeNowGuide(item, plan);
   return `
     <section class="detail-section trade-plan-section">
       <div class="trade-plan-head">
@@ -4189,25 +4253,26 @@ function tradePlanSection(item) {
         </div>
         <span class="action-pill ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
       </div>
-      <div class="trade-signal-cards">
-        ${plan.signalCards
-          .map(
-            ([label, value]) => `
-              <div>
-                <span>${escapeHtml(label)}</span>
-                <strong>${escapeHtml(value)}</strong>
-              </div>
-            `
-          )
-          .join("")}
+      <div class="decision-now-card decision-${escapeHtml(now.tone)}">
+        <div>
+          <span>지금 할 일</span>
+          <strong>${escapeHtml(now.title)}</strong>
+          <p>${escapeHtml(now.summary)}</p>
+        </div>
+        <div>
+          <span>현재가</span>
+          <strong>${escapeHtml(now.current || "-")}</strong>
+          <em>기준 ${escapeHtml(now.focus || "-")}</em>
+        </div>
       </div>
-      <div class="trade-plan-grid">
-        ${plan.rows
+      <div class="trade-zone-grid">
+        ${tradeZoneCards(plan)
           .map(
-            ([label, value]) => `
+            ([label, value, note]) => `
               <div>
                 <span>${escapeHtml(label)}</span>
                 <strong>${escapeHtml(value)}</strong>
+                <em>${escapeHtml(note)}</em>
               </div>
             `
           )
