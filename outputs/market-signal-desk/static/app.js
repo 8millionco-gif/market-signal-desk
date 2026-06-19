@@ -3719,19 +3719,30 @@ function renderStorageStatus() {
   const rawEvents = status.rawEvents ?? {};
   const candidateData = status.candidateData ?? {};
   const marketData = status.marketData ?? {};
-  const operationReady = Boolean(status.operationReady || (status.persistent && database.ready));
+  const operationReady = Boolean(status.operationReady);
+  const marketStorageReady = Boolean(marketData.enabled && marketData.readSource === "postgres");
+  const candidateStorageReady = Boolean(candidateData.enabled && candidateData.readSource === "postgres");
   const analysisReady = Boolean(status.analysisReady || (Number(candidateData.itemCount ?? 0) > 0 && Number(marketData.itemCount ?? 0) > 0));
+  const analysisPersistent = Boolean(status.analysisPersistent || (analysisReady && candidateStorageReady && marketStorageReady));
+  const displayFallbackReady = Boolean(status.displayFallbackReady || (analysisReady && !analysisPersistent));
+  const decisionReady = Boolean(operationReady && analysisPersistent);
   const volatileFallback = Boolean(status.volatileFallback || (!operationReady && status.implementation !== "postgres"));
   const modeText = status.implementation === "postgres"
     ? "Postgres DB"
     : volatileFallback
     ? "임시 파일 fallback"
     : status.mode || "-";
-  const persistenceText = operationReady ? "DB 영구 저장" : "임시 파일 보존";
+  const persistenceText = decisionReady ? "DB 영구 저장" : displayFallbackReady ? "임시 파일 표시" : "DB 기준 대기";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
     : `${status.recentRunCount ?? 0}건`;
-  const nextText = operationReady ? "운영 가능" : database.nextAction || "DATABASE_URL 연결 필요";
+  const nextText = decisionReady
+    ? "운영 가능"
+    : !database.urlConfigured
+    ? "DATABASE_URL 연결 필요"
+    : database.ready
+    ? "DB 이관 또는 다음 수집 필요"
+    : database.nextAction || "DB 연결 확인 필요";
   const dbText = database.urlConfigured
     ? database.ready
       ? "Postgres 준비"
@@ -3793,23 +3804,22 @@ function renderStorageStatus() {
     const fileCount = Number(info.fileItemCount ?? 0);
     return `${sourceText} · DB ${dbCount} · 파일 ${fileCount}`;
   };
-  const marketStorageReady = Boolean(marketData.enabled && marketData.readSource === "postgres");
-  const candidateStorageReady = Boolean(candidateData.enabled && candidateData.readSource === "postgres");
-  const storageWarningText = marketStorageReady && candidateStorageReady
+  const storageWarningText = analysisPersistent
     ? "후보/최신값 DB 기준"
-    : analysisReady
-    ? `서버 저장값 사용 · 후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`
+    : displayFallbackReady
+    ? `임시 표시용 · 후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`
     : `후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`;
   const rows = [
-    ["운영 저장소", operationReady, operationReady ? "DB 기준" : "미완료"],
-    ["분석 저장소", analysisReady, analysisReady ? "서버 저장값 확보" : "후보/최신값 대기"],
+    ["운영 저장소", decisionReady, decisionReady ? "DB 기준" : "DB 기준 미완료"],
+    ["분석 저장소", analysisReady, analysisPersistent ? "DB 저장값 확보" : displayFallbackReady ? "임시 저장값만 있음" : "후보/최신값 대기"],
+    ["실전 판단", decisionReady, decisionReady ? "가능" : "DB 기준 전환 전 보류"],
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
     ["후보 기준", candidateStorageReady, storageBasisText(candidateData)],
     ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
-    ["판단 기준", analysisReady, storageWarningText],
+    ["판단 기준", decisionReady, storageWarningText],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
@@ -3819,9 +3829,9 @@ function renderStorageStatus() {
     ["진입 데이터", Boolean(Number(candidateData.entryReadyCount ?? 0) > 0), candidateReadyText],
     ["누락 항목", candidateMissingText === "누락 없음", candidateMissingText],
     ["최근 후보 저장", Boolean(candidateData.latestAt), candidateLatestText],
-    ["보존성", operationReady, persistenceText],
+    ["보존성", decisionReady, persistenceText],
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
-    ["다음", operationReady && status.writable, nextText]
+    ["다음", decisionReady && status.writable, nextText]
   ];
   const canMigrate = Boolean(database.urlConfigured && database.ready);
   const actionMarkup = `

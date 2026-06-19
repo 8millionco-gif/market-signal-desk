@@ -13834,13 +13834,17 @@ def snapshot_storage_status() -> dict:
         bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
         and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
     )
+    analysis_persistent = bool(candidate_data.get("persistent") and market_data.get("persistent") and analysis_ready)
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent"))
-        operation_ready = bool(data_storage_ready)
+        operation_ready = bool(analysis_persistent)
         if operation_ready:
             message = "Postgres DB에 스냅샷, 후보 풀, 최신 수집값을 저장하고 DB 기준으로 읽습니다."
             error = ""
+        elif data_storage_ready:
+            message = "DB는 연결됐지만 후보 데이터 또는 최신 가격 데이터가 아직 충분하지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
+            error = "candidate-or-market-data-empty"
         else:
             message = "DB는 연결됐지만 후보 데이터 또는 최신 가격 데이터가 아직 DB 기준으로 읽히지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
             error = "candidate-or-market-data-not-db-backed"
@@ -13854,6 +13858,9 @@ def snapshot_storage_status() -> dict:
             "volatileFallback": not operation_ready,
             "operationReady": operation_ready,
             "analysisReady": analysis_ready,
+            "analysisPersistent": analysis_persistent,
+            "displayFallbackReady": bool(analysis_ready and not analysis_persistent),
+            "requiresDatabase": False,
             "recentRunCount": len(recent_runs),
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
@@ -13888,6 +13895,9 @@ def snapshot_storage_status() -> dict:
         "volatileFallback": True,
         "operationReady": False,
         "analysisReady": analysis_ready,
+        "analysisPersistent": False,
+        "displayFallbackReady": analysis_ready,
+        "requiresDatabase": True,
         "recentRunCount": len(recent_runs),
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
