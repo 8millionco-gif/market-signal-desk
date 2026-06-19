@@ -11355,6 +11355,130 @@ def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[
     return candidates, status
 
 
+def stored_candidate_data_sort_key(record: dict) -> tuple[int, int, int, int]:
+    completeness = record.get("dataCompleteness", {}) if isinstance(record.get("dataCompleteness"), dict) else {}
+    freshness_age = candidate_data_record_age_seconds(record)
+    freshness_score = 0 if freshness_age is None else max(0, 10_000_000 - freshness_age)
+    return (
+        1 if completeness.get("entryReady") else 0,
+        1 if completeness.get("displayReady") else 0,
+        bounded_int(record.get("totalScore", 0), 0, 100),
+        freshness_score,
+    )
+
+
+def candidate_from_stored_candidate_data_record(record: dict, watched: set[str]) -> dict | None:
+    symbol = str(record.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None
+    news_items = record.get("liveNews", []) if isinstance(record.get("liveNews"), list) else []
+    first_news = news_items[0] if news_items and isinstance(news_items[0], dict) else {}
+    final_decision = record.get("finalDecision", {}) if isinstance(record.get("finalDecision"), dict) else {}
+    headline = (
+        first_news.get("title")
+        or final_decision.get("summary")
+        or final_decision.get("detail")
+        or f"{record.get('name') or symbol} 저장 후보 재검토"
+    )
+    themes = unique_texts(
+        [
+            str(record.get("market", "")),
+            str(record.get("category", "")),
+            str(final_decision.get("label", "")),
+            *[
+                str(item.get("title", ""))
+                for item in news_items[:2]
+                if isinstance(item, dict)
+            ],
+        ],
+        limit=5,
+    )
+    candidate = {
+        "symbol": symbol,
+        "name": record.get("name") or symbol,
+        "market": record.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", symbol) else "KR"),
+        "category": record.get("category") or ("overseas" if re.fullmatch(r"[A-Z.\-]{1,8}", symbol) else "domestic"),
+        "price": record.get("price", "-"),
+        "change": record.get("change", ""),
+        "updated": record.get("collectedAt") or record.get("updated") or "저장 후보",
+        "headline": short_text(str(headline), 160),
+        "themes": themes,
+        "tags": themes,
+        "candidateSource": "candidate-data-snapshot",
+        "discoveryTier": "stored-data",
+        "opportunityType": "stored-candidate",
+        "score": record.get("score", {}),
+        "totalScore": bounded_int(record.get("totalScore", 0), 0, 100),
+        "triggerReadiness": bounded_int(record.get("triggerReadiness", 0), 0, 100),
+        "preopenPriority": bounded_int(record.get("preopenPriority", 0), 0, 100),
+        "livePrice": copy.deepcopy(record.get("livePrice", {})) if isinstance(record.get("livePrice"), dict) else {},
+        "liveCandles": copy.deepcopy(record.get("liveCandles", {})) if isinstance(record.get("liveCandles"), dict) else {},
+        "liveOrderbook": copy.deepcopy(record.get("liveOrderbook", {})) if isinstance(record.get("liveOrderbook"), dict) else {},
+        "liveTrades": copy.deepcopy(record.get("liveTrades", {})) if isinstance(record.get("liveTrades"), dict) else {},
+        "liveNews": copy.deepcopy(news_items),
+        "liveDisclosures": copy.deepcopy(record.get("liveDisclosures", [])) if isinstance(record.get("liveDisclosures"), list) else [],
+        "priceReaction": copy.deepcopy(record.get("priceReaction", {})) if isinstance(record.get("priceReaction"), dict) else {},
+        "qualityGate": copy.deepcopy(record.get("qualityGate", {})) if isinstance(record.get("qualityGate"), dict) else {},
+        "finalDecision": copy.deepcopy(final_decision),
+        "signalValidation": copy.deepcopy(record.get("signalValidation", {})) if isinstance(record.get("signalValidation"), dict) else {},
+        "candidateCompression": copy.deepcopy(record.get("candidateCompression", {})) if isinstance(record.get("candidateCompression"), dict) else {},
+        "sourceReliability": copy.deepcopy(record.get("sourceReliability", {})) if isinstance(record.get("sourceReliability"), dict) else {},
+        "dataConfidence": copy.deepcopy(record.get("dataConfidence", {})) if isinstance(record.get("dataConfidence"), dict) else {},
+        "dataCompleteness": copy.deepcopy(record.get("dataCompleteness", {})) if isinstance(record.get("dataCompleteness"), dict) else {},
+        "discovery": {
+            "source": "candidate_data_snapshots",
+            "storedCandidateData": True,
+            "score": bounded_int(record.get("totalScore", 0), 0, 100),
+            "evidenceProfile": {
+                "score": bounded_int(record.get("sourceReliability", {}).get("score", 0) if isinstance(record.get("sourceReliability"), dict) else 0, 0, 100),
+                "grade": "stored",
+                "reasons": ["서버에 저장된 후보별 최신 수집 데이터에서 복원"],
+            },
+        },
+    }
+    return decorate_candidate(candidate, watched)
+
+
+def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tuple[list[dict], dict] | None:
+    records = stored_candidate_data_latest_records()
+    if not records:
+        return None
+    fresh_records = []
+    max_age = max(SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS, 60 * 60 * 24)
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        age = candidate_data_record_age_seconds(record)
+        if age is not None and age > max_age:
+            continue
+        completeness = record.get("dataCompleteness", {}) if isinstance(record.get("dataCompleteness"), dict) else {}
+        if not completeness.get("displayReady") and not candidate_has_toss_last_price(record):
+            continue
+        fresh_records.append(record)
+    if not fresh_records:
+        return None
+    fresh_records.sort(key=stored_candidate_data_sort_key, reverse=True)
+    candidates = []
+    for record in fresh_records[: max(1, SIGNAL_DISCOVERY_SELECTION_LIMIT)]:
+        candidate = candidate_from_stored_candidate_data_record(record, watched)
+        if candidate:
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    status = {
+        "source": "candidate-data-snapshots",
+        "enabled": True,
+        "stored": True,
+        "message": "저장된 후보별 수집 데이터를 우선 사용합니다. 새 후보 발굴은 봇/스케줄러/수동 실행에서 수행합니다.",
+        "candidateCount": len(candidates),
+        "storedCandidateDataCount": len(fresh_records),
+        "candidateDataSelectedSymbols": [item.get("symbol", "") for item in candidates],
+        "requestedMode": mode,
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    return candidates, status
+
+
 def initial_candidates(data: dict, watched: set[str], mode: str = "", force_discovery: bool = False) -> tuple[list[dict], dict]:
     seed_candidates = data.get("candidates", [])
     if not SIGNAL_AUTO_CANDIDATES_ENABLED:
@@ -11369,6 +11493,9 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         stored_result = stored_discovery_initial_candidates(mode, watched)
         if stored_result is not None:
             return stored_result
+        candidate_data_result = stored_candidate_data_initial_candidates(mode, watched)
+        if candidate_data_result is not None:
+            return candidate_data_result
         pool_result = candidate_pool_initial_candidates(seed_candidates, watched, mode)
         if pool_result is not None:
             return pool_result
@@ -13056,6 +13183,8 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     record = detail.get("record", {}) if isinstance(detail.get("record"), dict) else {}
     payload = copy.deepcopy(dashboard_payload)
     candidates = payload.get("candidates", [])
+    if isinstance(candidates, list) and not candidates:
+        return None
     if isinstance(candidates, list):
         merged_candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(
             [item for item in candidates if isinstance(item, dict)],
@@ -13113,6 +13242,137 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     integrations["marketDataMerge"] = market_data_merge
     integrations["marketDataLatest"] = market_data_latest_status()
     payload["integrations"] = integrations
+    return payload
+
+
+def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
+    data = seed_data()
+    watched = set(watchlist())
+    candidate_data_result = stored_candidate_data_initial_candidates(mode, watched)
+    if candidate_data_result is None:
+        return None
+
+    raw_candidates, discovery_status = candidate_data_result
+    if not raw_candidates:
+        return None
+
+    market = copy.deepcopy(data.get("market", {}))
+    candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
+    candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
+    candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
+    candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
+    candidates = sort_candidates_for_mode(candidates, mode)
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+
+    defaults = dashboard_status_defaults()
+    pool_status = candidate_pool_summary()
+    discovery_status = {
+        **discovery_status,
+        "source": "candidate-data-snapshots",
+        "stored": True,
+        "dashboardOnly": True,
+        "message": "서버에 저장된 후보별 최신 수집 데이터를 우선 표시합니다. 후보 발굴은 봇/스케줄러/수동 실행에서만 갱신합니다.",
+        "updatedAt": now_text,
+    }
+    selection_status = {
+        **selection_status,
+        "source": "stored-candidate-data-rules",
+        "message": "저장된 후보별 토스/뉴스/공시 데이터를 외부 재발굴 없이 재점검했습니다.",
+        "updatedAt": now_text,
+    }
+    context = {
+        "mode": mode,
+        "data": data,
+        "market": market,
+        "watched": watched,
+        "portfolio": {},
+        "candidates": candidates,
+        "selected": candidates[0] if candidates else None,
+        "statuses": {
+            **defaults,
+            "index": {
+                "source": "stored",
+                "enabled": False,
+                "message": "저장 후보 조회에서는 지수 실시간 조회를 생략했습니다.",
+                "updatedAt": now_text,
+            },
+            "fx": {
+                "source": "stored",
+                "enabled": False,
+                "message": "저장 후보 조회에서는 환율 실시간 조회를 생략했습니다.",
+                "updatedAt": now_text,
+            },
+            "discovery": discovery_status,
+            "selection": selection_status,
+            "candidate_pool": pool_status,
+            "candidate_data_merge": candidate_data_merge,
+            "live_state_merge": live_state_merge,
+            "market_data_latest": market_data_latest_status(),
+            "market_data_merge": market_data_merge,
+        },
+        "pipeline": [
+            pipeline_step(
+                "cache",
+                "후보별 수집 데이터 조회",
+                "ok",
+                discovery_status["message"],
+                len(candidates),
+            ),
+            pipeline_step(
+                "storage",
+                "후보별 토스 데이터 반영",
+                "ok" if candidate_data_merge.get("mergedCount", 0) else "fallback",
+                candidate_data_merge.get("message", "저장된 후보별 토스 데이터를 확인했습니다."),
+                candidate_data_merge.get("mergedCount", 0),
+            ),
+            pipeline_step(
+                "storage",
+                "직전 실시간 상태 반영",
+                "ok" if live_state_merge.get("mergedCount", 0) else "fallback",
+                live_state_merge.get("message", "직전 토스 확정 상태를 확인했습니다."),
+                live_state_merge.get("mergedCount", 0),
+            ),
+            pipeline_step(
+                "storage",
+                "DB 최신 가격 반영",
+                "ok" if market_data_merge.get("mergedCount", 0) else "fallback",
+                market_data_merge.get("message", "DB 최신 토스 가격을 확인했습니다."),
+                market_data_merge.get("mergedCount", 0),
+            ),
+            pipeline_step(
+                "scorer",
+                "저장 후보 재판단",
+                "ok",
+                selection_status["message"],
+                len(candidates),
+            ),
+            pipeline_step(
+                "selector",
+                "저장 후보 정렬",
+                "ok",
+                "서버 저장 후보별 최신 수집값 기준으로 정렬했습니다.",
+                len(candidates),
+            ),
+        ],
+    }
+    payload = build_dashboard_payload(context)
+    payload["cache"] = {
+        "cached": True,
+        "source": "candidate_data_snapshots",
+        "requestedMode": mode,
+        "mode": mode,
+        "id": f"{now_text}-{mode}-candidate-data",
+        "createdAt": now_text,
+        "fallbackError": fallback_error,
+    }
+    if isinstance(payload.get("summary"), dict):
+        payload["summary"]["dashboardCacheSource"] = "candidate_data_snapshots"
+        payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
+        payload["summary"]["dashboardCacheFallbackError"] = fallback_error
+        payload["summary"]["candidateSourceStored"] = True
+        payload["summary"]["candidateSourceStoredData"] = True
     return payload
 
 
@@ -13306,6 +13566,10 @@ def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
     if cached_payload is not None:
         cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
         return cached_payload, str(cache.get("source") or "dashboard_cache")
+
+    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
+    if stored_candidate_data_payload is not None:
+        return stored_candidate_data_payload, "candidate_data_snapshots"
 
     stored_payload = stored_candidate_pool_dashboard_payload(mode)
     if stored_payload is not None:
@@ -14641,6 +14905,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 if cached_payload is not None:
                     self.send_json(cached_payload)
                     return
+                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
+                if stored_candidate_data_payload is not None:
+                    self.send_json(stored_candidate_data_payload)
+                    return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
                 if stored_pool_payload is not None:
                     self.send_json(stored_pool_payload)
@@ -14653,6 +14921,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if cached_payload is not None:
                     self.send_json(cached_payload)
+                    return
+                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
+                if stored_candidate_data_payload is not None:
+                    self.send_json(stored_candidate_data_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_pool_payload is not None:
