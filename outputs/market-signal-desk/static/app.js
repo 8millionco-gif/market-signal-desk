@@ -907,9 +907,9 @@ function reactionStageForDisplay(item) {
   const missingFactors = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
   const gate = reaction.reactionGate || "";
 
-  let label = "반응 확인 중";
+  let label = "가격 확인 필요";
   let tone = "wait";
-  let summary = reaction.nextCheck || "재료는 있으나 가격·거래량 반응이 충분한지 확인하는 단계입니다.";
+  let summary = reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
   if (gate === "blocked") {
     label = "오늘 제외";
     tone = "risk";
@@ -919,12 +919,12 @@ function reactionStageForDisplay(item) {
     tone = "buy";
     summary = reaction.nextCheck || "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
   } else if (reaction.entryBlock || gate === "wait") {
-    label = "반응 검증 대기";
+    label = "가격 확인 필요";
     tone = "wait";
-    summary = reaction.nextCheck || "실시간 가격·거래량·수급 중 부족한 조건을 기다립니다.";
+    summary = reaction.nextCheck || "실시간 가격·거래량·수급 중 부족한 조건을 확인한 뒤 판단합니다.";
   } else if (gate === "watch") {
-    label = "추가 관찰";
-    summary = reaction.nextCheck || "일부 반응은 있으나 진입 판단 전 한 번 더 확인합니다.";
+    label = "관찰 유지";
+    summary = reaction.nextCheck || "일부 반응은 있으나 진입 판단 전 가격 흐름을 더 확인합니다.";
   } else if (hasPositivePrice && hasVolume) {
     label = "반응 관찰";
     summary = reaction.nextCheck || "가격과 거래량 단서는 있으나 확인 개수가 아직 부족합니다.";
@@ -977,7 +977,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: stage.label, detail: stage.summary };
   }
   if (gate.key === "watch" || decision.actionKey === "watch" || plan.tone === "wait") {
-    return { key: "wait", label: "가격 대기", detail: plan.summary || "현재가와 거래 반응을 더 확인합니다." };
+    return { key: "wait", label: "진입 보류", detail: plan.summary || "현재가와 거래 반응을 더 확인합니다." };
   }
   return { key: "check", label: "확인 중", detail: plan.summary || "추가 확인이 필요합니다." };
 }
@@ -3970,6 +3970,43 @@ function renderPerformance() {
   const threshold = payload.config?.successThreshold ?? "+1.0%";
   const best = summary.best;
   const worst = summary.worst;
+  const measuredCount = Number(summary.measuredCount ?? 0);
+  const runCount = Number(summary.runCount ?? 0);
+  const hasPerformanceData =
+    runCount > 0 ||
+    measuredCount > 0 ||
+    observations.length > 0 ||
+    bySymbol.length > 0 ||
+    byGate.length > 0 ||
+    byFinalAction.length > 0 ||
+    byReaction.length > 0;
+
+  if (!hasPerformanceData) {
+    els.signalDetail.innerHTML = `
+      <div class="empty-state performance-empty-state">
+        <h2>성과 검증은 아직 시작 전입니다</h2>
+        <p>장마감·장전 스냅샷이 저장되면 1시간, 종가, 1일, 3일, 5일 성과를 여기서 검증합니다.</p>
+        <div class="signal-flow-strip">
+          <div>
+            <span>1. 후보 저장</span>
+            <strong>스냅샷 생성</strong>
+            <em>장마감·장전 후보와 가격을 기록</em>
+          </div>
+          <div>
+            <span>2. 가격 추적</span>
+            <strong>성과 관측</strong>
+            <em>토스 현재가 기준으로 변화율 확인</em>
+          </div>
+          <div>
+            <span>3. 기준 보정</span>
+            <strong>실전 검증</strong>
+            <em>수익에 도움 된 조건만 남김</em>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
 
   els.signalDetail.innerHTML = `
     <div class="performance-board">
@@ -4273,7 +4310,7 @@ function tradeNowGuide(item, plan) {
   }
   return {
     tone: "wait",
-    title: String(plan.action).includes("눌림") ? "눌림 대기" : "가격 대기",
+    title: String(plan.action).includes("눌림") ? "눌림 대기" : "진입 보류",
     summary: `${pullback} 또는 ${entry} 근처에서 재반응을 확인합니다.`,
     current,
     focus: pullback !== "-" ? pullback : entry
@@ -4354,28 +4391,37 @@ function priceReactionSection(item) {
         <strong>${escapeHtml(stage.label)}</strong>
         <span>${escapeHtml(priceMeta(item))}</span>
       </div>
-      <div class="reaction-check-grid">
-        ${stage.checks
-          .map(
-            ([label, ok, value]) => `
-              <div class="${ok ? "ok" : "wait"}">
-                <span>${escapeHtml(label)}</span>
-                <strong>${escapeHtml(value)}</strong>
-              </div>
-            `
-          )
-          .join("")}
-      </div>
-      ${
-        confirmed.length || reasons.length
-          ? `<ul class="bullet-list entry-list">${uniqueTexts([...reasons, ...confirmed], 5).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
-          : ""
-      }
-      ${
-        missing.length
-          ? `<ul class="bullet-list risk-list">${missing.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
-          : ""
-      }
+      <details class="support-detail-section reaction-detail-toggle">
+        <summary>
+          <span>
+            <em>세부 조건</em>
+            <strong>가격·거래량 확인</strong>
+          </span>
+          <b>보기</b>
+        </summary>
+        <div class="reaction-check-grid">
+          ${stage.checks
+            .map(
+              ([label, ok, value]) => `
+                <div class="${ok ? "ok" : "wait"}">
+                  <span>${escapeHtml(label)}</span>
+                  <strong>${escapeHtml(value)}</strong>
+                </div>
+              `
+            )
+            .join("")}
+        </div>
+        ${
+          confirmed.length || reasons.length
+            ? `<ul class="bullet-list entry-list">${uniqueTexts([...reasons, ...confirmed], 5).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+            : ""
+        }
+        ${
+          missing.length
+            ? `<ul class="bullet-list risk-list">${missing.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+            : ""
+        }
+      </details>
     </section>
   `;
 }
