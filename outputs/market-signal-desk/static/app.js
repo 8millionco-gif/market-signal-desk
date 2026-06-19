@@ -53,6 +53,7 @@ const state = {
   livePrice: {
     loading: false,
     updatedAt: "",
+    attemptAt: "",
     message: "",
     source: "",
     error: "",
@@ -94,6 +95,7 @@ const els = {
   metricReady: document.querySelector("#metricReady"),
   metricWatched: document.querySelector("#metricWatched"),
   tradeDecisionStatus: document.querySelector("#tradeDecisionStatus"),
+  livePriceStatus: document.querySelector("#livePriceStatus"),
   marketStatus: document.querySelector("#marketStatus"),
   authStatus: document.querySelector("#authStatus"),
   notificationStatus: document.querySelector("#notificationStatus"),
@@ -493,6 +495,7 @@ function renderLivePriceUpdate() {
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
+  renderLivePriceStatus();
   renderCandidatePoolStatus();
   renderTossStatus();
   renderFeed();
@@ -509,8 +512,10 @@ async function refreshLivePrices() {
   state.livePrice = {
     ...state.livePrice,
     loading: true,
+    attemptAt: new Date().toISOString(),
     error: ""
   };
+  renderLivePriceStatus();
   renderCandidateSourceDetail();
   const params = new URLSearchParams({
     mode: state.mode,
@@ -539,6 +544,7 @@ async function refreshLivePrices() {
   if (merged) {
     renderLivePriceUpdate();
   } else {
+    renderLivePriceStatus();
     renderCandidateSourceDetail();
   }
 }
@@ -1194,6 +1200,86 @@ function renderTradeDecisionStatus() {
     .join("");
 }
 
+function parseTimeMs(value) {
+  const time = Date.parse(String(value ?? ""));
+  return Number.isFinite(time) ? time : null;
+}
+
+function elapsedLabel(value) {
+  const time = parseTimeMs(value);
+  if (!time) return "-";
+  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  if (seconds < 60) return `${seconds}초 전`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}분 전`;
+  return `${Math.round(minutes / 60)}시간 전`;
+}
+
+function livePriceDiagnostics() {
+  const live = state.livePrice ?? {};
+  const candidates = state.dashboard?.candidates ?? [];
+  const tossCount = candidates.filter((item) => item?.livePrice?.source === "toss").length;
+  const total = candidates.length;
+  const updatedMs = parseTimeMs(live.updatedAt);
+  const ageSeconds = updatedMs ? Math.max(0, Math.round((Date.now() - updatedMs) / 1000)) : null;
+  const pollSeconds = Number(live.pollSeconds || 10);
+  const stale = ageSeconds != null && ageSeconds > Math.max(30, pollSeconds * 3);
+  const enabled = Boolean(state.tossStatus?.livePricesEnabled ?? state.dashboard?.integrations?.toss?.config?.readyForMarketData ?? true);
+  let label = "대기";
+  let ok = false;
+  if (!enabled) {
+    label = "꺼짐";
+  } else if (live.loading) {
+    label = "갱신 중";
+  } else if (live.error) {
+    label = "갱신 실패";
+  } else if (updatedMs && stale) {
+    label = "지연";
+  } else if (updatedMs && tossCount > 0) {
+    label = "정상";
+    ok = true;
+  } else if (updatedMs) {
+    label = "부분 반영";
+  }
+  return {
+    enabled,
+    ok,
+    stale,
+    label,
+    tossCount,
+    total,
+    pollSeconds,
+    updatedAt: live.updatedAt,
+    attemptAt: live.attemptAt,
+    message: live.error ? live.message || live.error : live.message || "",
+    source: live.source || state.dashboard?.integrations?.livePrice?.source || "-"
+  };
+}
+
+function renderLivePriceStatus() {
+  if (!els.livePriceStatus) return;
+  const diag = livePriceDiagnostics();
+  const rows = [
+    ["상태", diag.ok, diag.label],
+    ["반영 종목", diag.tossCount > 0, `${diag.tossCount}/${diag.total || 0}`],
+    ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
+    ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
+    ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
+    ["메시지", !diag.message || diag.ok, diag.message || diag.source]
+  ];
+  els.livePriceStatus.innerHTML = rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderCandidatePoolStatus() {
   if (!els.candidatePoolStatus) return;
   const summary = state.dashboard?.summary ?? {};
@@ -1323,6 +1409,7 @@ function render() {
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
+  renderLivePriceStatus();
   renderCandidatePoolStatus();
   renderAuthStatus();
   renderSchedulerStatus();
