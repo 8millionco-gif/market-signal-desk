@@ -1603,6 +1603,12 @@ function evaluationModeForDisplay(item) {
   const mode = item?.evaluationMode ?? item?.finalDecision?.evaluationMode ?? {};
   const readiness = item?.priceReadiness ?? {};
   const key = mode.key || readiness.key || "collecting";
+  const blockerReasons = Array.isArray(mode.blockerReasons)
+    ? mode.blockerReasons
+    : Array.isArray(readiness.blockerReasons)
+      ? readiness.blockerReasons
+      : [];
+  const primaryBlocker = mode.primaryBlocker || readiness.primaryBlocker || blockerReasons[0] || "";
   const fallback = {
     entry_ready: ["실시간 평가 가능", "ready", "서버가 가격·등락률·거래 반응을 확보했습니다."],
     closed_baseline: ["장마감 기준", "baseline", "직전 정규장 가격 기준입니다. 신규 진입은 개장 후 확인합니다."],
@@ -1614,14 +1620,20 @@ function evaluationModeForDisplay(item) {
     collecting: ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."],
     unavailable: ["평가 불가", "blocked", "필수 데이터가 부족해 현재 후보 평가는 참고용입니다."]
   }[key] || ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."];
+  let message = mode.message || readiness.message || fallback[2];
+  if (blockerReasons.length && ["collecting", "blocked", "analysis"].includes(mode.status || fallback[1])) {
+    message = `${blockerReasons.slice(0, 4).join(", ")} 보강 후 평가합니다.`;
+  }
   return {
     key,
-    label: mode.label || readiness.label || fallback[0],
+    label: primaryBlocker || mode.label || readiness.label || fallback[0],
     status: mode.status || fallback[1],
-    message: mode.message || readiness.message || fallback[2],
+    message,
     tradeEligible: Boolean(mode.tradeEligible || readiness.entryReady),
     rankEligible: Boolean(mode.rankEligible || readiness.displayReady),
-    missing: Array.isArray(mode.missing) ? mode.missing : Array.isArray(readiness.missing) ? readiness.missing : []
+    missing: Array.isArray(mode.missing) ? mode.missing : Array.isArray(readiness.missing) ? readiness.missing : [],
+    blockerReasons,
+    primaryBlocker
   };
 }
 

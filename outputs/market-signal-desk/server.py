@@ -4918,10 +4918,87 @@ def candidate_data_completeness(candidate: dict) -> dict:
     }
 
 
+def candidate_source_wait_reason(source_value: object, data_label: str) -> str:
+    value = source_value if isinstance(source_value, dict) else {}
+    source = str(value.get("source", "")).strip().lower()
+    message = str(value.get("message", "")).strip()
+    if source in {"toss", "retained", "stored-live-state"}:
+        return ""
+    if source == "skipped" or "후보 수 제한" in message or "조회 후보 수 제한" in message:
+        return f"{data_label} 후보 제한"
+    if source == "sample" and "응답이 비어" in message:
+        return f"{data_label} 응답 없음"
+    if source == "sample" and ("환경변수" in message or "키" in message):
+        return f"{data_label} 설정 대기"
+    if source == "sample" and "꺼져" in message:
+        return f"{data_label} 라이브 꺼짐"
+    if source == "stale":
+        return f"{data_label} 오래됨"
+    if source == "error" or "실패" in message:
+        return f"{data_label} 오류"
+    if source in {"missing", "none"}:
+        return f"{data_label} 미수신"
+    if message:
+        return f"{data_label} 확인 필요"
+    return f"{data_label} 수집 대기"
+
+
+def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = None) -> list[str]:
+    if not isinstance(candidate, dict):
+        return []
+    completeness = completeness if isinstance(completeness, dict) else candidate_data_completeness(candidate)
+    reasons: list[str] = []
+    freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else {}
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    freshness_status = str(freshness.get("status", ""))
+    price_source = str(live_price.get("source", "")).strip().lower()
+    if not completeness.get("priceOk"):
+        if price_source == "toss" and freshness_status in {"delayed", "stale", "unknown"}:
+            reasons.append(f"가격 {freshness.get('label', '지연')}")
+        elif price_source == "missing" or freshness_status == "missing":
+            reasons.append("가격 미수신")
+        elif price_source == "sample":
+            reasons.append("가격 대체값")
+        elif not price_source:
+            reasons.append("가격 저장값 없음")
+        else:
+            reasons.append("가격 확인 필요")
+    elif freshness_status == "closed-baseline":
+        reasons.append("장 시간 외 마감가 기준")
+    elif freshness_status in {"delayed", "stale", "unknown"}:
+        reasons.append(f"가격 {freshness.get('label', '지연')}")
+
+    if not completeness.get("changeOk"):
+        change_source = str(live_price.get("changeSource", "")).strip().lower()
+        if change_source in {"pending-change", "missing"}:
+            reasons.append("등락률 기준가 확인 중")
+        elif change_source:
+            reasons.append("등락률 보강 필요")
+        else:
+            reasons.append("등락률 미수신")
+
+    if not completeness.get("materialOk"):
+        reasons.append("뉴스/공시 부족")
+
+    for source_key, label, ok_key in (
+        ("liveCandles", "차트", "candleOk"),
+        ("liveOrderbook", "호가", "orderbookOk"),
+        ("liveTrades", "체결", "tradeOk"),
+    ):
+        if completeness.get(ok_key):
+            continue
+        reason = candidate_source_wait_reason(candidate.get(source_key, {}), label)
+        if reason:
+            reasons.append(reason)
+
+    return unique_texts(reasons, limit=10)
+
+
 def candidate_price_readiness(candidate: dict) -> dict:
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
     freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else {}
     missing = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
+    blocker_reasons = candidate_data_blocker_reasons(candidate, completeness)
     price_ok = bool(completeness.get("priceOk"))
     change_ok = bool(completeness.get("changeOk"))
     display_ready = bool(completeness.get("displayReady"))
@@ -4949,6 +5026,8 @@ def candidate_price_readiness(candidate: dict) -> dict:
         "entryReady": entry_ready,
         "freshnessStatus": status,
         "missing": unique_texts(missing, limit=8),
+        "blockerReasons": blocker_reasons,
+        "primaryBlocker": blocker_reasons[0] if blocker_reasons else "",
     }
 
 
@@ -5021,8 +5100,11 @@ def candidate_evaluation_mode(candidate: dict) -> dict:
     mode["changeOk"] = bool(completeness.get("changeOk"))
     mode["displayReady"] = bool(completeness.get("displayReady"))
     mode["entryReady"] = bool(completeness.get("entryReady"))
+    mode["blockerReasons"] = unique_texts(readiness.get("blockerReasons", []), limit=10)
+    mode["primaryBlocker"] = str(readiness.get("primaryBlocker", ""))
     if missing and mode["status"] == "collecting":
-        mode["message"] = f"{', '.join(missing[:4])} 보강 후 평가합니다."
+        blockers = mode["blockerReasons"] or missing
+        mode["message"] = f"{', '.join(blockers[:4])} 보강 후 평가합니다."
     return mode
 
 
