@@ -14558,12 +14558,26 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     candle_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 일봉 정보를 유지합니다."}
     orderbook_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 호가 정보를 유지합니다."}
     trade_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 체결 정보를 유지합니다."}
+    preselection_live_state_write_status = {"stored": False, "storedCount": 0, "storage": ""}
+    preselection_candidate_data_status = {"stored": False, "storedCount": 0, "storage": ""}
+    preselection_candidate_latest_status = {"stored": False, "updatedCount": 0, "storage": ""}
     try:
         refresh_candidates, price_status = enrich_candidates_with_toss_prices(refresh_candidates)
         if include_depth:
             refresh_candidates, candle_status = enrich_candidates_with_toss_candles(refresh_candidates)
             refresh_candidates, orderbook_status = enrich_candidates_with_toss_orderbook(refresh_candidates)
             refresh_candidates, trade_status = enrich_candidates_with_toss_trades(refresh_candidates)
+        preselection_live_state_write_status = update_live_state_from_candidates(refresh_candidates, mode)
+        preselection_candidate_data_status = update_candidate_data_snapshots(
+            refresh_candidates,
+            mode,
+            stage="live-price-preselection",
+        )
+        preselection_candidate_latest_status = update_market_data_latest_from_candidates(
+            refresh_candidates,
+            mode=mode,
+            stage="live-price-preselection",
+        )
     except Exception as error:
         error_payload, _ = integration_error_payload(error)
         price_status = {
@@ -14634,6 +14648,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "marketDataLatestAt": market_data_status.get("latestAt", ""),
         "candidateMarketDataLatestUpdatedCount": candidate_latest_status.get("updatedCount", 0),
         "candidateMarketDataLatestStored": bool(candidate_latest_status.get("stored", False)),
+        "preselectionLiveStateStoredCount": preselection_live_state_write_status.get("storedCount", 0),
+        "preselectionCandidateDataStoredCount": preselection_candidate_data_status.get("storedCount", 0),
+        "preselectionCandidateMarketDataLatestUpdatedCount": preselection_candidate_latest_status.get("updatedCount", 0),
         "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
@@ -14658,6 +14675,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "candidateDataRead": candidate_data_merge_status,
         "marketDataRead": market_data_merge_status,
         "stateRead": live_state_status,
+        "preselectionStateWrite": preselection_live_state_write_status,
+        "preselectionCandidateData": preselection_candidate_data_status,
+        "preselectionCandidateMarketDataLatest": preselection_candidate_latest_status,
         "stateWrite": live_state_write_status,
         "candidateData": candidate_data_status,
         "candidateMarketDataLatest": candidate_latest_status,
