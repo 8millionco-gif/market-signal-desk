@@ -969,6 +969,7 @@ function renderCandidatePoolStatus() {
   const total = Number(summary.candidatePoolCount ?? pool.totalCount ?? 0);
   const selected = Number(summary.candidatePoolSelectedCount ?? 0);
   const retained = Number(summary.candidatePoolRetainedScanCount ?? 0);
+  const scanLimit = Number(summary.candidatePoolScanLimit ?? pool.scanLimit ?? 0);
   const improving = Number(summary.candidatePoolImprovingCount ?? pool.improvingCount ?? 0);
   const weakening = Number(summary.candidatePoolWeakeningCount ?? pool.weakeningCount ?? 0);
   const monitorReady = Number(summary.candidatePoolMonitorReadyCount ?? pool.monitorReadyCount ?? 0);
@@ -986,7 +987,7 @@ function renderCandidatePoolStatus() {
     ["활성 후보", active > 0, `${active}/${total}`],
     ["진입/검증", (counts.entry_candidate ?? 0) + (counts.validating ?? 0) > 0, `진입 ${counts.entry_candidate ?? 0} · 검증 ${counts.validating ?? 0}`],
     ["눌림/관찰", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `눌림 ${counts.pullback_wait ?? 0} · 관찰 ${counts.watching ?? 0}`],
-    ["재점검", retained > 0 || selected > 0, `스캔 ${retained} · 선정 ${selected}`],
+    ["재점검", retained > 0 || selected > 0, `스캔 ${retained}${scanLimit ? `/${scanLimit}` : ""} · 선정 ${selected}`],
     ["우선 감시", monitorReady > 0 || monitorWait > 0, `우선 ${monitorReady} · 대기 ${monitorWait}`],
     ["흐름", improving >= weakening, `개선 ${improving} · 약화 ${weakening}`],
     ["성과", performanceMeasured > 0, `${performanceMeasured}건 · 승률 ${performanceHitRate} · 평균 ${performanceAverage}`],

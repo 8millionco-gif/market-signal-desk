@@ -180,6 +180,7 @@ SIGNAL_CANDIDATE_POOL_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS
 SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
 SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
 SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "8"))
+SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "60"))
 SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
@@ -5980,6 +5981,9 @@ def candidate_pool_summary(data: dict | None = None) -> dict:
         "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
         "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
         "demotionConfirmations": max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS),
+        "scanLimit": SIGNAL_CANDIDATE_POOL_SCAN_LIMIT,
+        "retainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
+        "retainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
         "topCandidates": top_records[: max(0, SIGNAL_CANDIDATE_POOL_TOP_LIMIT)],
         "topLimit": SIGNAL_CANDIDATE_POOL_TOP_LIMIT,
     }
@@ -6142,7 +6146,8 @@ def candidate_pool_memory_payload(record: dict) -> dict:
 
 
 def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
-    if not SIGNAL_CANDIDATE_POOL_ENABLED or SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT <= 0:
+    selected_limit = limit if limit is not None else SIGNAL_CANDIDATE_POOL_SCAN_LIMIT
+    if not SIGNAL_CANDIDATE_POOL_ENABLED or selected_limit <= 0:
         return []
     data = candidate_pool_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
@@ -6177,7 +6182,6 @@ def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
         ),
         reverse=True,
     )
-    selected_limit = limit if limit is not None else SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT
     return records[: max(0, selected_limit)]
 
 
@@ -8580,7 +8584,7 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         return cached["candidates"], cached["status"]
 
     base_entries = candidate_universe_entries()
-    pool_records = candidate_pool_retainable_records()
+    pool_records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_POOL_SCAN_LIMIT)
     entries, pool_input_status = merge_candidate_pool_scan_entries(
         base_entries[: max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)],
         pool_records,
@@ -8645,6 +8649,7 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         "scannedCount": len(discovered),
         "candidateCount": len(selected),
         "candidatePoolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
+        "candidatePoolScanLimit": SIGNAL_CANDIDATE_POOL_SCAN_LIMIT,
         "candidatePoolRetainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
         "candidatePoolRetainedInputCount": pool_input_status.get("retainedInputCount", 0),
         "candidatePoolRetainedExistingCount": pool_input_status.get("retainedExistingCount", 0),
@@ -9071,6 +9076,7 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolPerformanceAverageChange": pool_status.get("performanceAverageChange"),
             "candidatePoolPerformanceLatestAt": pool_status.get("performanceLatestAt"),
             "candidatePoolRetainLimit": discovery_status.get("candidatePoolRetainLimit"),
+            "candidatePoolScanLimit": discovery_status.get("candidatePoolScanLimit", pool_status.get("scanLimit")),
             "candidatePoolRetainMinScore": discovery_status.get("candidatePoolRetainMinScore"),
             "candidatePoolRetainedInputCount": discovery_status.get("candidatePoolRetainedInputCount"),
             "candidatePoolRetainedScanCount": discovery_status.get("candidatePoolRetainedScanCount"),
@@ -9331,6 +9337,7 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolPerformanceHitRate": summary.get("candidatePoolPerformanceHitRate"),
         "candidatePoolPerformanceAverageChange": summary.get("candidatePoolPerformanceAverageChange"),
         "candidatePoolRetainLimit": summary.get("candidatePoolRetainLimit"),
+        "candidatePoolScanLimit": summary.get("candidatePoolScanLimit"),
         "candidatePoolRetainMinScore": summary.get("candidatePoolRetainMinScore"),
         "candidatePoolRetainedInputCount": summary.get("candidatePoolRetainedInputCount"),
         "candidatePoolRetainedScanCount": summary.get("candidatePoolRetainedScanCount"),
