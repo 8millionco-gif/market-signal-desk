@@ -1085,6 +1085,32 @@ def update_market_data_latest(event: dict) -> dict:
     }
 
 
+def candidate_market_data_latest_record(
+    event_type: str,
+    symbol: str,
+    row: dict,
+    metadata: dict,
+    now_text: str,
+) -> tuple[str, dict]:
+    event_name = str(event_type or "raw")
+    return (
+        market_data_latest_key("toss", event_name, symbol, ""),
+        {
+            "source": "toss",
+            "eventType": event_name,
+            "symbol": symbol,
+            "query": "candidate-final",
+            "collectedAt": now_text,
+            "rawEventId": "",
+            "metadata": metadata,
+            "payload": {
+                "data": row,
+                "metadata": metadata,
+            },
+        },
+    )
+
+
 def update_market_data_latest_from_candidates(candidates: list[dict], mode: str = "", stage: str = "selected") -> dict:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return {"enabled": False, "stored": False, "storage": "disabled", "updatedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
@@ -1092,63 +1118,109 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     rows: list[tuple[str, dict]] = []
     skipped_count = 0
+    skipped_price_count = 0
+    updated_by_type: dict[str, int] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         symbol = str(candidate.get("symbol", "")).strip().upper()
-        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-        if not symbol or str(live_price.get("source", "")) != "toss" or not live_price.get("lastPrice") or not live_price.get("currency"):
+        if not symbol:
             skipped_count += 1
             continue
-        timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or candidate.get("updated") or now_text)
-        row = {
+
+        candidate_stored = False
+        base_row = {
             "symbol": symbol,
             "name": candidate.get("name", ""),
             "market": candidate.get("market", ""),
-            "lastPrice": str(live_price.get("lastPrice")),
-            "currency": str(live_price.get("currency")),
-            "timestamp": timestamp,
-            "updatedAt": str(live_price.get("updatedAt") or timestamp),
             "mode": mode,
             "stage": stage,
-            "dataSource": str(live_price.get("dataSource") or "candidate-final"),
-            "retained": bool(live_price.get("retained")),
         }
-        change = candidate_change_decimal(candidate)
-        if change is not None:
-            row["changeRate"] = str(change)
-        for source_key in ("changeSource", "changeMessage", "freshness"):
-            if source_key in live_price:
-                row[source_key] = live_state_json_safe(live_price.get(source_key))
+        base_metadata = {
+            "mode": mode,
+            "stage": stage,
+            "source": "candidate-final",
+        }
         completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
-        row["dataCompleteness"] = live_state_json_safe({
+        completeness_row = live_state_json_safe({
             "displayReady": bool(completeness.get("displayReady")),
             "entryReady": bool(completeness.get("entryReady")),
             "missing": completeness.get("missing", []),
         })
-        record = {
-            "source": "toss",
-            "eventType": "prices",
-            "symbol": symbol,
-            "query": "candidate-final",
-            "collectedAt": now_text,
-            "rawEventId": "",
-            "metadata": {
-                "mode": mode,
-                "stage": stage,
-                "source": "candidate-final",
+
+        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+        if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice") and live_price.get("currency"):
+            timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or candidate.get("updated") or now_text)
+            row = {
+                **base_row,
+                "lastPrice": str(live_price.get("lastPrice")),
+                "currency": str(live_price.get("currency")),
+                "timestamp": timestamp,
+                "updatedAt": str(live_price.get("updatedAt") or timestamp),
+                "dataSource": str(live_price.get("dataSource") or "candidate-final"),
                 "retained": bool(live_price.get("retained")),
-            },
-            "payload": {
-                "data": row,
-                "metadata": {
-                    "mode": mode,
-                    "stage": stage,
-                    "source": "candidate-final",
-                },
-            },
-        }
-        rows.append((market_data_latest_key("toss", "prices", symbol, ""), record))
+                "dataCompleteness": completeness_row,
+            }
+            change = candidate_change_decimal(candidate)
+            if change is not None:
+                row["changeRate"] = str(change)
+            for source_key in ("changeSource", "changeMessage", "freshness"):
+                if source_key in live_price:
+                    row[source_key] = live_state_json_safe(live_price.get(source_key))
+            metadata = {
+                **base_metadata,
+                "eventType": "prices",
+                "retained": bool(live_price.get("retained")),
+            }
+            rows.append(candidate_market_data_latest_record("prices", symbol, row, metadata, now_text))
+            updated_by_type["prices"] = updated_by_type.get("prices", 0) + 1
+            candidate_stored = True
+        else:
+            skipped_price_count += 1
+
+        depth_specs = [
+            ("candles", "liveCandles"),
+            ("orderbook", "liveOrderbook"),
+            ("trades", "liveTrades"),
+        ]
+        for event_type, live_key in depth_specs:
+            live_value = candidate.get(live_key, {}) if isinstance(candidate.get(live_key), dict) else {}
+            if not candidate_data_source_ok(live_value):
+                continue
+            safe_value = live_state_json_safe(live_value)
+            if not isinstance(safe_value, dict):
+                continue
+            timestamp = str(
+                safe_value.get("timestamp")
+                or safe_value.get("latestTimestamp")
+                or safe_value.get("updatedAt")
+                or candidate.get("updated")
+                or now_text
+            )
+            row = {
+                **base_row,
+                **safe_value,
+                live_key: safe_value,
+                "timestamp": timestamp,
+                "updatedAt": now_text,
+                "dataCompleteness": completeness_row,
+            }
+            if event_type == "candles":
+                chart = candidate.get("chart")
+                if isinstance(chart, list) and chart:
+                    row["chart"] = live_state_json_safe(chart)
+            metadata = {
+                **base_metadata,
+                "eventType": event_type,
+                "retained": bool(safe_value.get("retained")),
+                "source": str(safe_value.get("dataSource") or safe_value.get("source") or "candidate-final"),
+            }
+            rows.append(candidate_market_data_latest_record(event_type, symbol, row, metadata, now_text))
+            updated_by_type[event_type] = updated_by_type.get(event_type, 0) + 1
+            candidate_stored = True
+
+        if not candidate_stored:
+            skipped_count += 1
 
     if not rows:
         return {
@@ -1157,7 +1229,9 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             "storage": "",
             "updatedCount": 0,
             "skippedCount": skipped_count,
-            "message": "최종 후보 중 저장할 Toss 가격이 없습니다.",
+            "skippedPriceCount": skipped_price_count,
+            "updatedByType": updated_by_type,
+            "message": "최종 후보 중 저장할 Toss 수집값이 없습니다.",
         }
 
     with MARKET_DATA_LOCK:
@@ -1188,6 +1262,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             "byType": by_type,
             "updatedAt": data["updatedAt"],
             "lastCandidateFinalCount": len(rows),
+            "lastCandidateFinalByType": updated_by_type,
             "lastCandidateFinalStage": stage,
         }
         ok, storage = market_data_latest_write(data)
@@ -1204,9 +1279,11 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         "storage": storage,
         "updatedCount": len(rows),
         "skippedCount": skipped_count,
+        "skippedPriceCount": skipped_price_count,
+        "updatedByType": updated_by_type,
         "itemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
         "updatedAt": data.get("updatedAt", ""),
-        "message": f"서버 최종 후보 Toss 가격 {len(rows)}개를 최신값 저장소에 업데이트했습니다.",
+        "message": f"서버 최종 후보 Toss 수집값 {len(rows)}개를 최신값 저장소에 업데이트했습니다.",
     }
 
 
@@ -1406,7 +1483,26 @@ def stored_live_price_for_candidate(
 def stored_candles_from_market_data_record(record: dict) -> dict | None:
     candles = candles_from_market_data_record(record)
     if not candles:
-        return None
+        row = market_data_record_payload_row(record)
+        live_candles = row.get("liveCandles", {}) if isinstance(row.get("liveCandles"), dict) else {}
+        summary = live_candles if live_candles else row
+        if not isinstance(summary, dict):
+            return None
+        source = str(summary.get("source", "")).strip()
+        count = bounded_int(summary.get("count", 0), 0, 100000)
+        latest_timestamp = str(summary.get("latestTimestamp") or summary.get("timestamp") or row.get("timestamp") or "")
+        if not source or count <= 0:
+            return None
+        return {
+            **summary,
+            "source": source,
+            "interval": summary.get("interval", "1d"),
+            "count": count,
+            "latestTimestamp": latest_timestamp,
+            "dataSource": "market_data_latest",
+            "retained": True,
+            "message": "서버에 저장된 Toss 일봉 요약을 후보 판단에 다시 반영했습니다.",
+        }
     latest_timestamp = latest_candle_datetime(candles)
     if candles_are_stale(candles):
         return {
@@ -1433,9 +1529,16 @@ def stored_orderbook_from_market_data_record(record: dict) -> dict | None:
     payload = market_data_record_payload_row(record)
     summary = summarize_orderbook(payload)
     if not summary:
+        live_orderbook = payload.get("liveOrderbook", {}) if isinstance(payload.get("liveOrderbook"), dict) else {}
+        if live_orderbook:
+            summary = dict(live_orderbook)
+        elif payload.get("pressure") or payload.get("imbalancePercent") or payload.get("spreadPercent"):
+            summary = dict(payload)
+    if not summary:
         return None
     return {
         **summary,
+        "source": summary.get("source", "toss"),
         "dataSource": "market_data_latest",
         "retained": True,
         "message": "서버에 저장된 Toss 호가를 후보 판단에 다시 반영했습니다.",
@@ -1446,9 +1549,16 @@ def stored_trades_from_market_data_record(record: dict) -> dict | None:
     payload = market_data_record_payload_row(record)
     summary = summarize_trades(payload)
     if not summary:
+        live_trades = payload.get("liveTrades", {}) if isinstance(payload.get("liveTrades"), dict) else {}
+        if live_trades:
+            summary = dict(live_trades)
+        elif payload.get("pressure") or payload.get("biasPercent") or payload.get("totalVolume"):
+            summary = dict(payload)
+    if not summary:
         return None
     return {
         **summary,
+        "source": summary.get("source", "toss"),
         "dataSource": "market_data_latest",
         "retained": True,
         "message": "서버에 저장된 Toss 체결을 후보 판단에 다시 반영했습니다.",
