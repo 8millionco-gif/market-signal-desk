@@ -1048,11 +1048,12 @@ function renderLivePriceUpdate(payload = {}) {
   const priceOnly = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const changedSymbols = new Set(state.livePrice?.changedSymbols || []);
   const selectedChanged = state.selectedSymbol && changedSymbols.has(state.selectedSymbol);
-  if (!priceOnly && (selectedChanged || payload.detail !== "price")) {
+  if (!priceOnly && selectedChanged) {
     renderTradeDecisionStatus();
   }
   renderLivePriceStatus();
-  updateLivePriceFragments({ detail: payload.detail || "price", priceOnly });
+  if (!changedSymbols.size && priceOnly) return;
+  updateLivePriceFragments({ detail: payload.detail || "price", priceOnly, changedSymbols });
 }
 
 function updateLivePriceFragments(options = {}) {
@@ -1062,9 +1063,11 @@ function updateLivePriceFragments(options = {}) {
 
 function updateFeedPriceFragments(options = {}) {
   const priceOnly = Boolean(options.priceOnly);
+  const changedSymbols = options.changedSymbols instanceof Set ? options.changedSymbols : new Set();
   const candidates = state.dashboard?.candidates ?? [];
   const bySymbol = new Map(candidates.map((item) => [item.symbol, item]));
   document.querySelectorAll(".feed-item[data-symbol]").forEach((button) => {
+    if (changedSymbols.size && !changedSymbols.has(button.dataset.symbol)) return;
     const item = bySymbol.get(button.dataset.symbol);
     if (!item) return;
     const plan = tradePlan(item);
@@ -1102,6 +1105,8 @@ function updateSelectedPriceFragments(options = {}) {
   const item = selectedCandidate();
   if (!item) return;
   const priceOnly = Boolean(options.priceOnly);
+  const changedSymbols = options.changedSymbols instanceof Set ? options.changedSymbols : new Set();
+  if (changedSymbols.size && !changedSymbols.has(item.symbol)) return;
   const plan = tradePlan(item);
   const primaryDecision = primaryDecisionForDisplay(item, plan);
   const priceNode = document.querySelector("[data-selected-price]");
