@@ -486,6 +486,13 @@ function statusFallbacks() {
         count: 0,
         bySource: {},
         latest: {}
+      },
+      newsEvents: {
+        enabled: false,
+        implementation: "filesystem",
+        count: 0,
+        byProvider: {},
+        latest: {}
       }
     },
     stockMaster: {
@@ -3716,6 +3723,7 @@ function renderStorageStatus() {
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
   const rawEvents = status.rawEvents ?? {};
+  const newsEvents = status.newsEvents ?? {};
   const candidateData = status.candidateData ?? {};
   const marketData = status.marketData ?? {};
   const operationReady = Boolean(status.operationReady);
@@ -3766,6 +3774,19 @@ function renderStorageStatus() {
   const rawEventText = rawEvents.enabled
     ? `${rawEvents.count ?? 0}건${rawSourceText ? ` · ${rawSourceText}` : ""}`
     : "꺼짐";
+  const newsProviderText = newsEvents.byProvider && Object.keys(newsEvents.byProvider).length
+    ? Object.entries(newsEvents.byProvider)
+        .slice(0, 3)
+        .map(([provider, count]) => `${provider} ${count}`)
+        .join(" · ")
+    : "";
+  const newsEventText = newsEvents.enabled
+    ? `${newsEvents.count ?? 0}건${newsProviderText ? ` · ${newsProviderText}` : ""}`
+    : "꺼짐";
+  const newsLatest = newsEvents.latest ?? {};
+  const newsLatestText = newsLatest.collectedAt
+    ? `${timeLabel(newsLatest.collectedAt)} · ${shortText(newsLatest.title || newsLatest.query || newsLatest.provider || "뉴스", 24)}`
+    : "-";
   const marketSourceText = marketData.bySource && Object.keys(marketData.bySource).length
     ? Object.entries(marketData.bySource)
         .slice(0, 3)
@@ -3822,6 +3843,9 @@ function renderStorageStatus() {
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
+    ["뉴스 이벤트", Boolean(newsEvents.enabled && Number(newsEvents.count ?? 0) > 0), newsEventText],
+    ["뉴스 저장", Boolean(newsEvents.persistent), newsEvents.persistent ? "DB 기준" : newsEvents.enabled ? "파일 fallback" : "꺼짐"],
+    ["뉴스 최신", Boolean(newsLatest.collectedAt), newsLatestText],
     ["최신 수집값", Boolean(marketData.enabled && Number(marketData.itemCount ?? 0) > 0), marketDataText],
     ["최신값 갱신", Boolean(marketData.latestAt), marketLatestText],
     ["후보 데이터", Boolean(candidateData.enabled && Number(candidateData.itemCount ?? 0) > 0), candidateDataText],

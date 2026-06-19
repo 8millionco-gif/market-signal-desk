@@ -357,6 +357,7 @@ DB에 저장되는 핵심 데이터는 다음과 같습니다.
 - 후보별 최신 Toss 가격 기준: `market_data_latest`
 - 장전/장마감/장중 스냅샷: `signal_snapshots`
 - 시세·공시·뉴스 원천 이벤트: `signal_raw_events`
+- 정규화된 뉴스 이벤트: `signal_news_events`
 
 Render Postgres 또는 Supabase Postgres를 연결한 뒤 아래 값을 설정합니다.
 
@@ -368,6 +369,9 @@ $env:SIGNAL_DB_MIGRATE_RUN_LIMIT="200"
 $env:SIGNAL_RAW_EVENT_STORAGE_ENABLED="1"
 $env:SIGNAL_RAW_EVENT_PAYLOAD_LIMIT="40"
 $env:SIGNAL_RAW_EVENT_FILE_LIMIT="500"
+$env:SIGNAL_NEWS_EVENT_STORAGE_ENABLED="1"
+$env:SIGNAL_NEWS_EVENT_FILE_LIMIT="800"
+$env:SIGNAL_NEWS_EVENT_MAX_ITEMS="3000"
 $env:SIGNAL_LIVE_STATE_STORAGE_ENABLED="1"
 $env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="180"
 ```
@@ -377,6 +381,8 @@ $env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="180"
 토스 현재가·호가·체결 원천 응답은 `signal_raw_events`에 감사 로그로 저장되고, 화면 판단에 바로 쓰는 후보별 최신 가격·등락률·가격 반응·최종 판단은 `live_price_state`에 별도로 저장됩니다. 10초 폴링 중 일부 종목이 미수신되면 이 최신 상태를 먼저 병합한 뒤 재계산하므로, 일시적인 누락 때문에 핵심 후보가 바로 사라지는 현상을 줄입니다.
 
 `signal_raw_events`에는 Toss 시세/캔들/호가/체결, OpenDART 공시, 네이버/GDELT 뉴스 응답이 저장됩니다. 원천 payload는 `SIGNAL_RAW_EVENT_PAYLOAD_LIMIT` 범위로 잘라 저장하므로, 판단 근거 추적은 가능하게 두면서 DB가 불필요하게 커지는 것을 막습니다.
+
+뉴스는 원천 응답과 별도로 `signal_news_events`에 정규화해 저장합니다. 서버는 네이버/GDELT에서 받은 기사 제목, 요약, 출처, URL, 발행/수집 시각, 관련 종목, 관련성 메타데이터를 후보 판단용 이벤트로 남기고, 화면은 최신 DB 스냅샷을 읽어 뉴스 시그널과 가격 반응을 연결합니다. 본문 전체를 복제하지 않고 판단에 필요한 메타데이터 중심으로 저장합니다.
 
 DB 연결이 없을 때 원천 이벤트는 `data/raw-events.json`에 제한 개수만 보관됩니다. Render 무료 웹 서비스의 파일 저장소는 재배포/재시작 후 유지가 보장되지 않으므로 운영에서는 DB 저장을 기준으로 봅니다.
 
@@ -541,6 +547,7 @@ GET  /api/integrations/openai/status
 GET  /api/integrations/openai/analyze?symbol=005930
 GET  /api/scheduler/status
 GET  /api/storage/status
+GET  /api/news-events/status
 GET  /api/scheduler/runs?limit=12
 GET  /api/scheduler/runs/{id}
 GET  /api/performance?limit=12&top=3

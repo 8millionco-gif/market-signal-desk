@@ -42,6 +42,7 @@ DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard-cache.json"
 RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
+NEWS_EVENTS_FILE = DATA_DIR / "news-events.json"
 MARKET_DATA_LATEST_FILE = DATA_DIR / "market-data-latest.json"
 LIVE_STATE_FILE = DATA_DIR / "live-state.json"
 CANDIDATE_DATA_FILE = DATA_DIR / "candidate-data-snapshots.json"
@@ -53,6 +54,10 @@ SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "500"))
 SIGNAL_RAW_EVENT_PAYLOAD_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_PAYLOAD_LIMIT", "40"))
+SIGNAL_NEWS_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_NEWS_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_NEWS_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_NEWS_EVENT_FILE_LIMIT", "800"))
+SIGNAL_NEWS_EVENT_MAX_ITEMS = int(os.getenv("SIGNAL_NEWS_EVENT_MAX_ITEMS", "3000"))
+NEWS_EVENTS_KV_KEY = "news_events_latest"
 SIGNAL_MARKET_DATA_LATEST_ENABLED = os.getenv("SIGNAL_MARKET_DATA_LATEST_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = int(os.getenv("SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS", "2000"))
 MARKET_DATA_LATEST_KV_KEY = "market_data_latest"
@@ -431,6 +436,25 @@ def ensure_database_schema() -> bool:
                     )
                     cur.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS signal_news_events (
+                            id TEXT PRIMARY KEY,
+                            provider TEXT NOT NULL,
+                            symbol TEXT NOT NULL DEFAULT '',
+                            query TEXT NOT NULL DEFAULT '',
+                            title TEXT NOT NULL DEFAULT '',
+                            summary TEXT NOT NULL DEFAULT '',
+                            url TEXT NOT NULL DEFAULT '',
+                            source_host TEXT NOT NULL DEFAULT '',
+                            published_at TIMESTAMPTZ,
+                            collected_at TIMESTAMPTZ NOT NULL,
+                            relevance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
                         CREATE INDEX IF NOT EXISTS signal_snapshots_mode_created_idx
                         ON signal_snapshots (mode, created_at DESC)
                         """
@@ -457,6 +481,24 @@ def ensure_database_schema() -> bool:
                         """
                         CREATE INDEX IF NOT EXISTS signal_raw_events_type_collected_idx
                         ON signal_raw_events (event_type, collected_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_news_events_provider_collected_idx
+                        ON signal_news_events (provider, collected_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_news_events_symbol_collected_idx
+                        ON signal_news_events (symbol, collected_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_news_events_published_idx
+                        ON signal_news_events (published_at DESC)
                         """
                     )
             DB_SCHEMA_READY = True
@@ -498,6 +540,8 @@ def db_storage_counts() -> dict:
                 snapshot_count = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM signal_raw_events")
                 raw_event_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM signal_news_events")
+                news_event_count = cur.fetchone()[0]
                 cur.execute("SELECT payload FROM signal_kv WHERE key = 'candidate_pool'")
                 pool_row = cur.fetchone()
                 cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (CANDIDATE_DATA_KV_KEY,))
@@ -528,6 +572,7 @@ def db_storage_counts() -> dict:
             "kvCount": bounded_int(kv_count, 0, 1_000_000),
             "snapshotCount": bounded_int(snapshot_count, 0, 1_000_000),
             "rawEventCount": bounded_int(raw_event_count, 0, 10_000_000),
+            "newsEventCount": bounded_int(news_event_count, 0, 10_000_000),
             "candidatePoolCount": len(pool_items),
             "candidatePoolActiveCount": active_pool,
             "candidateDataCount": len(candidate_data_items),
@@ -1818,6 +1863,317 @@ def db_raw_event_counts() -> dict:
     except Exception as error:
         set_db_error(error)
         return {}
+
+
+def news_event_id(provider: str, symbol: str, query: str, item: dict) -> str:
+    url = str(item.get("originalUrl") or item.get("newsUrl") or item.get("naverUrl") or "")
+    fingerprint = json.dumps(
+        {
+            "provider": provider,
+            "symbol": symbol,
+            "query": query,
+            "url": url,
+            "title": item.get("title", ""),
+            "publishedAt": item.get("publishedAt", ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
+
+
+def news_event_payload(
+    provider: str,
+    item: dict,
+    symbol: str = "",
+    query: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    url = str(item.get("originalUrl") or item.get("newsUrl") or item.get("naverUrl") or "")
+    provider = short_text(str(provider or "news").strip().lower(), 40) or "news"
+    symbol = short_text(str(symbol or "").strip().upper(), 40)
+    query = short_text(str(query or "").strip(), 240)
+    collected_at = datetime.now(KST).isoformat(timespec="seconds")
+    relevance = item.get("relevance", {}) if isinstance(item.get("relevance"), dict) else {}
+    return {
+        "id": news_event_id(provider, symbol, query, item),
+        "provider": provider,
+        "symbol": symbol,
+        "query": query,
+        "title": clean_news_text(str(item.get("title", ""))),
+        "summary": clean_news_text(str(item.get("summary", ""))),
+        "url": short_text(url, 500),
+        "sourceHost": clean_news_text(str(item.get("sourceHost", ""))),
+        "publishedAt": str(item.get("publishedAt", "")),
+        "collectedAt": collected_at,
+        "relevance": compact_raw_payload(relevance, list_limit=12),
+        "payload": compact_raw_payload(
+            {
+                "item": item,
+                "metadata": metadata or {},
+            },
+            list_limit=12,
+        ),
+    }
+
+
+def news_events_latest_empty() -> dict:
+    return {"version": 1, "updatedAt": "", "items": {}, "summary": {}}
+
+
+def news_events_latest_data() -> dict:
+    stored = db_read_kv(NEWS_EVENTS_KV_KEY, None) if database_storage_enabled() else None
+    file_data = safe_read_json_file(NEWS_EVENTS_FILE)
+    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else news_events_latest_empty()
+    if not isinstance(data, dict):
+        return news_events_latest_empty()
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    if not isinstance(data.get("summary"), dict):
+        data["summary"] = {}
+    return data
+
+
+def news_events_latest_write(data: dict) -> tuple[bool, str]:
+    payload = live_state_json_safe(data)
+    if database_storage_enabled() and db_write_kv(NEWS_EVENTS_KV_KEY, payload):
+        return True, "postgres"
+    write_json(NEWS_EVENTS_FILE, payload)
+    return True, "filesystem-fallback" if database_storage_enabled() else "filesystem"
+
+
+def trim_news_event_items(items: dict) -> dict:
+    if len(items) <= SIGNAL_NEWS_EVENT_MAX_ITEMS:
+        return items
+    ranked = sorted(
+        items.items(),
+        key=lambda pair: str(pair[1].get("publishedAt") or pair[1].get("collectedAt", "")) if isinstance(pair[1], dict) else "",
+        reverse=True,
+    )
+    return dict(ranked[: max(1, SIGNAL_NEWS_EVENT_MAX_ITEMS)])
+
+
+def db_write_news_events(events: list[dict]) -> bool:
+    if not events or not ensure_database_schema():
+        return False
+    try:
+        psycopg, Jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                for event in events:
+                    published_at = str(event.get("publishedAt", "")).strip() or None
+                    cur.execute(
+                        """
+                        INSERT INTO signal_news_events (
+                            id, provider, symbol, query, title, summary, url, source_host,
+                            published_at, collected_at, relevance, payload, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (id)
+                        DO UPDATE SET
+                            symbol = EXCLUDED.symbol,
+                            query = EXCLUDED.query,
+                            title = EXCLUDED.title,
+                            summary = EXCLUDED.summary,
+                            url = EXCLUDED.url,
+                            source_host = EXCLUDED.source_host,
+                            published_at = EXCLUDED.published_at,
+                            collected_at = EXCLUDED.collected_at,
+                            relevance = EXCLUDED.relevance,
+                            payload = EXCLUDED.payload,
+                            updated_at = NOW()
+                        """,
+                        (
+                            event["id"],
+                            event["provider"],
+                            event.get("symbol", ""),
+                            event.get("query", ""),
+                            event.get("title", ""),
+                            event.get("summary", ""),
+                            event.get("url", ""),
+                            event.get("sourceHost", ""),
+                            published_at,
+                            event.get("collectedAt") or datetime.now(KST).isoformat(timespec="seconds"),
+                            Jsonb(event.get("relevance", {})),
+                            Jsonb(event.get("payload", {})),
+                        ),
+                    )
+        set_db_error("")
+        return True
+    except Exception as error:
+        set_db_error(error)
+        return False
+
+
+def write_news_events(
+    provider: str,
+    items: list[dict],
+    symbol: str = "",
+    query: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    if not SIGNAL_NEWS_EVENT_STORAGE_ENABLED:
+        return {"enabled": False, "stored": False, "storage": "disabled", "storedCount": 0}
+    events = [
+        news_event_payload(provider, item, symbol=symbol, query=query, metadata=metadata)
+        for item in items
+        if isinstance(item, dict) and item.get("title")
+    ]
+    if not events:
+        return {"enabled": True, "stored": False, "storage": "", "storedCount": 0, "message": "저장할 뉴스 이벤트가 없습니다."}
+
+    stored = False
+    storage = "filesystem"
+    if database_storage_enabled():
+        stored = db_write_news_events(events)
+        storage = "postgres" if stored else "filesystem-fallback"
+
+    with RAW_EVENT_LOCK:
+        data = news_events_latest_data()
+        latest_items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        for event in events:
+            previous = latest_items.get(event["id"], {}) if isinstance(latest_items.get(event["id"]), dict) else {}
+            latest_items[event["id"]] = {
+                **previous,
+                **event,
+                "observations": int(previous.get("observations", 0) or 0) + 1,
+            }
+        data["items"] = trim_news_event_items(latest_items)
+        by_provider: dict[str, int] = {}
+        by_symbol: dict[str, int] = {}
+        for item in data["items"].values():
+            if not isinstance(item, dict):
+                continue
+            item_provider = str(item.get("provider", "news"))
+            item_symbol = str(item.get("symbol", ""))
+            by_provider[item_provider] = by_provider.get(item_provider, 0) + 1
+            if item_symbol:
+                by_symbol[item_symbol] = by_symbol.get(item_symbol, 0) + 1
+        data["updatedAt"] = datetime.now(KST).isoformat(timespec="seconds")
+        data["summary"] = {
+            "itemCount": len(data["items"]),
+            "byProvider": by_provider,
+            "bySymbol": dict(sorted(by_symbol.items(), key=lambda pair: pair[1], reverse=True)[:12]),
+            "updatedAt": data["updatedAt"],
+        }
+        latest_ok, latest_storage = news_events_latest_write(data)
+        if not stored:
+            stored = latest_ok
+            storage = latest_storage
+
+    return {
+        "enabled": True,
+        "stored": stored,
+        "storage": storage,
+        "storedCount": len(events),
+        "latestItemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
+        "updatedAt": data.get("updatedAt", ""),
+        "message": f"뉴스 이벤트 {len(events)}건을 서버 저장소에 반영했습니다.",
+    }
+
+
+def db_news_event_counts() -> dict:
+    if not ensure_database_schema():
+        return {}
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM signal_news_events")
+                total_count = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT provider, COUNT(*)
+                    FROM signal_news_events
+                    GROUP BY provider
+                    ORDER BY COUNT(*) DESC, provider ASC
+                    LIMIT 8
+                    """
+                )
+                provider_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT provider, symbol, query, title, source_host, published_at, collected_at
+                    FROM signal_news_events
+                    ORDER BY collected_at DESC
+                    LIMIT 1
+                    """
+                )
+                latest = cur.fetchone()
+        latest_record = {}
+        if latest:
+            latest_record = {
+                "provider": latest[0],
+                "symbol": latest[1],
+                "query": latest[2],
+                "title": latest[3],
+                "sourceHost": latest[4],
+                "publishedAt": latest[5].isoformat(timespec="seconds") if hasattr(latest[5], "isoformat") else str(latest[5] or ""),
+                "collectedAt": latest[6].isoformat(timespec="seconds") if hasattr(latest[6], "isoformat") else str(latest[6] or ""),
+            }
+        set_db_error("")
+        return {
+            "count": bounded_int(total_count, 0, 10_000_000),
+            "byProvider": {str(provider): bounded_int(count, 0, 10_000_000) for provider, count in provider_rows},
+            "latest": latest_record,
+        }
+    except Exception as error:
+        set_db_error(error)
+        return {}
+
+
+def file_news_event_counts() -> dict:
+    data = safe_read_json_file(NEWS_EVENTS_FILE)
+    items = data.get("items", {}) if isinstance(data, dict) and isinstance(data.get("items"), dict) else {}
+    events = [item for item in items.values() if isinstance(item, dict)]
+    by_provider: dict[str, int] = {}
+    for event in events:
+        provider = str(event.get("provider") or "news")
+        by_provider[provider] = by_provider.get(provider, 0) + 1
+    events.sort(key=lambda item: str(item.get("collectedAt", "")), reverse=True)
+    latest = events[0] if events else {}
+    return {
+        "count": len(events),
+        "byProvider": by_provider,
+        "latest": {
+            "provider": latest.get("provider", ""),
+            "symbol": latest.get("symbol", ""),
+            "query": latest.get("query", ""),
+            "title": latest.get("title", ""),
+            "sourceHost": latest.get("sourceHost", ""),
+            "publishedAt": latest.get("publishedAt", ""),
+            "collectedAt": latest.get("collectedAt", ""),
+        } if latest else {},
+    }
+
+
+def news_event_storage_status() -> dict:
+    if not SIGNAL_NEWS_EVENT_STORAGE_ENABLED:
+        return {"enabled": False, "implementation": "disabled", "count": 0, "message": "뉴스 이벤트 저장이 꺼져 있습니다."}
+    db_counts = db_news_event_counts() if database_storage_enabled() else {}
+    if db_counts:
+        counts = db_counts
+        implementation = "postgres"
+        persistent = True
+    else:
+        counts = file_news_event_counts()
+        implementation = "filesystem"
+        persistent = False
+    return {
+        "enabled": True,
+        "implementation": implementation,
+        "persistent": persistent,
+        "file": display_local_path(NEWS_EVENTS_FILE),
+        "count": counts.get("count", 0),
+        "byProvider": counts.get("byProvider", {}),
+        "latest": counts.get("latest", {}),
+        "message": (
+            "정규화된 뉴스 이벤트를 Postgres DB에 저장하고 있습니다."
+            if persistent
+            else "DB 연결 전이라 정규화된 뉴스 이벤트를 파일 fallback에 저장합니다."
+        ),
+    }
 
 
 def file_raw_event_counts() -> dict:
@@ -5714,6 +6070,20 @@ def fetch_naver_news(query: str, display: int | None = None, start: int = 1, sor
         query=query,
         metadata={"display": display, "start": start, "sort": sort, "itemCount": len(payload.get("items", []))},
     )
+    try:
+        normalized_items = [
+            normalize_news_item(news_item)
+            for news_item in payload.get("items", [])
+            if isinstance(news_item, dict)
+        ]
+        write_news_events(
+            "naver",
+            [item for item in normalized_items if item.get("title")],
+            query=query,
+            metadata={"stage": "news-search", "display": display, "start": start, "sort": sort},
+        )
+    except Exception:
+        pass
     NEWS_CACHE[cache_key] = {
         "payload": payload,
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=NAVER_NEWS_CACHE_SECONDS),
@@ -5856,6 +6226,20 @@ def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | Non
         query=query,
         metadata={"display": display, "timespan": timespan, "sort": sort, "articleCount": len(payload.get("articles", []))},
     )
+    try:
+        normalized_items = [
+            normalize_gdelt_news_item(news_item)
+            for news_item in payload.get("articles", [])
+            if isinstance(news_item, dict)
+        ]
+        write_news_events(
+            "gdelt",
+            [item for item in normalized_items if item.get("title")],
+            query=query,
+            metadata={"stage": "news-search", "display": display, "timespan": timespan, "sort": sort},
+        )
+    except Exception:
+        pass
     GDELT_NEWS_CACHE[cache_key] = {
         "payload": payload,
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=GDELT_NEWS_CACHE_SECONDS),
@@ -5891,6 +6275,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
     filtered_count = 0
     material_count = 0
     queried_count = 0
+    stored_news_count = 0
+    news_storage_backend = ""
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index >= GDELT_NEWS_MAX_CANDIDATES:
@@ -5913,6 +6299,21 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
         material_count += bounded_int(relevance_summary.get("material", 0), 0, 100)
         normalized = relevant
         news_count += len(normalized)
+        storage_status = write_news_events(
+            "gdelt",
+            normalized,
+            symbol=str(item.get("symbol", "")),
+            query=query,
+            metadata={
+                "stage": "candidate-enrichment",
+                "timespan": payload.get("timespan", GDELT_NEWS_TIMESPAN),
+                "rawDisplay": payload.get("display", len(normalized)),
+                "filteredOut": filtered_out,
+                "relevanceSummary": relevance_summary,
+            },
+        )
+        stored_news_count += bounded_int(storage_status.get("storedCount", 0), 0, 1000)
+        news_storage_backend = storage_status.get("storage", news_storage_backend)
         item["globalNews"] = {
             "source": "gdelt",
             "query": query,
@@ -5943,6 +6344,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
         "newsCount": news_count,
         "filteredNewsCount": filtered_count,
         "materialNewsCount": material_count,
+        "newsStoredCount": stored_news_count,
+        "newsStorage": news_storage_backend,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -5967,6 +6370,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
     filtered_count = 0
     material_count = 0
     queried_count = 0
+    stored_news_count = 0
+    news_storage_backend = ""
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index >= NAVER_NEWS_MAX_CANDIDATES:
@@ -5987,6 +6392,21 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         material_count += bounded_int(relevance_summary.get("material", 0), 0, 100)
         normalized = relevant
         news_count += len(normalized)
+        storage_status = write_news_events(
+            "naver",
+            normalized,
+            symbol=str(item.get("symbol", "")),
+            query=query,
+            metadata={
+                "stage": "candidate-enrichment",
+                "rawTotal": payload.get("total", 0),
+                "rawDisplay": payload.get("display", len(normalized)),
+                "filteredOut": filtered_out,
+                "relevanceSummary": relevance_summary,
+            },
+        )
+        stored_news_count += bounded_int(storage_status.get("storedCount", 0), 0, 1000)
+        news_storage_backend = storage_status.get("storage", news_storage_backend)
         item["liveNews"] = {
             "source": "naver",
             "query": query,
@@ -6017,6 +6437,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         "newsCount": news_count,
         "filteredNewsCount": filtered_count,
         "materialNewsCount": material_count,
+        "newsStoredCount": stored_news_count,
+        "newsStorage": news_storage_backend,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -7336,8 +7758,10 @@ def raw_event_reliability_context() -> dict:
     persistent = bool(db_enabled and DB_SCHEMA_READY and not DB_LAST_ERROR)
     candidate_data = candidate_data_snapshot_status()
     market_data = market_data_latest_status()
+    news_events = news_event_storage_status()
     candidate_persistent = bool(candidate_data.get("persistent"))
     market_persistent = bool(market_data.get("persistent"))
+    news_persistent = bool(news_events.get("persistent"))
     candidate_items = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
     market_items = bounded_int(market_data.get("itemCount", 0), 0, 1_000_000)
     data_analysis_ready = bool(candidate_items > 0 and market_items > 0)
@@ -7360,11 +7784,18 @@ def raw_event_reliability_context() -> dict:
             "persistent": bool(candidate_persistent and market_persistent),
             "candidatePersistent": candidate_persistent,
             "marketPersistent": market_persistent,
+            "newsPersistent": news_persistent,
             "candidateItemCount": candidate_items,
             "marketItemCount": market_items,
+            "newsEventCount": bounded_int(news_events.get("count", 0), 0, 10_000_000),
             "candidateStorage": candidate_data.get("storage", ""),
             "marketStorage": market_data.get("storage", ""),
-            "databaseReady": bool(candidate_data.get("databaseReady") and market_data.get("databaseReady")),
+            "newsStorage": news_events.get("implementation", ""),
+            "databaseReady": bool(
+                candidate_data.get("databaseReady")
+                and market_data.get("databaseReady")
+                and (not database_storage_enabled() or news_events.get("persistent"))
+            ),
         },
     }
 
@@ -11676,6 +12107,19 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
     normalized = [news_item for news_item in normalized if news_item.get("title")]
     relevant = filter_relevant_news_items(entry, normalized)
     relevance_summary = news_relevance_summary(relevant)
+    news_storage = write_news_events(
+        "naver",
+        relevant,
+        symbol=str(entry.get("symbol", "")),
+        query=query,
+        metadata={
+            "stage": "discovery",
+            "rawTotal": payload.get("total", 0),
+            "rawDisplay": payload.get("display", len(normalized)),
+            "filteredOut": max(0, len(normalized) - len(relevant)),
+            "relevanceSummary": relevance_summary,
+        },
+    )
     return relevant, {
         "source": "naver",
         "query": query,
@@ -11686,6 +12130,7 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
         "filteredOut": max(0, len(normalized) - len(relevant)),
         "relevanceSummary": relevance_summary,
         "materialNewsCount": relevance_summary.get("material", 0),
+        "newsStorage": news_storage,
     }
 
 
@@ -12669,6 +13114,7 @@ def dashboard_status_defaults() -> dict:
         "candidate_pool": candidate_pool_summary(),
         "candidate_data": candidate_data_snapshot_status(),
         "market_data_latest": market_data_latest_status(),
+        "news_events": news_event_storage_status(),
     }
 
 
@@ -14050,26 +14496,29 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 def snapshot_storage_status() -> dict:
     db_status = database_status()
     raw_events = raw_event_storage_status()
+    news_events = news_event_storage_status()
     candidate_data = candidate_data_snapshot_status()
     market_data = market_data_latest_status()
     analysis_ready = bool(
         bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
         and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
     )
+    news_ready = bool(bounded_int(news_events.get("count", 0), 0, 10_000_000) > 0)
     analysis_persistent = bool(candidate_data.get("persistent") and market_data.get("persistent") and analysis_ready)
+    evidence_persistent = bool(analysis_persistent and news_events.get("persistent") and news_ready)
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
-        data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent"))
-        operation_ready = bool(analysis_persistent)
+        data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent") and news_events.get("persistent"))
+        operation_ready = bool(evidence_persistent)
         if operation_ready:
-            message = "Postgres DB에 스냅샷, 후보 풀, 최신 수집값을 저장하고 DB 기준으로 읽습니다."
+            message = "Postgres DB에 스냅샷, 후보 풀, Toss 최신값, 뉴스 이벤트를 저장하고 DB 기준으로 읽습니다."
             error = ""
         elif data_storage_ready:
-            message = "DB는 연결됐지만 후보 데이터 또는 최신 가격 데이터가 아직 충분하지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
-            error = "candidate-or-market-data-empty"
+            message = "DB는 연결됐지만 후보 데이터, 최신 가격 데이터, 뉴스 이벤트 중 일부가 아직 충분하지 않습니다. 다음 수집 후 운영 기준으로 전환됩니다."
+            error = "candidate-market-or-news-empty"
         else:
-            message = "DB는 연결됐지만 후보 데이터 또는 최신 가격 데이터가 아직 DB 기준으로 읽히지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
-            error = "candidate-or-market-data-not-db-backed"
+            message = "DB는 연결됐지만 후보 데이터, Toss 최신값, 뉴스 이벤트 중 일부가 아직 DB 기준으로 읽히지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
+            error = "candidate-market-or-news-not-db-backed"
         return {
             "mode": SIGNAL_STORAGE_BACKEND,
             "implementation": "postgres",
@@ -14081,6 +14530,8 @@ def snapshot_storage_status() -> dict:
             "operationReady": operation_ready,
             "analysisReady": analysis_ready,
             "analysisPersistent": analysis_persistent,
+            "newsReady": news_ready,
+            "evidencePersistent": evidence_persistent,
             "displayFallbackReady": bool(analysis_ready and not analysis_persistent),
             "requiresDatabase": False,
             "recentRunCount": len(recent_runs),
@@ -14088,6 +14539,7 @@ def snapshot_storage_status() -> dict:
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
             "database": db_status,
             "rawEvents": raw_events,
+            "newsEvents": news_events,
             "candidateData": candidate_data,
             "marketData": market_data,
             "message": message,
@@ -14118,6 +14570,8 @@ def snapshot_storage_status() -> dict:
         "operationReady": False,
         "analysisReady": analysis_ready,
         "analysisPersistent": False,
+        "newsReady": news_ready,
+        "evidencePersistent": False,
         "displayFallbackReady": analysis_ready,
         "requiresDatabase": True,
         "recentRunCount": len(recent_runs),
@@ -14125,6 +14579,7 @@ def snapshot_storage_status() -> dict:
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
         "database": db_status,
         "rawEvents": raw_events,
+        "newsEvents": news_events,
         "candidateData": candidate_data,
         "marketData": market_data,
         "message": (
@@ -16050,6 +16505,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/raw-events/status":
             self.send_json(raw_event_storage_status())
+            return
+
+        if parsed.path == "/api/news-events/status":
+            self.send_json(news_event_storage_status())
             return
 
         if parsed.path == "/api/performance":
