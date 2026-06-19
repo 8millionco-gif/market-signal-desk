@@ -95,6 +95,8 @@ LIVE_STATE_KV_KEY = "live_price_state"
 SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED = os.getenv("SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_CANDIDATE_DATA_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_DATA_MAX_ITEMS", "1000"))
 SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT", "30"))
+SIGNAL_FINAL_DECISION_STABILITY_ENABLED = os.getenv("SIGNAL_FINAL_DECISION_STABILITY_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_FINAL_DECISION_STABILITY_SECONDS = int(os.getenv("SIGNAL_FINAL_DECISION_STABILITY_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 CANDIDATE_DATA_KV_KEY = "candidate_data_snapshots"
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
@@ -4484,6 +4486,8 @@ def merge_candidate_data_snapshots_into_candidates(candidates: list[dict], mode:
         for key in ("trend", "priceReaction", "qualityGate", "finalDecision", "signalValidation", "candidateCompression", "sourceReliability", "dataConfidence", "dataCompleteness"):
             if key not in item and key in record:
                 item[key] = copy.deepcopy(record[key])
+        if isinstance(record.get("finalDecision"), dict):
+            item["storedFinalDecision"] = copy.deepcopy(record["finalDecision"])
         for key in ("liveNews", "liveDisclosures"):
             if not item.get(key) and record.get(key):
                 item[key] = copy.deepcopy(record[key])
@@ -6802,6 +6806,94 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     }
 
 
+def final_decision_age_seconds(decision: dict) -> int | None:
+    if not isinstance(decision, dict):
+        return None
+    parsed = parse_iso_datetime(str(decision.get("updatedAt", "")))
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def stable_final_decision_candidate(candidate: dict) -> dict:
+    stored = candidate.get("storedFinalDecision") if isinstance(candidate.get("storedFinalDecision"), dict) else {}
+    current = candidate.get("finalDecision") if isinstance(candidate.get("finalDecision"), dict) else {}
+    if stored:
+        return stored
+    return current if isinstance(current, dict) else {}
+
+
+def decision_stability_merge(previous: dict, new_decision: dict, candidate: dict) -> tuple[dict, bool]:
+    if not SIGNAL_FINAL_DECISION_STABILITY_ENABLED:
+        return new_decision, False
+    if not isinstance(previous, dict) or not previous.get("actionKey"):
+        return new_decision, False
+    if not isinstance(new_decision, dict) or not new_decision.get("actionKey"):
+        return new_decision, False
+    age_seconds = final_decision_age_seconds(previous)
+    if age_seconds is None or age_seconds > SIGNAL_FINAL_DECISION_STABILITY_SECONDS:
+        return new_decision, False
+
+    previous_key = str(previous.get("actionKey", ""))
+    new_key = str(new_decision.get("actionKey", ""))
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    entry_ready = bool(completeness.get("entryReady"))
+    display_ready = bool(completeness.get("displayReady"))
+    risk_keys = {"stop", "exclude"}
+    trade_keys = {"buy", "add"}
+
+    if new_key in risk_keys and previous_key not in risk_keys:
+        return new_decision, False
+    if previous_key not in trade_keys and new_key in trade_keys and entry_ready:
+        return new_decision, False
+    if previous_key == "verify" and display_ready and new_key != "verify":
+        return new_decision, False
+    if previous_key in risk_keys and new_key not in risk_keys:
+        return new_decision, False
+    if previous_key == new_key and display_ready:
+        return new_decision, False
+
+    held = copy.deepcopy(previous)
+    for key in (
+        "priceLevels",
+        "rows",
+        "signalCards",
+        "reactionScore",
+        "reactionLabel",
+        "reactionGate",
+        "confidenceScore",
+        "sourceReliabilityScore",
+        "sourceReliabilityLabel",
+        "officialSignal",
+        "portfolioAware",
+        "holdingJudgement",
+    ):
+        if key in new_decision:
+            held[key] = copy.deepcopy(new_decision[key])
+    if isinstance(held.get("signalCards"), list) and held["signalCards"]:
+        first_card = held["signalCards"][0]
+        if isinstance(first_card, list) and len(first_card) >= 2:
+            first_card[1] = previous.get("action", first_card[1])
+    held["actionKey"] = previous_key
+    held["action"] = previous.get("action", held.get("action", "확인 대기"))
+    held["tone"] = previous.get("tone", held.get("tone", "wait"))
+    held["tradeAllowed"] = bool(previous.get("tradeAllowed"))
+    held["gateKey"] = previous.get("gateKey", held.get("gateKey", "defer"))
+    held["summary"] = str(previous.get("summary") or held.get("summary") or "이전 검증 판단을 유지합니다.")
+    held["updatedAt"] = new_decision.get("updatedAt") or datetime.now(KST).isoformat(timespec="seconds")
+    held["stability"] = {
+        "source": "stored-final-decision",
+        "held": True,
+        "heldFrom": previous.get("updatedAt", ""),
+        "ageSeconds": age_seconds,
+        "windowSeconds": SIGNAL_FINAL_DECISION_STABILITY_SECONDS,
+        "previousAction": previous.get("action", ""),
+        "newAction": new_decision.get("action", ""),
+        "reason": "10초 가격 갱신의 일시적인 미수신/등락 변동으로 최종 판단이 흔들리지 않도록 이전 검증 판단을 유지합니다.",
+    }
+    return held, True
+
+
 def candidate_compression_score(candidate: dict) -> int:
     score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
     final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
@@ -8064,7 +8156,7 @@ def update_candidate_pool(candidates: list[dict], mode: str = "", stage: str = "
     return summary
 
 
-def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str]) -> tuple[list[dict], dict]:
+def apply_candidate_selection(candidates: list[dict], market: dict, watched: set[str], stabilize_decisions: bool = False) -> tuple[list[dict], dict]:
     enriched = []
     score_shifts = []
     opportunity_scores = []
@@ -8088,8 +8180,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "verify": 0,
         "exclude": 0,
     }
+    stable_decision_count = 0
     for candidate in candidates:
         item = annotate_candidate_live_price_freshness(dict(candidate))
+        previous_final_decision = stable_final_decision_candidate(item)
         base_score = item.get("score", {})
         if not isinstance(base_score, dict):
             base_score = {}
@@ -8184,6 +8278,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
                 "reason": "신뢰도 게이트에서 실전 진입 후보로 인정하지 않았습니다.",
             }
         final_decision = candidate_final_decision(item, score_detail, total, readiness, confidence, gate, reaction)
+        if stabilize_decisions:
+            final_decision, held_stable = decision_stability_merge(previous_final_decision, final_decision, item)
+            if held_stable:
+                stable_decision_count += 1
         final_decision_counts[final_decision["actionKey"]] = final_decision_counts.get(final_decision["actionKey"], 0) + 1
         item["hiddenOpportunity"] = {
             "score": opportunity,
@@ -8239,6 +8337,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "priceReactionGateCounts": reaction_gate_counts,
         "priceReactionEntryBlockedCount": len([item for item in enriched if item.get("priceReaction", {}).get("entryBlock")]),
         "finalDecisionCounts": final_decision_counts,
+        "stableDecisionCount": stable_decision_count,
+        "finalDecisionStabilitySeconds": SIGNAL_FINAL_DECISION_STABILITY_SECONDS if stabilize_decisions and SIGNAL_FINAL_DECISION_STABILITY_ENABLED else 0,
         **compression_status,
         "buyDecisionCount": final_decision_counts.get("buy", 0),
         "addDecisionCount": final_decision_counts.get("add", 0),
@@ -11991,7 +12091,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
     candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
-    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
     candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
     candidates = sort_candidates_for_mode(candidates, mode)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
@@ -12113,7 +12213,7 @@ def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
     candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
-    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
     candidates = sort_candidates_for_mode(candidates, mode)
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -12298,7 +12398,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     for item in candidates:
         item["isWatched"] = str(item.get("symbol", "")) in watched
     market = copy.deepcopy(base_payload.get("market", seed_data().get("market", {})))
-    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
     candidates = sort_candidates_for_mode(candidates, mode)
     live_state_write_status = update_live_state_from_candidates(candidates, mode)
     candidate_data_status = update_candidate_data_snapshots(candidates, mode, stage="live-price")
@@ -12323,6 +12423,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
         "candidateDataEntryReadyCount": candidate_data_status.get("entryReadyCount", 0),
+        "stableDecisionCount": selection_status.get("stableDecisionCount", 0),
+        "finalDecisionStabilitySeconds": selection_status.get("finalDecisionStabilitySeconds", 0),
     })
     integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     integrations["selection"] = selection_status

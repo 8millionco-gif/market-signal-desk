@@ -49,6 +49,10 @@ services:
         value: "1000"
       - key: SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT
         value: "30"
+      - key: SIGNAL_FINAL_DECISION_STABILITY_ENABLED
+        value: "1"
+      - key: SIGNAL_FINAL_DECISION_STABILITY_SECONDS
+        value: "120"
       - key: SIGNAL_MARKET_DATA_LATEST_ENABLED
         value: "1"
       - key: SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS
