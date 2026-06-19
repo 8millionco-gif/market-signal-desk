@@ -61,7 +61,7 @@ TOSS_LIVE_CANDLES = os.getenv("TOSS_LIVE_CANDLES", "1").lower() not in {"0", "fa
 TOSS_LIVE_ORDERBOOK = os.getenv("TOSS_LIVE_ORDERBOOK", "1").lower() not in {"0", "false", "no", "off"}
 TOSS_LIVE_TRADES = os.getenv("TOSS_LIVE_TRADES", "1").lower() not in {"0", "false", "no", "off"}
 TOSS_LIVE_PORTFOLIO = os.getenv("TOSS_LIVE_PORTFOLIO", "0").lower() not in {"0", "false", "no", "off"}
-TOSS_PRICE_CACHE_SECONDS = int(os.getenv("TOSS_PRICE_CACHE_SECONDS", "15"))
+TOSS_PRICE_CACHE_SECONDS = int(os.getenv("TOSS_PRICE_CACHE_SECONDS", "5"))
 TOSS_CANDLE_CACHE_SECONDS = int(os.getenv("TOSS_CANDLE_CACHE_SECONDS", "60"))
 TOSS_ORDERBOOK_CACHE_SECONDS = int(os.getenv("TOSS_ORDERBOOK_CACHE_SECONDS", "5"))
 TOSS_TRADES_CACHE_SECONDS = int(os.getenv("TOSS_TRADES_CACHE_SECONDS", "5"))
@@ -73,7 +73,7 @@ TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "
 TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "2"))
 TOSS_TRADES_COUNT = int(os.getenv("TOSS_TRADES_COUNT", "30"))
 TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS", "7"))
-SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "15"))
+SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "10"))
 SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
@@ -2505,6 +2505,31 @@ def change_from_candles(current_price: str, candles: list[dict], current_timesta
     return display_change(rate)
 
 
+def change_from_toss_price_row(price: dict) -> str | None:
+    for key in [
+        "fluctuationsRatio",
+        "fluctuationRatio",
+        "changeRatio",
+        "changeRate",
+        "changePercent",
+        "regularMarketChangePercent",
+    ]:
+        value = decimal_or_none(price.get(key))
+        if value is not None:
+            return display_change(value)
+
+    previous_close = decimal_or_none(
+        price.get("previousClosePrice")
+        or price.get("basePrice")
+        or price.get("prevClosePrice")
+        or price.get("regularMarketPreviousClose")
+    )
+    current = decimal_or_none(price.get("lastPrice"))
+    if previous_close is None or current is None or previous_close == 0:
+        return None
+    return display_change(((current - previous_close) / previous_close) * Decimal(100))
+
+
 def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not TOSS_LIVE_PRICES:
         return candidates, {
@@ -2550,6 +2575,10 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                 "timestamp": price.get("timestamp"),
                 "source": "toss",
             }
+            change = change_from_toss_price_row(price)
+            if change:
+                item["change"] = change
+                item["livePrice"]["changeSource"] = "toss-prices"
             if baseline_warning and baseline_difference is not None:
                 item["livePrice"].update({
                     "baselineWarning": True,
@@ -10232,7 +10261,7 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
     return summary
 
 
-def dashboard_live_price_payload(symbols: list[str], mode: str) -> dict:
+def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "price") -> dict:
     base_payload, base_source = dashboard_base_for_live_prices(mode)
     base_candidates = [
         copy.deepcopy(item)
@@ -10265,14 +10294,16 @@ def dashboard_live_price_payload(symbols: list[str], mode: str) -> dict:
         }
 
     price_status = {"source": "sample", "message": "현재가 갱신 전입니다."}
-    candle_status = {"source": "sample"}
-    orderbook_status = {"source": "sample"}
-    trade_status = {"source": "sample"}
+    include_depth = detail in {"full", "depth", "market-depth"}
+    candle_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 일봉 정보를 유지합니다."}
+    orderbook_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 호가 정보를 유지합니다."}
+    trade_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 체결 정보를 유지합니다."}
     try:
         candidates, price_status = enrich_candidates_with_toss_prices(candidates)
-        candidates, candle_status = enrich_candidates_with_toss_candles(candidates)
-        candidates, orderbook_status = enrich_candidates_with_toss_orderbook(candidates)
-        candidates, trade_status = enrich_candidates_with_toss_trades(candidates)
+        if include_depth:
+            candidates, candle_status = enrich_candidates_with_toss_candles(candidates)
+            candidates, orderbook_status = enrich_candidates_with_toss_orderbook(candidates)
+            candidates, trade_status = enrich_candidates_with_toss_trades(candidates)
     except Exception as error:
         error_payload, _ = integration_error_payload(error)
         price_status = {
@@ -10311,6 +10342,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str) -> dict:
         "mode": mode,
         "source": "live-price",
         "baseSource": base_source,
+        "detail": "full" if include_depth else "price",
         "updatedAt": summary["livePriceUpdatedAt"],
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "symbols": requested,
@@ -11259,8 +11291,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 for symbol in query.get("symbols", [""])[0].split(",")
                 if symbol.strip()
             ]
+            detail = query.get("detail", ["price"])[0].strip().lower()
             try:
-                self.send_json(dashboard_live_price_payload(symbols, mode))
+                self.send_json(dashboard_live_price_payload(symbols, mode, detail=detail))
             except Exception as error:
                 payload, status = integration_error_payload(error)
                 self.send_json(payload, status)

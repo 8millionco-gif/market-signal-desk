@@ -56,7 +56,7 @@ const state = {
     message: "",
     source: "",
     error: "",
-    pollSeconds: 15,
+    pollSeconds: 10,
     timer: null
   },
   viewingSnapshot: null,
@@ -130,7 +130,7 @@ const QUICK_SEARCH_PRESETS = [
   { label: "배당", query: "배당" }
 ];
 
-const LIVE_PRICE_MIN_POLL_MS = 10000;
+const LIVE_PRICE_MIN_POLL_MS = 5000;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -431,8 +431,8 @@ async function loadDashboard(options = {}) {
     }
     updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
     render();
-    startLivePricePolling();
     finishActivity();
+    startLivePricePolling();
   } catch (error) {
     await statusPromise;
     state.dashboard = null;
@@ -511,9 +511,11 @@ async function refreshLivePrices() {
     loading: true,
     error: ""
   };
+  renderCandidateSourceDetail();
   const params = new URLSearchParams({
     mode: state.mode,
-    symbols: symbols.join(",")
+    symbols: symbols.join(","),
+    detail: "price"
   });
   const fallback = {
     candidates: [],
@@ -532,7 +534,7 @@ async function refreshLivePrices() {
     message: payload.message || (merged ? "라이브 가격 반영" : "라이브 가격 대기"),
     source: payload.source || state.livePrice.source,
     error: payload.error || "",
-    pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 15)
+    pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 10)
   };
   if (merged) {
     renderLivePriceUpdate();
@@ -553,7 +555,7 @@ function startLivePricePolling() {
   if (!state.dashboard?.candidates?.length) return;
   const pollMs = Math.max(
     LIVE_PRICE_MIN_POLL_MS,
-    Number(state.livePrice.pollSeconds || 15) * 1000
+    Number(state.livePrice.pollSeconds || 10) * 1000
   );
   state.livePrice.timer = window.setInterval(() => {
     refreshLivePrices();
@@ -648,6 +650,7 @@ function applyStrategyFilter(candidates = []) {
   if (state.strategy === "all") return candidates;
   if (state.strategy === "core") return candidates.filter(isCoreCandidate);
   if (state.strategy === "review") return candidates.filter(isReviewCandidate);
+  if (state.strategy === "wait") return candidates.filter(isWaitBucketCandidate);
   if (state.strategy === "pullback") return candidates.filter(isPullbackCandidate);
   if (state.strategy === "hidden") return candidates.filter(isHiddenOpportunity);
   if (state.strategy === "momentum") return candidates.filter(hasMomentumSignal);
@@ -674,6 +677,17 @@ function isCoreCandidate(item) {
 
 function isReviewCandidate(item) {
   return compressionForDisplay(item).tier === "review";
+}
+
+function isWaitBucketCandidate(item) {
+  if (isActionCandidate(item) || isHoldingCandidate(item) || isExcludeCandidate(item) || isCoreCandidate(item)) return false;
+  return (
+    isReviewCandidate(item) ||
+    isPullbackCandidate(item) ||
+    isHiddenOpportunity(item) ||
+    hasMomentumSignal(item) ||
+    tradePlan(item).tone === "wait"
+  );
 }
 
 function isHiddenOpportunity(item) {
@@ -753,6 +767,40 @@ function reactionGateLabel(value) {
 function reactionBadgeText(reaction) {
   const score = reaction?.score != null ? ` ${reaction.score}` : "";
   return `${reactionGateLabel(reaction?.reactionGate)}${score}`;
+}
+
+function livePriceLabel(item) {
+  if (item?.livePrice?.source !== "toss") return "실시간 대기";
+  const timestamp = item.livePrice.timestamp || state.livePrice.updatedAt || "";
+  return timestamp ? `실시간 ${timeLabel(timestamp)}` : "실시간";
+}
+
+function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
+  const decision = item?.finalDecision ?? {};
+  const gate = item?.qualityGate ?? {};
+  const reaction = item?.priceReaction ?? {};
+  if (plan.tone === "sell") {
+    return { key: "sell", label: "분할매도 점검", detail: plan.summary || "보유 수익을 점검합니다." };
+  }
+  if (plan.tone === "risk" || decision.actionKey === "exclude" || gate.key === "exclude") {
+    return { key: "avoid", label: "오늘 제외", detail: plan.summary || "신규 진입하지 않습니다." };
+  }
+  if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
+    return { key: "buy", label: "매수 가능", detail: plan.summary || "조건 충족 시 관찰 매수 후보입니다." };
+  }
+  if (decision.actionKey === "hold" || decision.portfolioAware || selectedHoldingFor(item)) {
+    return { key: "hold", label: "보유 대응", detail: plan.summary || "보유 종목 기준으로 판단합니다." };
+  }
+  if (decision.actionKey === "pullback" || String(plan.action).includes("눌림")) {
+    return { key: "wait", label: "눌림 대기", detail: plan.summary || "가격 조정을 기다립니다." };
+  }
+  if (reaction.reactionGate === "wait" || reaction.entryBlock || decision.actionKey === "verify") {
+    return { key: "wait", label: "반응 확인 중", detail: "뉴스·공시는 있으나 실시간 가격/수급 반응이 아직 부족합니다." };
+  }
+  if (gate.key === "watch" || decision.actionKey === "watch" || plan.tone === "wait") {
+    return { key: "wait", label: "가격 대기", detail: plan.summary || "현재가와 거래 반응을 더 확인합니다." };
+  }
+  return { key: "check", label: "확인 중", detail: plan.summary || "추가 확인이 필요합니다." };
 }
 
 function candidatePoolStateForDisplay(item) {
@@ -863,6 +911,7 @@ function actionPriority(item) {
 function strategyPriority(item, strategy) {
   if (strategy === "core" && isCoreCandidate(item)) return 0;
   if (strategy === "review" && isReviewCandidate(item)) return 0;
+  if (strategy === "wait" && isWaitBucketCandidate(item)) return 0;
   if (strategy === "hidden" && isHiddenOpportunity(item)) return 0;
   if (strategy === "momentum" && hasMomentumSignal(item)) return 0;
   if (strategy === "action" && isActionCandidate(item)) return 0;
@@ -929,6 +978,7 @@ function candidateStrategyCounts(candidates = []) {
     core: candidates.filter(isCoreCandidate).length,
     review: candidates.filter(isReviewCandidate).length,
     action: candidates.filter(isActionCandidate).length,
+    wait: candidates.filter(isWaitBucketCandidate).length,
     pullback: candidates.filter(isPullbackCandidate).length,
     hidden: candidates.filter(isHiddenOpportunity).length,
     momentum: candidates.filter(hasMomentumSignal).length,
@@ -3147,25 +3197,7 @@ function primaryPriceGuide(plan) {
 }
 
 function feedActionLabel(item, plan) {
-  const compression = compressionForDisplay(item);
-  if (compression.tier === "core") return "핵심 후보";
-  const finalDecision = item?.finalDecision ?? {};
-  if (finalDecision.portfolioAware && finalDecision.action) return finalDecision.action;
-  const gate = item?.qualityGate;
-  if (gate?.key === "actionable") return "매수 후보";
-  if (gate?.key === "watch") return "관찰 후보";
-  if (gate?.key === "defer") return "확인 대기";
-  if (gate?.key === "exclude") return "오늘 제외";
-  const group = decisionGroupForDisplay(item);
-  if (isActionCandidate(item)) return "매수 후보";
-  if (plan.tone === "sell") return "매도 검토";
-  if (plan.tone === "risk") return "오늘 제외";
-  if (group.key === "holding") return "보유 대응";
-  if (String(plan.action).includes("눌림")) return "눌림 대기";
-  if (String(plan.action).includes("반등")) return "반등 확인";
-  if (group.key === "hidden") return "숨은 후보";
-  if (group.key === "momentum") return "모멘텀 확인";
-  return "관찰 대기";
+  return primaryDecisionForDisplay(item, plan).label;
 }
 
 function renderFeed() {
@@ -3188,28 +3220,12 @@ function renderFeed() {
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
       const plan = tradePlan(item);
-      const group = decisionGroupForDisplay(item);
       const compression = compressionForDisplay(item);
       const poolState = candidatePoolStateForDisplay(item);
-      const validation = signalValidationForDisplay(item);
-      const opportunityScore = Number(item.hiddenOpportunity?.score ?? 0);
-      const qualityLabel = discoveryQualityLabel(item);
-      const evidence = discoveryEvidenceForDisplay(item);
       const actionLabel = feedActionLabel(item, plan);
       const priceGuide = primaryPriceGuide(plan);
-      const gate = item.qualityGate ?? {};
-      const confidence = item.dataConfidence ?? {};
-      const sourceReliability = item.sourceReliability ?? {};
-      const reaction = item.priceReaction ?? {};
-      const official = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
-      const materialNews = Number(item.trend?.materialNewsCount ?? item.discovery?.materialNewsItems ?? 0);
-      const officialBadge = official.count
-        ? official.riskLevel === "high"
-          ? "공시위험"
-          : official.positiveCount
-            ? `공식+${official.positiveCount}`
-            : `공식 ${official.count}`
-        : "";
+      const primaryDecision = primaryDecisionForDisplay(item, plan);
+      const liveText = livePriceLabel(item);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -3218,21 +3234,8 @@ function renderFeed() {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
-              <span class="feed-badge pool-state-badge pool-${escapeHtml(poolState.key)}">${escapeHtml(poolState.label)}</span>
-              ${poolState.retained ? `<span class="feed-badge pool-retained-badge">풀재점검 ${escapeHtml(poolState.retainScore || "")}</span>` : ""}
-              ${poolState.momentumLabel ? `<span class="feed-badge pool-momentum pool-momentum-${escapeHtml(poolState.momentumLabel === "개선" ? "up" : poolState.momentumLabel === "약화" ? "down" : "flat")}">${escapeHtml(poolState.momentumLabel)}${poolState.scoreDelta ? ` ${poolState.scoreDelta > 0 ? "+" : ""}${escapeHtml(poolState.scoreDelta)}` : ""}</span>` : ""}
-              <span class="feed-badge ${escapeHtml(decisionGroupClass(group.key))}">${escapeHtml(group.label)}</span>
-              ${qualityLabel ? `<span class="feed-badge quality-badge">${escapeHtml(qualityLabel)}</span>` : ""}
-              ${evidence.label ? `<span class="feed-badge evidence-badge evidence-${escapeHtml(evidence.grade || "weak")}">${escapeHtml(evidence.label)} ${escapeHtml(evidence.score)}</span>` : ""}
-              ${validation.label ? `<span class="feed-badge validation-badge validation-${escapeHtml(validation.key)}">${escapeHtml(validation.label)} ${escapeHtml(validation.score)}</span>` : ""}
-              ${gate.label ? `<span class="feed-badge gate-badge gate-${escapeHtml(gate.key || "wait")}">${escapeHtml(gate.label)}</span>` : ""}
-              ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
-              ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
-              ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
-              ${sourceReliability.score != null ? `<span class="feed-badge reliability-badge">원천 ${escapeHtml(sourceReliability.score)}</span>` : ""}
-              ${reaction.score != null ? `<span class="feed-badge reaction-badge reaction-${escapeHtml(reaction.reactionGate || "watch")}">${escapeHtml(reactionBadgeText(reaction))}</span>` : ""}
-              ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
-              ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
+              <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}">${escapeHtml(primaryDecision.label)}</span>
+              ${poolState.momentumLabel ? `<span class="feed-badge pool-momentum pool-momentum-${escapeHtml(poolState.momentumLabel === "개선" ? "up" : poolState.momentumLabel === "약화" ? "down" : "flat")}">${escapeHtml(poolState.momentumLabel)}</span>` : ""}
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
             <span class="feed-signal-line ${escapeHtml(plan.tone)}">
@@ -3243,7 +3246,7 @@ function renderFeed() {
           <span class="feed-meta">
             <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
             <span class="score-pill ${scoreClass(item.totalScore)}">${item.totalScore}</span>
-            <span class="feed-time">${escapeHtml(item.updated)}</span>
+            <span class="feed-time">${escapeHtml(liveText || item.updated)}</span>
           </span>
         </button>
       `;
@@ -3267,6 +3270,7 @@ function strategyLabel(value) {
   if (value === "core") return "핵심 후보";
   if (value === "review") return "검토 후보";
   if (value === "action") return "진입 가능";
+  if (value === "wait") return "대기 후보";
   if (value === "pullback") return "눌림 대기";
   if (value === "hidden") return "숨은 기회";
   if (value === "momentum") return "모멘텀";
@@ -3280,6 +3284,7 @@ function strategyEmptyMessage(value) {
   if (value === "core") return "신뢰도, 가격 반응, 리스크를 동시에 통과한 핵심 후보가 없습니다. 오늘은 후보를 억지로 고르지 않고 검토·눌림 탭에서 관찰만 유지하세요.";
   if (value === "review") return "핵심은 아니지만 추가 확인할 후보가 없습니다. 지금은 대기 또는 전체 후보만 참고하세요.";
   if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 무리한 진입보다 눌림이나 전체 후보를 확인하세요.";
+  if (value === "wait") return "추가 확인 후보가 없습니다. 지금은 핵심 후보 또는 전체 후보만 참고하세요.";
   if (value === "pullback") return "눌림이나 반등 확인 구간에 있는 후보가 없습니다. 추격보다 다음 갱신을 기다리는 편이 낫습니다.";
   if (value === "hidden") return "뉴스 대비 가격 반영이 덜 된 숨은 후보가 없습니다. 전체 후보에서 테마 변화를 확인할 수 있습니다.";
   if (value === "momentum") return "뉴스, 가격, 수급 모멘텀이 동시에 살아 있는 후보가 없습니다.";
@@ -3589,6 +3594,8 @@ function renderDetail() {
     `;
     return;
   }
+  const plan = tradePlan(item);
+  const primaryDecision = primaryDecisionForDisplay(item, plan);
 
   els.signalDetail.innerHTML = `
     <div class="detail-hero">
@@ -3604,6 +3611,10 @@ function renderDetail() {
         </div>
         <p class="headline">${escapeHtml(item.headline)}</p>
         <p class="thesis">${escapeHtml(item.thesis)}</p>
+        <p class="decision-summary decision-${escapeHtml(primaryDecision.key)}">
+          <strong>${escapeHtml(primaryDecision.label)}</strong>
+          <span>${escapeHtml(primaryDecision.detail)}</span>
+        </p>
         <p class="data-source">${escapeHtml(priceMeta(item))}</p>
         <div class="chips">
           ${item.tags.map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
@@ -4357,12 +4368,18 @@ function priceMeta(item) {
         ? " · 일봉이 오래되어 등락률은 기존 기준 유지"
       : "";
   if (item.livePrice?.source === "toss") {
-    const timestamp = item.livePrice.timestamp ? ` · ${item.livePrice.timestamp}` : "";
-    const changeText = item.livePrice.changeSource === "toss-candles" ? " · 전일 대비는 일봉 기준 추정" : "";
+    const timestamp = item.livePrice.timestamp ? ` · ${timeLabel(item.livePrice.timestamp)} 갱신` : "";
+    const pollText = state.livePrice?.pollSeconds ? ` · ${state.livePrice.pollSeconds}초 갱신` : "";
+    const changeText =
+      item.livePrice.changeSource === "toss-prices"
+        ? " · 등락률 실시간 반영"
+        : item.livePrice.changeSource === "toss-candles"
+          ? " · 전일 대비는 일봉 기준 추정"
+          : "";
     const warningText = item.livePrice.baselineWarning
       ? ` · 기준가 차이 확인 필요(${item.livePrice.baselineDifferencePercent ?? ""})`
       : "";
-    return `현재가 출처: 토스증권 Open API${timestamp}${changeText}${warningText}${candleText}`;
+    return `현재가: 토스 실시간${timestamp}${pollText}${changeText}${warningText}${candleText}`;
   }
   return `${item.livePrice?.message || "현재가 출처: 샘플 데이터"}${candleText}`;
 }
