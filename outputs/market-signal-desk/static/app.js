@@ -48,6 +48,7 @@ const state = {
   schedulerStatus: null,
   discoveryBotStatus: null,
   storageStatus: null,
+  stockMasterStatus: null,
   portfolioStatus: null,
   viewingSnapshot: null,
   selectedSymbol: null,
@@ -91,6 +92,7 @@ const els = {
   discoveryBotStatus: document.querySelector("#discoveryBotStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
   storageStatus: document.querySelector("#storageStatus"),
+  stockMasterStatus: document.querySelector("#stockMasterStatus"),
   portfolioStatus: document.querySelector("#portfolioStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
   networkStatus: document.querySelector("#networkStatus"),
@@ -298,6 +300,14 @@ function statusFallbacks() {
         latest: {}
       }
     },
+    stockMaster: {
+      ok: false,
+      storage: "none",
+      generated: { exists: false, count: 0, generatedAt: "", sourceCounts: {} },
+      active: { count: 0, usesGeneratedMaster: false },
+      config: { autoRefreshEnabled: false, refreshSeconds: 0, databaseEnabled: false, databaseReady: false },
+      state: {}
+    },
     portfolio: {
       enabled: false,
       ready: false,
@@ -356,17 +366,19 @@ async function loadDashboard(options = {}) {
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
     safeFetchJson("/api/discovery/status", fallbacks.discoveryBot),
     safeFetchJson("/api/storage/status", fallbacks.storage),
+    safeFetchJson("/api/stocks/master/status", fallbacks.stockMaster),
     safeFetchJson("/api/portfolio/status", fallbacks.portfolio),
     safeFetchJson("/api/network/outbound-ip", fallbacks.network),
     safeFetchJson("/api/integrations/toss/status", fallbacks.toss),
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.schedulerStatus = schedulerStatus;
     state.discoveryBotStatus = discoveryBotStatus;
     state.storageStatus = storageStatus;
+    state.stockMasterStatus = stockMasterStatus;
     state.portfolioStatus = portfolioStatus;
     state.networkStatus = networkStatus;
     state.tossStatus = tossStatus;
@@ -379,6 +391,7 @@ async function loadDashboard(options = {}) {
     renderDiscoveryBotStatus();
     renderReadinessStatus();
     renderStorageStatus();
+    renderStockMasterStatus();
     renderPortfolioStatus();
     renderSnapshotHistory();
     renderNotificationStatus();
@@ -997,6 +1010,7 @@ function render() {
   renderDiscoveryBotStatus();
   renderReadinessStatus();
   renderStorageStatus();
+  renderStockMasterStatus();
   renderPortfolioStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
@@ -1914,6 +1928,119 @@ function renderStorageStatus() {
   });
 }
 
+function stockMasterStorageLabel(value) {
+  if (value === "database") return "DB 저장";
+  if (value === "filesystem") return "파일 저장";
+  if (value === "none") return "미생성";
+  return value || "-";
+}
+
+function renderStockMasterStatus() {
+  if (!els.stockMasterStatus) return;
+  const status = state.stockMasterStatus;
+  if (!status) return;
+  const generated = status.generated ?? {};
+  const active = status.active ?? {};
+  const config = status.config ?? {};
+  const stateInfo = status.state ?? {};
+  const sourceCounts = generated.sourceCounts ?? {};
+  const generatedAt = generated.generatedAt ? timeLabel(generated.generatedAt) : "-";
+  const sourceText = Object.entries(sourceCounts)
+    .filter(([, count]) => Number(count) > 0)
+    .slice(0, 4)
+    .map(([source, count]) => `${source.replace("stock-search-", "").replace("candidate-", "")} ${count}`)
+    .join(" · ");
+  const refreshMinutes = Math.max(1, Math.round(Number(config.refreshSeconds ?? 0) / 60));
+  const rows = [
+    ["저장 위치", generated.exists, stockMasterStorageLabel(status.storage)],
+    ["저장 마스터", Number(generated.count ?? 0) > 0, `${generated.count ?? 0}개`],
+    ["활성 검색", Number(active.count ?? 0) > 0, `${active.count ?? 0}개`],
+    ["저장본 사용", Boolean(active.usesGeneratedMaster), active.usesGeneratedMaster ? "사용 중" : "직접 병합"],
+    ["최근 생성", Boolean(generated.generatedAt), generatedAt],
+    ["자동 갱신", Boolean(config.autoRefreshEnabled), config.autoRefreshEnabled ? `${refreshMinutes}분 기준` : "꺼짐"],
+    ["DB 연결", Boolean(config.databaseReady || !config.databaseEnabled), config.databaseEnabled ? (config.databaseReady ? "DB 준비" : "DB 대기") : "파일 fallback"],
+    ["출처", Boolean(sourceText), sourceText || "-"]
+  ];
+  const lastError = stateInfo.lastError
+    ? `<div><span>최근 오류</span><strong class="warn">${escapeHtml(stateInfo.lastError)}</strong></div>`
+    : "";
+  const actionMarkup = `
+    <div class="storage-actions">
+      <button type="button" data-stock-master-action="refresh">새로고침</button>
+      <button type="button" data-stock-master-action="rebuild">마스터 재생성</button>
+    </div>
+  `;
+  els.stockMasterStatus.innerHTML = `
+    ${rows
+      .map(([label, ok, value]) => {
+        const tone = ok ? "ok" : "warn";
+        return `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <strong class="${tone}">${escapeHtml(value)}</strong>
+          </div>
+        `;
+      })
+      .join("")}
+    ${lastError}
+    ${actionMarkup}
+  `;
+  els.stockMasterStatus.querySelectorAll("[data-stock-master-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.stockMasterAction;
+      if (action === "refresh") {
+        await refreshStockMasterStatus();
+      }
+      if (action === "rebuild") {
+        await rebuildStockMaster();
+      }
+    });
+  });
+}
+
+async function refreshStockMasterStatus() {
+  const buttons = els.stockMasterStatus?.querySelectorAll("[data-stock-master-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    state.stockMasterStatus = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 10000);
+  } finally {
+    renderStockMasterStatus();
+  }
+}
+
+async function rebuildStockMaster() {
+  const buttons = els.stockMasterStatus?.querySelectorAll("[data-stock-master-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  startActivity("검색 마스터 재생성 중", "OpenDART 캐시, 확장 마스터, ETF 사전을 통합합니다");
+  try {
+    const result = await postJson("/api/stocks/master/refresh", {}, 30000);
+    const latest = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 10000);
+    state.stockMasterStatus = {
+      ...latest,
+      state: {
+        ...(latest.state ?? {}),
+        lastRefresh: result
+      }
+    };
+  } catch (error) {
+    const current = state.stockMasterStatus ?? statusFallbacks().stockMaster;
+    state.stockMasterStatus = {
+      ...current,
+      state: {
+        ...(current.state ?? {}),
+        lastError: error?.name === "AbortError" ? "검색 마스터 재생성 지연" : "검색 마스터 재생성 실패"
+      }
+    };
+  } finally {
+    finishActivity();
+    renderStockMasterStatus();
+  }
+}
+
 async function refreshStorageStatus() {
   const buttons = els.storageStatus?.querySelectorAll("[data-storage-action]") ?? [];
   buttons.forEach((button) => {
@@ -2379,9 +2506,11 @@ async function runSchedulerMode(mode) {
     const payload = await postJson("/api/scheduler/run", { mode }, 60000);
     state.schedulerStatus = payload.status ?? state.schedulerStatus;
     state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
+    state.stockMasterStatus = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
     maybeNotifySchedulerRun(state.schedulerStatus);
     renderSchedulerStatus();
     renderStorageStatus();
+    renderStockMasterStatus();
     renderSnapshotHistory();
   } catch (error) {
     state.schedulerStatus = {
@@ -2408,7 +2537,9 @@ async function runDiscoveryBot() {
   try {
     const payload = await postJson("/api/discovery/run", { mode: state.mode }, 70000);
     state.discoveryBotStatus = payload.status ?? state.discoveryBotStatus;
+    state.stockMasterStatus = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
     renderDiscoveryBotStatus();
+    renderStockMasterStatus();
   } catch (error) {
     state.discoveryBotStatus = {
       ...(state.discoveryBotStatus ?? {}),
@@ -4174,13 +4305,16 @@ els.refreshButton.addEventListener("click", () => {
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
   const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
+  const stockMaster = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
   const portfolio = await safeFetchJson("/api/portfolio/status", statusFallbacks().portfolio, 5000);
   state.schedulerStatus = status;
   state.storageStatus = storage;
+  state.stockMasterStatus = stockMaster;
   state.portfolioStatus = portfolio;
   maybeNotifySchedulerRun(status);
   renderSchedulerStatus();
   renderStorageStatus();
+  renderStockMasterStatus();
   renderPortfolioStatus();
   renderSnapshotHistory();
 }
