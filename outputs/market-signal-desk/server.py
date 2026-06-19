@@ -4664,7 +4664,22 @@ def live_state_record_usable(record: dict) -> bool:
     if str(live_price.get("source", "")) != "toss" or not live_price.get("lastPrice"):
         return False
     age = live_state_record_age_seconds(record)
-    return age is not None and age <= SIGNAL_LIVE_STATE_RETAIN_SECONDS
+    if age is None:
+        return False
+    freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else {}
+    status = str(freshness.get("status", "")).strip()
+    if not status:
+        status = str(
+            live_price_freshness(
+                live_price,
+                str(record.get("updatedAt", "")),
+                str(candidate.get("market", "")),
+            ).get("status", "")
+        )
+    retain_seconds = SIGNAL_LIVE_STATE_RETAIN_SECONDS
+    if status == "closed-baseline":
+        retain_seconds = max(retain_seconds, SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS)
+    return age <= retain_seconds
 
 
 def live_state_record_from_candidate(candidate: dict, mode: str, now_text: str, previous: dict | None = None) -> dict | None:
@@ -4733,6 +4748,8 @@ def update_live_state_from_candidates(candidates: list[dict], mode: str) -> dict
         "retainedCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
         "storage": "postgres" if database_storage_enabled() else "filesystem",
         "updatedAt": now_text,
+        "retainSeconds": SIGNAL_LIVE_STATE_RETAIN_SECONDS,
+        "closedBaselineMaxAgeSeconds": SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS,
     }
 
 
@@ -4771,6 +4788,7 @@ def merge_live_state_into_candidates(candidates: list[dict], mode: str) -> tuple
         "retainedCount": len(items),
         "updatedAt": data.get("updatedAt", ""),
         "retainSeconds": SIGNAL_LIVE_STATE_RETAIN_SECONDS,
+        "closedBaselineMaxAgeSeconds": SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS,
     }
 
 
