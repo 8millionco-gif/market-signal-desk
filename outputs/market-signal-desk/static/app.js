@@ -50,6 +50,15 @@ const state = {
   storageStatus: null,
   stockMasterStatus: null,
   portfolioStatus: null,
+  livePrice: {
+    loading: false,
+    updatedAt: "",
+    message: "",
+    source: "",
+    error: "",
+    pollSeconds: 15,
+    timer: null
+  },
   viewingSnapshot: null,
   selectedSymbol: null,
   notificationsEnabled: readStoredValue("marketSignalNotifications") === "1",
@@ -120,6 +129,8 @@ const QUICK_SEARCH_PRESETS = [
   { label: "AI", query: "AI" },
   { label: "배당", query: "배당" }
 ];
+
+const LIVE_PRICE_MIN_POLL_MS = 10000;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -420,10 +431,12 @@ async function loadDashboard(options = {}) {
     }
     updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
     render();
+    startLivePricePolling();
     finishActivity();
   } catch (error) {
     await statusPromise;
     state.dashboard = null;
+    stopLivePricePolling();
     finishActivity();
     if (isAuthError(error)) {
       renderAuthGate();
@@ -431,6 +444,121 @@ async function loadDashboard(options = {}) {
     }
     renderLoadError(error);
   }
+}
+
+function livePriceSymbols() {
+  const symbols = [];
+  const candidates = state.dashboard?.candidates ?? [];
+  if (state.selectedSymbol) symbols.push(state.selectedSymbol);
+  candidates.forEach((item) => {
+    if (item?.symbol) symbols.push(item.symbol);
+  });
+  return [...new Set(symbols.filter(Boolean))].slice(0, 30);
+}
+
+function mergeLivePricePayload(payload) {
+  const incoming = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  if (!state.dashboard || !incoming.length) return false;
+  const existing = state.dashboard.candidates ?? [];
+  const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
+  const incomingSymbols = new Set(incoming.map((item) => item.symbol));
+  const merged = incoming.map((item) => ({
+    ...(existingBySymbol.get(item.symbol) || {}),
+    ...item
+  }));
+  existing.forEach((item) => {
+    if (!incomingSymbols.has(item.symbol)) merged.push(item);
+  });
+  state.dashboard = {
+    ...state.dashboard,
+    generatedAt: payload.updatedAt || state.dashboard.generatedAt,
+    summary: {
+      ...(state.dashboard.summary ?? {}),
+      ...(payload.summary ?? {})
+    },
+    integrations: {
+      ...(state.dashboard.integrations ?? {}),
+      ...(payload.integrations ?? {})
+    },
+    candidates: merged,
+    selected: merged.find((item) => item.symbol === state.selectedSymbol) || payload.selected || state.dashboard.selected
+  };
+  if (state.selectedLookup && incomingSymbols.has(state.selectedLookup.symbol)) {
+    state.selectedLookup = merged.find((item) => item.symbol === state.selectedLookup.symbol) || null;
+  }
+  return true;
+}
+
+function renderLivePriceUpdate() {
+  renderMarket();
+  renderMetrics();
+  renderTradeDecisionStatus();
+  renderCandidatePoolStatus();
+  renderTossStatus();
+  renderFeed();
+  renderCurrentView();
+}
+
+async function refreshLivePrices() {
+  if (state.view !== "signals") return;
+  if (!state.dashboard?.candidates?.length) return;
+  if (state.activity.active || state.livePrice.loading) return;
+  const symbols = livePriceSymbols();
+  if (!symbols.length) return;
+
+  state.livePrice = {
+    ...state.livePrice,
+    loading: true,
+    error: ""
+  };
+  const params = new URLSearchParams({
+    mode: state.mode,
+    symbols: symbols.join(",")
+  });
+  const fallback = {
+    candidates: [],
+    summary: {},
+    integrations: {},
+    pollSeconds: state.livePrice.pollSeconds,
+    message: "라이브 가격 갱신 실패",
+    error: "unavailable"
+  };
+  const payload = await safeFetchJson(`/api/dashboard/live-prices?${params.toString()}`, fallback, 12000);
+  const merged = mergeLivePricePayload(payload);
+  state.livePrice = {
+    ...state.livePrice,
+    loading: false,
+    updatedAt: payload.updatedAt || state.livePrice.updatedAt,
+    message: payload.message || (merged ? "라이브 가격 반영" : "라이브 가격 대기"),
+    source: payload.source || state.livePrice.source,
+    error: payload.error || "",
+    pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 15)
+  };
+  if (merged) {
+    renderLivePriceUpdate();
+  } else {
+    renderCandidateSourceDetail();
+  }
+}
+
+function stopLivePricePolling() {
+  if (state.livePrice.timer) {
+    window.clearInterval(state.livePrice.timer);
+    state.livePrice.timer = null;
+  }
+}
+
+function startLivePricePolling() {
+  stopLivePricePolling();
+  if (!state.dashboard?.candidates?.length) return;
+  const pollMs = Math.max(
+    LIVE_PRICE_MIN_POLL_MS,
+    Number(state.livePrice.pollSeconds || 15) * 1000
+  );
+  state.livePrice.timer = window.setInterval(() => {
+    refreshLivePrices();
+  }, pollMs);
+  refreshLivePrices();
 }
 
 async function loadPerformance() {
@@ -1046,10 +1174,17 @@ function candidateSourceDetailRows(summary = {}) {
   const masterGeneratedAt = generated.generatedAt ? ` · ${timeLabel(generated.generatedAt)}` : "";
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
   const refreshPolicy = cache.cached || summary.candidateSourceStored ? "저장 우선 · 수동 실행만 재분석" : "저장 없음 · 필요 시 실시간 생성";
+  const live = state.livePrice ?? {};
+  const liveText = live.loading
+    ? "갱신 중"
+    : live.updatedAt
+      ? `${timeLabel(live.updatedAt)} · ${live.error ? live.message || "갱신 실패" : live.message || "토스 현재가 반영"}`
+      : "대기";
   return [
     ["후보 출처", sourceLabel !== "샘플 후보", `${sourceLabel}${cacheSuffix}`],
     ["기준 시각", Boolean(cachedAt), cachedAt ? timeLabel(cachedAt) : "-"],
     ["갱신 방식", cache.cached || summary.candidateSourceStored, refreshPolicy],
+    ["장중 가격", Boolean(live.updatedAt && !live.error), liveText],
     ["발굴 근거", scanned > 0, `${scanned}종목 · 재료뉴스 ${materialNews}건 · 제외 ${filtered}건`],
     ["저장 상태", storageOk, `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
     ["검색 마스터", masterCount > 0, `${masterCount}개 · ${masterStorage}${masterGeneratedAt}`]
@@ -1529,7 +1664,10 @@ function renderMarket() {
   const cacheText = cache.cached
     ? `저장본: ${modeLabel(cache.mode || cache.requestedMode)} · ${cache.createdAt ? timeLabel(cache.createdAt) : "시간 미확인"}${cache.fallbackError ? " · 실시간 갱신 실패 후 대체" : ""}`
     : "";
-  els.marketNote.textContent = [cacheText, snapshotText, market.note, fxText, indexText].filter(Boolean).join(" ");
+  const liveText = state.livePrice?.updatedAt
+    ? `라이브 가격: ${timeLabel(state.livePrice.updatedAt)}${state.livePrice.error ? " · 갱신 실패" : ""}`
+    : "";
+  els.marketNote.textContent = [cacheText, snapshotText, liveText, market.note, fxText, indexText].filter(Boolean).join(" ");
 }
 
 function renderMetrics() {

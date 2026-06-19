@@ -73,6 +73,8 @@ TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "
 TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "2"))
 TOSS_TRADES_COUNT = int(os.getenv("TOSS_TRADES_COUNT", "30"))
 TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS", "7"))
+SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "15"))
+SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
     TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = (
@@ -10113,6 +10115,213 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     return payload
 
 
+def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
+    data = seed_data()
+    watched = set(watchlist())
+    market = copy.deepcopy(data.get("market", {}))
+    candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in data.get("candidates", [])]
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates = sort_candidates_for_mode(candidates, mode)
+    return {
+        "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "mode": mode,
+        "market": market,
+        "principles": data.get("principles", []),
+        "summary": {
+            "candidateCount": len(candidates),
+            "watchedCount": len([item for item in candidates if item.get("isWatched")]),
+            "highScoreCount": len([item for item in candidates if item.get("totalScore", 0) >= 75]),
+            "readyCount": len([item for item in candidates if item.get("triggerReadiness", 0) >= 70]),
+            "selectionSource": selection_status.get("source"),
+            "candidateSource": "sample",
+            "averagePriceReaction": selection_status.get("averagePriceReaction"),
+            "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
+            "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+            "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
+            "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
+            "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
+            "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
+            "signalValidationCounts": selection_status.get("signalValidationCounts", {}),
+        },
+        "integrations": {
+            "selection": selection_status,
+            "toss": {
+                "config": toss_config_status(),
+                "prices": {"source": "sample", "message": "시드 후보 기준입니다."},
+                "candles": {"source": "sample"},
+                "orderbook": {"source": "sample"},
+                "trades": {"source": "sample"},
+            },
+        },
+        "cache": {"cached": False, "source": "seed", "mode": mode},
+        "candidates": candidates,
+        "selected": candidates[0] if candidates else None,
+    }
+
+
+def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
+    cached_payload = cached_dashboard_payload(mode)
+    if cached_payload is not None:
+        cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
+        return cached_payload, str(cache.get("source") or "dashboard_cache")
+
+    stored_payload = stored_candidate_pool_dashboard_payload(mode)
+    if stored_payload is not None:
+        return stored_payload, "candidate_pool"
+
+    return seed_dashboard_payload_for_live_prices(mode), "seed"
+
+
+def live_price_summary_from_selection(candidates: list[dict], selection_status: dict, base_summary: dict) -> dict:
+    summary = copy.deepcopy(base_summary) if isinstance(base_summary, dict) else {}
+    compression_counts = selection_status.get("candidateCompressionCounts", {})
+    validation_counts = selection_status.get("signalValidationCounts", {})
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    summary.update({
+        "candidateCount": len(candidates),
+        "watchedCount": len([item for item in candidates if item.get("isWatched")]),
+        "highScoreCount": len([item for item in candidates if item.get("totalScore", 0) >= 75]),
+        "readyCount": len([item for item in candidates if item.get("triggerReadiness", 0) >= 70]),
+        "selectionSource": "live-price-rules",
+        "livePriceUpdatedAt": now_text,
+        "livePricePollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "averageScoreShift": selection_status.get("averageScoreShift"),
+        "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
+        "averageDataConfidence": selection_status.get("averageDataConfidence"),
+        "averageSourceReliability": selection_status.get("averageSourceReliability"),
+        "sourceReliabilityCounts": selection_status.get("sourceReliabilityCounts", {}),
+        "averagePriceReaction": selection_status.get("averagePriceReaction"),
+        "averageOfficialEventScore": selection_status.get("averageOfficialEventScore"),
+        "officialEventCounts": selection_status.get("officialEventCounts", {}),
+        "officialEventCandidateCount": selection_status.get("officialEventCandidateCount"),
+        "officialRiskCandidateCount": selection_status.get("officialRiskCandidateCount"),
+        "hiddenOpportunityCount": selection_status.get("hiddenOpportunityCount"),
+        "decisionGroups": selection_status.get("decisionGroups", {}),
+        "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
+        "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
+        "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+        "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
+        "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
+        "candidateCompressionCounts": compression_counts,
+        "signalValidationCounts": validation_counts,
+        "coreCandidateCount": selection_status.get("coreCandidateCount"),
+        "reviewCandidateCount": selection_status.get("reviewCandidateCount"),
+        "waitCandidateCompressionCount": compression_counts.get("wait"),
+        "portfolioCandidateCompressionCount": compression_counts.get("portfolio"),
+        "excludeCandidateCompressionCount": compression_counts.get("exclude"),
+        "confirmedSignalCount": validation_counts.get("confirmed"),
+        "evidenceWaitSignalCount": validation_counts.get("evidence_wait"),
+        "reactionOnlySignalCount": validation_counts.get("reaction_only"),
+        "blockedSignalCount": validation_counts.get("blocked"),
+        "buyDecisionCount": selection_status.get("buyDecisionCount"),
+        "addDecisionCount": selection_status.get("addDecisionCount"),
+        "holdDecisionCount": selection_status.get("holdDecisionCount"),
+        "trimDecisionCount": selection_status.get("trimDecisionCount"),
+        "stopDecisionCount": selection_status.get("stopDecisionCount"),
+        "pullbackDecisionCount": selection_status.get("pullbackDecisionCount"),
+        "watchDecisionCount": selection_status.get("watchDecisionCount"),
+        "verifyDecisionCount": selection_status.get("verifyDecisionCount"),
+        "investableCandidateCount": selection_status.get("investableCandidateCount"),
+        "watchCandidateCount": selection_status.get("watchCandidateCount"),
+        "deferCandidateCount": selection_status.get("deferCandidateCount"),
+        "actionCandidateCount": selection_status.get("actionCandidateCount"),
+        "momentumCandidateCount": selection_status.get("momentumCandidateCount"),
+        "waitCandidateCount": selection_status.get("waitCandidateCount"),
+        "excludeCandidateCount": selection_status.get("excludeCandidateCount"),
+    })
+    return summary
+
+
+def dashboard_live_price_payload(symbols: list[str], mode: str) -> dict:
+    base_payload, base_source = dashboard_base_for_live_prices(mode)
+    base_candidates = [
+        copy.deepcopy(item)
+        for item in base_payload.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    ]
+    requested = unique_symbols(symbols)
+    if not requested:
+        requested = unique_symbols([str(item.get("symbol", "")) for item in base_candidates])
+    requested = requested[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    requested_priority = {symbol: index for index, symbol in enumerate(requested)}
+    indexed_candidates = list(enumerate(base_candidates))
+    indexed_candidates.sort(
+        key=lambda pair: (
+            requested_priority.get(str(pair[1].get("symbol", "")), len(requested_priority) + pair[0]),
+            pair[0],
+        )
+    )
+    candidates = [item for _, item in indexed_candidates][: max(SIGNAL_LIVE_PRICE_SYMBOL_LIMIT, len(requested))]
+    if not candidates:
+        return {
+            "mode": mode,
+            "source": "live-price",
+            "baseSource": base_source,
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+            "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+            "candidates": [],
+            "summary": {"candidateCount": 0, "livePriceUpdatedAt": datetime.now(KST).isoformat(timespec="seconds")},
+            "message": "갱신할 후보가 없습니다.",
+        }
+
+    price_status = {"source": "sample", "message": "현재가 갱신 전입니다."}
+    candle_status = {"source": "sample"}
+    orderbook_status = {"source": "sample"}
+    trade_status = {"source": "sample"}
+    try:
+        candidates, price_status = enrich_candidates_with_toss_prices(candidates)
+        candidates, candle_status = enrich_candidates_with_toss_candles(candidates)
+        candidates, orderbook_status = enrich_candidates_with_toss_orderbook(candidates)
+        candidates, trade_status = enrich_candidates_with_toss_trades(candidates)
+    except Exception as error:
+        error_payload, _ = integration_error_payload(error)
+        price_status = {
+            "source": "error",
+            "enabled": TOSS_LIVE_PRICES,
+            "message": error_payload.get("message", "토스 라이브 가격 갱신에 실패했습니다."),
+            "error": error_payload.get("error", str(error)[:160]),
+        }
+
+    watched = set(watchlist())
+    for item in candidates:
+        item["isWatched"] = str(item.get("symbol", "")) in watched
+    market = copy.deepcopy(base_payload.get("market", seed_data().get("market", {})))
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates = sort_candidates_for_mode(candidates, mode)
+    summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
+    integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
+    integrations["selection"] = selection_status
+    integrations["livePrice"] = {
+        "source": "toss-dashboard-poll",
+        "baseSource": base_source,
+        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
+        "updatedAt": summary["livePriceUpdatedAt"],
+    }
+    toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}
+    toss_status.update({
+        "config": toss_config_status(),
+        "prices": price_status,
+        "candles": candle_status,
+        "orderbook": orderbook_status,
+        "trades": trade_status,
+    })
+    integrations["toss"] = toss_status
+    return {
+        "mode": mode,
+        "source": "live-price",
+        "baseSource": base_source,
+        "updatedAt": summary["livePriceUpdatedAt"],
+        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "symbols": requested,
+        "summary": summary,
+        "integrations": integrations,
+        "candidates": candidates,
+        "selected": candidates[0] if candidates else None,
+        "message": "저장 후보의 토스 라이브 가격과 가격 반응 판단을 갱신했습니다.",
+    }
+
+
 def current_price_lookup(symbols: list[str]) -> tuple[dict[str, dict], dict]:
     unique = unique_symbols(symbols)
     seed_lookup = {
@@ -11038,6 +11247,23 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not-found", "message": "종목을 찾을 수 없습니다."}, 404)
                 return
             self.send_json(match.get("aiAnalysis", local_candidate_analysis(match)))
+            return
+
+        if parsed.path == "/api/dashboard/live-prices":
+            query = parse_qs(parsed.query)
+            mode = query.get("mode", ["close"])[0]
+            if mode not in {"close", "preopen", "intraday"}:
+                mode = "close"
+            symbols = [
+                symbol.strip()
+                for symbol in query.get("symbols", [""])[0].split(",")
+                if symbol.strip()
+            ]
+            try:
+                self.send_json(dashboard_live_price_payload(symbols, mode))
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
             return
 
         if parsed.path == "/api/dashboard":
