@@ -78,6 +78,7 @@ TOSS_TRADES_CACHE_SECONDS = int(os.getenv("TOSS_TRADES_CACHE_SECONDS", "5"))
 TOSS_PORTFOLIO_CACHE_SECONDS = int(os.getenv("TOSS_PORTFOLIO_CACHE_SECONDS", "30"))
 TOSS_STOCK_CACHE_SECONDS = int(os.getenv("TOSS_STOCK_CACHE_SECONDS", "86400"))
 TOSS_REQUEST_TIMEOUT_SECONDS = int(os.getenv("TOSS_REQUEST_TIMEOUT_SECONDS", "5"))
+TOSS_PRICE_BATCH_SIZE = max(1, int(os.getenv("TOSS_PRICE_BATCH_SIZE", "20")))
 TOSS_CANDLE_MAX_CANDIDATES = int(os.getenv("TOSS_CANDLE_MAX_CANDIDATES", "5"))
 TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "5"))
 TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "5"))
@@ -1842,6 +1843,7 @@ def toss_config_status() -> dict:
         "readyForTokenIssue": bool(TOSS_CLIENT_ID and TOSS_CLIENT_SECRET),
         "readyForMarketData": bool(TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET)),
         "readyForAccountData": bool(TOSS_LIVE_PORTFOLIO and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
+        "priceBatchSize": TOSS_PRICE_BATCH_SIZE,
         "candleMaxCandidates": TOSS_CANDLE_MAX_CANDIDATES,
         "orderbookMaxCandidates": TOSS_ORDERBOOK_MAX_CANDIDATES,
         "tradesMaxCandidates": TOSS_TRADES_MAX_CANDIDATES,
@@ -2018,6 +2020,24 @@ def unique_symbols(symbols: list[str]) -> list[str]:
     return unique
 
 
+def symbol_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
+    batch_size = max(1, int(batch_size or 1))
+    return [symbols[index:index + batch_size] for index in range(0, len(symbols), batch_size)]
+
+
+def fetch_toss_price_batch(symbols: list[str], token: str) -> dict:
+    query = urlencode({"symbols": ",".join(symbols)})
+    request = Request(
+        f"{TOSS_BASE_URL}/api/v1/prices?{query}",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    with urlopen(request, timeout=TOSS_REQUEST_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+        write_raw_event("toss", "prices", payload, query=",".join(symbols), metadata={"symbolCount": len(symbols)})
+        return payload
+
+
 def fetch_toss_prices(symbols: list[str]) -> dict:
     symbols = unique_symbols(symbols)
     if not symbols:
@@ -2034,19 +2054,38 @@ def fetch_toss_prices(symbols: list[str]) -> dict:
         return PRICE_CACHE["payload"]  # type: ignore[return-value]
 
     token = toss_access_token()
-    query = urlencode({"symbols": ",".join(symbols)})
-    request = Request(
-        f"{TOSS_BASE_URL}/api/v1/prices?{query}",
-        headers={"Authorization": f"Bearer {token}"},
-        method="GET",
-    )
-    with urlopen(request, timeout=TOSS_REQUEST_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-        PRICE_CACHE["symbols"] = cache_key
-        PRICE_CACHE["payload"] = payload
-        PRICE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=TOSS_PRICE_CACHE_SECONDS)
-        write_raw_event("toss", "prices", payload, query=",".join(symbols), metadata={"symbolCount": len(symbols)})
-        return payload
+    merged_rows: list[dict] = []
+    errors: list[dict] = []
+    batches = symbol_batches(symbols, TOSS_PRICE_BATCH_SIZE)
+    for batch in batches:
+        try:
+            payload = fetch_toss_price_batch(batch, token)
+        except Exception as error:
+            errors.append({
+                "symbols": batch,
+                "error": str(error)[:180],
+            })
+            continue
+        merged_rows.extend(price_rows(payload))
+
+    if not merged_rows and errors:
+        raise RuntimeError(f"토스 가격 배치 조회 실패: {errors[0].get('error', 'unknown')}")
+
+    payload = {
+        "result": merged_rows,
+        "metadata": {
+            "requestedCount": len(symbols),
+            "receivedCount": len(merged_rows),
+            "batchSize": TOSS_PRICE_BATCH_SIZE,
+            "batchCount": len(batches),
+            "errorCount": len(errors),
+            "errors": errors[:5],
+        },
+    }
+    PRICE_CACHE["symbols"] = cache_key
+    PRICE_CACHE["payload"] = payload
+    PRICE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=TOSS_PRICE_CACHE_SECONDS)
+    return payload
 
 
 def fetch_toss_candles(symbol: str, interval: str = "1d", count: int = 20) -> dict:
@@ -3495,7 +3534,9 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
     stored_candle_change_count = 0
     change_pending_count = 0
     missing_count = 0
+    missing_symbols: list[str] = []
     now_text = datetime.now(KST).isoformat(timespec="seconds")
+    price_metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
     stored_market_records = stored_market_data_latest_records("toss", "prices")
     stored_candle_records = stored_market_data_latest_records("toss", "candles")
     stored_candidate_records = stored_candidate_data_latest_records()
@@ -3607,18 +3648,28 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                     }
                     item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text, str(item.get("market", "")))
                     missing_count += 1
+                    symbol = str(item.get("symbol", "")).strip().upper()
+                    if symbol:
+                        missing_symbols.append(symbol)
         enriched.append(item)
 
     return enriched, {
         "source": "toss",
         "enabled": True,
         "message": "토스증권 현재가를 반영했습니다.",
+        "requestedCount": price_metadata.get("requestedCount", len(symbols)),
+        "receivedCount": price_metadata.get("receivedCount", len(price_rows(payload))),
+        "batchSize": price_metadata.get("batchSize", TOSS_PRICE_BATCH_SIZE),
+        "batchCount": price_metadata.get("batchCount", 1),
+        "batchErrorCount": price_metadata.get("errorCount", 0),
+        "batchErrors": price_metadata.get("errors", []),
         "priceCount": len(prices),
         "retainedCount": retained_count,
         "storedFallbackCount": stored_fallback_count,
         "storedCandleChangeCount": stored_candle_change_count,
         "changePendingCount": change_pending_count,
         "missingCount": missing_count,
+        "missingSymbols": unique_texts(missing_symbols, limit=20),
         "baselineDriftCount": baseline_drift_count,
         "sampleDriftThresholdPercent": (
             display_percent_abs(TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT)
@@ -12072,9 +12123,14 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
         "prefetchedCount": len(candidates),
         "limit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "priceCount": price_status.get("priceCount", 0),
+        "requestedPriceCount": price_status.get("requestedCount", len(candidates)),
+        "receivedPriceCount": price_status.get("receivedCount", price_status.get("priceCount", 0)),
+        "priceBatchCount": price_status.get("batchCount", 0),
+        "priceBatchErrorCount": price_status.get("batchErrorCount", 0),
         "storedFallbackCount": price_status.get("storedFallbackCount", 0),
         "retainedCount": price_status.get("retainedCount", 0),
         "missingCount": price_status.get("missingCount", 0),
+        "missingSymbols": price_status.get("missingSymbols", []),
         "displayReadyCount": display_ready_count,
         "entryReadyCount": entry_ready_count,
         "missingCounts": missing_counts,
@@ -13334,11 +13390,16 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     summary.update({
         "livePriceFreshnessCounts": freshness_counts,
         "livePriceRequestedCount": len(requested),
+        "livePriceTossRequestedCount": price_status.get("requestedCount", len(refresh_candidates)),
+        "livePriceTossReceivedCount": price_status.get("receivedCount", price_status.get("priceCount", 0)),
+        "livePriceBatchCount": price_status.get("batchCount", 0),
+        "livePriceBatchErrorCount": price_status.get("batchErrorCount", 0),
         "livePriceRefreshedCount": len(refresh_candidates),
         "livePriceCandidateCount": len(candidates),
         "livePriceStoredFallbackCount": price_status.get("storedFallbackCount", 0),
         "livePriceRetainedCount": price_status.get("retainedCount", 0),
         "livePriceMissingCount": price_status.get("missingCount", 0),
+        "livePriceMissingSymbols": price_status.get("missingSymbols", []),
         "liveStateMergedCount": live_state_status.get("mergedCount", 0),
         "candidateDataMergedCount": candidate_data_merge_status.get("mergedCount", 0),
         "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),

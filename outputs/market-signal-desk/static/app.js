@@ -999,10 +999,15 @@ function livePriceSummaryPatch(summary) {
     "livePricePollSeconds",
     "livePriceFreshnessCounts",
     "livePriceRequestedCount",
+    "livePriceTossRequestedCount",
+    "livePriceTossReceivedCount",
+    "livePriceBatchCount",
+    "livePriceBatchErrorCount",
     "livePriceRefreshedCount",
     "livePriceStoredFallbackCount",
     "livePriceRetainedCount",
     "livePriceMissingCount",
+    "livePriceMissingSymbols",
     "candidateMarketDataLatestUpdatedCount",
     "candidateMarketDataLatestStored",
     "stableDecisionCount",
@@ -2294,6 +2299,15 @@ function livePriceDiagnostics() {
   const retainedCount = candidates.filter((item) => item?.livePrice?.retained).length;
   const storedFallbackCount = Number(live.storedFallbackCount || state.dashboard?.summary?.livePriceStoredFallbackCount || 0);
   const missingCount = Number(live.missingCount || state.dashboard?.summary?.livePriceMissingCount || 0);
+  const tossRequestedCount = Number(live.livePriceTossRequestedCount || state.dashboard?.summary?.livePriceTossRequestedCount || 0);
+  const tossReceivedCount = Number(live.livePriceTossReceivedCount || state.dashboard?.summary?.livePriceTossReceivedCount || 0);
+  const batchCount = Number(live.livePriceBatchCount || state.dashboard?.summary?.livePriceBatchCount || 0);
+  const batchErrorCount = Number(live.livePriceBatchErrorCount || state.dashboard?.summary?.livePriceBatchErrorCount || 0);
+  const missingSymbols = Array.isArray(live.livePriceMissingSymbols)
+    ? live.livePriceMissingSymbols
+    : Array.isArray(state.dashboard?.summary?.livePriceMissingSymbols)
+      ? state.dashboard.summary.livePriceMissingSymbols
+      : [];
   const changedCount = Number(live.changedCount || live.changedSymbols?.length || 0);
   const stableDecisionCount = Number(live.stableDecisionCount || state.dashboard?.summary?.stableDecisionCount || 0);
   const carriedForwardCount = Number(
@@ -2347,6 +2361,11 @@ function livePriceDiagnostics() {
     retainedCount,
     storedFallbackCount,
     missingCount,
+    tossRequestedCount,
+    tossReceivedCount,
+    batchCount,
+    batchErrorCount,
+    missingSymbols,
     changedCount,
     stableDecisionCount,
     carriedForwardCount,
@@ -2372,6 +2391,12 @@ function renderLivePriceStatus() {
     ["상태", diag.ok, diag.label],
     ["우선 포함", true, diag.priorityCount ? `보유·관심 ${diag.priorityCount}개` : "없음"],
     ["요청 대상", diag.symbolCount >= diag.total && diag.total > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
+    [
+      "토스 수신",
+      diag.tossRequestedCount === 0 || diag.tossReceivedCount >= Math.min(diag.tossRequestedCount, diag.symbolCount || diag.tossRequestedCount),
+      diag.tossRequestedCount ? `${diag.tossReceivedCount}/${diag.tossRequestedCount}` : "-"
+    ],
+    ["배치 상태", diag.batchErrorCount === 0, diag.batchCount ? `${diag.batchCount}회 · 오류 ${diag.batchErrorCount}` : "-"],
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
     ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
@@ -2390,6 +2415,11 @@ function renderLivePriceStatus() {
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
     ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
     ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
+    [
+      "누락 심볼",
+      !diag.missingSymbols.length,
+      diag.missingSymbols.length ? shortText(diag.missingSymbols.slice(0, 5).join(", "), 32) : "없음"
+    ],
     ["메시지", !diag.message || diag.ok, diag.message || diag.source]
   ];
   setHtmlIfChanged(els.livePriceStatus, rows
