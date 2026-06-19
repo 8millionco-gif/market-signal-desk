@@ -3417,6 +3417,40 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
     }
 
 
+def candidate_depth_fetch_priority(pair: tuple[int, dict], target_key: str) -> tuple[int, int, int, int, int]:
+    index, candidate = pair
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    has_live_price = str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+    has_change = candidate_data_has_change(candidate)
+    has_target = candidate_data_source_ok(candidate.get(target_key, {}))
+    completeness = (
+        candidate.get("dataCompleteness", {})
+        if isinstance(candidate.get("dataCompleteness"), dict)
+        else candidate_data_completeness(candidate)
+    )
+    missing_values = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
+    missing_depth = "차트/호가/체결" in missing_values
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    decision_group = candidate.get("decisionGroup", {}) if isinstance(candidate.get("decisionGroup"), dict) else {}
+    action_key = str(final_decision.get("actionKey", ""))
+    group_key = str(decision_group.get("key", ""))
+    score = bounded_int(candidate.get("totalScore", candidate.get("score", 0)), 0, 100)
+    readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
+    urgent = group_key == "action" or action_key in {"buy", "add", "watch", "pullback"} or score >= 72 or readiness >= 70
+    selected_boost = 0 if index == 0 else 1
+    if has_live_price and has_change and missing_depth and not has_target:
+        rank = 0
+    elif has_live_price and missing_depth and not has_target:
+        rank = 1
+    elif urgent and not has_target:
+        rank = 2
+    elif not has_target:
+        rank = 3
+    else:
+        rank = 4
+    return (rank, selected_boost, -readiness, -score, index)
+
+
 def enrich_candidates_with_toss_orderbook(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not TOSS_LIVE_ORDERBOOK:
         return candidates, {
@@ -3432,15 +3466,19 @@ def enrich_candidates_with_toss_orderbook(candidates: list[dict]) -> tuple[list[
             "message": "토스증권 API 환경변수가 없어 샘플 호가 지표를 사용합니다.",
         }
 
-    enriched = []
+    priority_pairs = sorted(list(enumerate(candidates)), key=lambda pair: candidate_depth_fetch_priority(pair, "liveOrderbook"))
+    fetch_indexes = {
+        index for index, _candidate in priority_pairs[: max(0, TOSS_ORDERBOOK_MAX_CANDIDATES)]
+    }
+    enriched_by_index: dict[int, dict] = {}
     orderbook_count = 0
     skipped_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
-        if index >= TOSS_ORDERBOOK_MAX_CANDIDATES:
+        if index not in fetch_indexes:
             skipped_count += 1
             item["liveOrderbook"] = {"source": "skipped", "message": "호가 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
-            enriched.append(item)
+            enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
         summary = summarize_orderbook(fetch_toss_orderbook(symbol))
@@ -3454,14 +3492,16 @@ def enrich_candidates_with_toss_orderbook(candidates: list[dict]) -> tuple[list[
             item["trend"] = trend
         else:
             item["liveOrderbook"] = {"source": "sample", "message": "토스 호가 응답이 비어 있습니다."}
-        enriched.append(item)
+        enriched_by_index[index] = item
 
+    enriched = [enriched_by_index.get(index, dict(candidate)) for index, candidate in enumerate(candidates)]
     return enriched, {
         "source": "toss",
         "enabled": True,
-        "message": "토스증권 호가를 반영했습니다.",
+        "message": "토스증권 호가를 미수신/진입 후보 우선으로 반영했습니다.",
         "orderbookCount": orderbook_count,
         "skippedCount": skipped_count,
+        "prioritizedCount": len(fetch_indexes),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -3481,15 +3521,19 @@ def enrich_candidates_with_toss_trades(candidates: list[dict]) -> tuple[list[dic
             "message": "토스증권 API 환경변수가 없어 샘플 체결 지표를 사용합니다.",
         }
 
-    enriched = []
+    priority_pairs = sorted(list(enumerate(candidates)), key=lambda pair: candidate_depth_fetch_priority(pair, "liveTrades"))
+    fetch_indexes = {
+        index for index, _candidate in priority_pairs[: max(0, TOSS_TRADES_MAX_CANDIDATES)]
+    }
+    enriched_by_index: dict[int, dict] = {}
     trade_count = 0
     skipped_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
-        if index >= TOSS_TRADES_MAX_CANDIDATES:
+        if index not in fetch_indexes:
             skipped_count += 1
             item["liveTrades"] = {"source": "skipped", "message": "체결 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
-            enriched.append(item)
+            enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
         summary = summarize_trades(fetch_toss_trades(symbol, count=TOSS_TRADES_COUNT))
@@ -3503,14 +3547,16 @@ def enrich_candidates_with_toss_trades(candidates: list[dict]) -> tuple[list[dic
             item["trend"] = trend
         else:
             item["liveTrades"] = {"source": "sample", "message": "토스 체결 응답이 비어 있습니다."}
-        enriched.append(item)
+        enriched_by_index[index] = item
 
+    enriched = [enriched_by_index.get(index, dict(candidate)) for index, candidate in enumerate(candidates)]
     return enriched, {
         "source": "toss",
         "enabled": True,
-        "message": "토스증권 최근 체결을 반영했습니다.",
+        "message": "토스증권 최근 체결을 미수신/진입 후보 우선으로 반영했습니다.",
         "tradeCount": trade_count,
         "skippedCount": skipped_count,
+        "prioritizedCount": len(fetch_indexes),
         "requestCount": TOSS_TRADES_COUNT,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
