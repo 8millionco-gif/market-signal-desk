@@ -12552,13 +12552,13 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         )
     )
     if has_requested_symbols:
-        candidates = [
+        refresh_candidates = [
             item for _, item in indexed_candidates
             if str(item.get("symbol", "")) in requested_priority
         ][:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
     else:
-        candidates = [item for _, item in indexed_candidates][:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
-    if not candidates:
+        refresh_candidates = [item for _, item in indexed_candidates][:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    if not refresh_candidates:
         return {
             "mode": mode,
             "source": "live-price",
@@ -12580,11 +12580,11 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     orderbook_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 호가 정보를 유지합니다."}
     trade_status = {"source": "retained", "message": "가격 전용 갱신에서는 기존 체결 정보를 유지합니다."}
     try:
-        candidates, price_status = enrich_candidates_with_toss_prices(candidates)
+        refresh_candidates, price_status = enrich_candidates_with_toss_prices(refresh_candidates)
         if include_depth:
-            candidates, candle_status = enrich_candidates_with_toss_candles(candidates)
-            candidates, orderbook_status = enrich_candidates_with_toss_orderbook(candidates)
-            candidates, trade_status = enrich_candidates_with_toss_trades(candidates)
+            refresh_candidates, candle_status = enrich_candidates_with_toss_candles(refresh_candidates)
+            refresh_candidates, orderbook_status = enrich_candidates_with_toss_orderbook(refresh_candidates)
+            refresh_candidates, trade_status = enrich_candidates_with_toss_trades(refresh_candidates)
     except Exception as error:
         error_payload, _ = integration_error_payload(error)
         price_status = {
@@ -12593,6 +12593,24 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
             "message": error_payload.get("message", "토스 라이브 가격 갱신에 실패했습니다."),
             "error": error_payload.get("error", str(error)[:160]),
         }
+
+    refreshed_by_symbol = {
+        str(item.get("symbol", "")).strip().upper(): item
+        for item in refresh_candidates
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    }
+    candidates: list[dict] = []
+    seen_symbols: set[str] = set()
+    for candidate in base_candidates:
+        symbol = str(candidate.get("symbol", "")).strip().upper()
+        if not symbol:
+            candidates.append(candidate)
+            continue
+        candidates.append(refreshed_by_symbol.get(symbol, candidate))
+        seen_symbols.add(symbol)
+    for symbol, candidate in refreshed_by_symbol.items():
+        if symbol not in seen_symbols:
+            candidates.append(candidate)
 
     watched = set(watchlist())
     for item in candidates:
@@ -12608,7 +12626,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     summary.update({
         "livePriceFreshnessCounts": freshness_counts,
         "livePriceRequestedCount": len(requested),
-        "livePriceRefreshedCount": len(candidates),
+        "livePriceRefreshedCount": len(refresh_candidates),
+        "livePriceCandidateCount": len(candidates),
         "livePriceStoredFallbackCount": price_status.get("storedFallbackCount", 0),
         "livePriceRetainedCount": price_status.get("retainedCount", 0),
         "livePriceMissingCount": price_status.get("missingCount", 0),
@@ -12636,7 +12655,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
         "requestedCount": len(requested),
-        "refreshedCount": len(candidates),
+        "refreshedCount": len(refresh_candidates),
+        "candidateCount": len(candidates),
         "freshnessCounts": freshness_counts,
         "candidateDataRead": candidate_data_merge_status,
         "marketDataRead": market_data_merge_status,
@@ -12666,7 +12686,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
         "symbols": requested,
         "requestedCount": len(requested),
-        "refreshedCount": len(candidates),
+        "refreshedCount": len(refresh_candidates),
+        "candidateCount": len(candidates),
         "summary": summary,
         "integrations": integrations,
         "candidates": candidates,
