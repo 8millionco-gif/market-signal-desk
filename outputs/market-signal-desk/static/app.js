@@ -3473,18 +3473,24 @@ function renderStorageStatus() {
   if (!els.storageStatus) return;
   const status = state.storageStatus;
   if (!status) return;
-  const modeText = status.mode === "filesystem" ? "파일 저장" : status.mode || "-";
   const database = status.database ?? {};
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
   const rawEvents = status.rawEvents ?? {};
   const candidateData = status.candidateData ?? {};
   const marketData = status.marketData ?? {};
-  const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
+  const operationReady = Boolean(status.operationReady || (status.persistent && database.ready));
+  const volatileFallback = Boolean(status.volatileFallback || (!operationReady && status.implementation !== "postgres"));
+  const modeText = status.implementation === "postgres"
+    ? "Postgres DB"
+    : volatileFallback
+    ? "임시 파일 fallback"
+    : status.mode || "-";
+  const persistenceText = operationReady ? "DB 영구 저장" : "임시 파일 보존";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
     : `${status.recentRunCount ?? 0}건`;
-  const nextText = status.persistent ? "자동 실행 가능" : "DB/디스크 검토";
+  const nextText = operationReady ? "운영 가능" : database.nextAction || "DATABASE_URL 연결 필요";
   const dbText = database.urlConfigured
     ? database.ready
       ? "Postgres 준비"
@@ -3516,11 +3522,11 @@ function renderStorageStatus() {
         .join(" · ")
     : "";
   const marketDataText = marketData.enabled
-    ? `${marketData.itemCount ?? 0}개${marketSourceText ? ` · ${marketSourceText}` : ""}`
+    ? `${marketData.itemCount ?? 0}개 · ${marketData.persistent ? "DB" : "임시"}${marketSourceText ? ` · ${marketSourceText}` : ""}`
     : "꺼짐";
   const marketLatestText = marketData.latestAt ? timeLabel(marketData.latestAt) : "-";
   const candidateDataText = candidateData.enabled
-    ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.storage ?? "-"}`
+    ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.persistent ? "DB" : "임시"}`
     : "꺼짐";
   const candidateReadyText = candidateData.enabled
     ? `후보 ${candidateData.displayReadyCount ?? 0} · 진입 ${candidateData.entryReadyCount ?? 0}`
@@ -3533,9 +3539,11 @@ function renderStorageStatus() {
     : "누락 없음";
   const candidateLatestText = candidateData.latestAt ? timeLabel(candidateData.latestAt) : "-";
   const rows = [
-    ["저장 방식", Boolean(status.mode), modeText],
+    ["운영 저장소", operationReady, operationReady ? "DB 기준" : "미완료"],
+    ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
+    ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
@@ -3545,9 +3553,9 @@ function renderStorageStatus() {
     ["진입 데이터", Boolean(Number(candidateData.entryReadyCount ?? 0) > 0), candidateReadyText],
     ["누락 항목", candidateMissingText === "누락 없음", candidateMissingText],
     ["최근 후보 저장", Boolean(candidateData.latestAt), candidateLatestText],
-    ["보존성", Boolean(status.persistent), persistenceText],
+    ["보존성", operationReady, persistenceText],
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
-    ["다음", status.persistent && status.writable, nextText]
+    ["다음", operationReady && status.writable, nextText]
   ];
   const canMigrate = Boolean(database.urlConfigured && database.ready);
   const actionMarkup = `

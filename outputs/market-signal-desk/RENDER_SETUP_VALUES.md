@@ -130,6 +130,8 @@ https://market-signal-desk.onrender.com
 
 실전 운영 전에는 파일 저장소 대신 Postgres DB를 먼저 연결합니다. Render Postgres 또는 Supabase Postgres에서 발급한 연결 문자열을 Render Environment에 추가합니다.
 
+DB가 연결되지 않은 상태의 파일 저장소는 개발·임시 fallback입니다. Render 재배포나 재시작 뒤 후보 풀, Toss 최신값, 성과 기록 보존을 장담할 수 없으므로 실전 판단 기준 저장소로 보지 않습니다. 설정 화면의 `스냅샷 저장소` 카드에서 `운영 저장소`가 `DB 기준`으로 표시되어야 안정 운영 상태입니다.
+
 ```text
 SIGNAL_STORAGE_BACKEND=auto
 DATABASE_URL=postgresql://...
@@ -147,6 +149,7 @@ DB에 저장되는 데이터:
 ```text
 candidate_pool          후보 풀
 discovery_latest        상시 발굴 봇 최신 결과
+live_price_state        Toss 최신 가격·등락률·가격 반응 상태
 signal_snapshots        장전/장마감/장중 스냅샷과 성과 검증 기준 데이터
 signal_raw_events       시세/공시/뉴스 원천 이벤트와 판단 근거 데이터
 ```

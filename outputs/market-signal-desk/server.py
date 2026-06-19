@@ -1053,20 +1053,28 @@ def market_data_latest_status() -> dict:
     data = market_data_latest_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    storage = "postgres" if database_storage_enabled() else "filesystem"
-    if not database_storage_enabled() and MARKET_DATA_LATEST_FILE.exists():
+    db_ready = bool(database_storage_enabled() and ensure_database_schema())
+    storage = "postgres" if db_ready else "filesystem"
+    if not db_ready and MARKET_DATA_LATEST_FILE.exists():
         storage = "filesystem"
+    persistent = storage == "postgres"
     return {
         "enabled": True,
         "storage": storage,
-        "databaseReady": database_storage_enabled(),
+        "databaseReady": db_ready,
+        "persistent": persistent,
+        "volatileFallback": not persistent,
         "itemCount": len(items),
         "bySource": summary.get("bySource", {}),
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
         "lastStorage": MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
         "lastUpdatedAt": MARKET_DATA_LATEST_STATE.get("lastUpdatedAt", ""),
-        "message": "서버가 수집한 최신 원천 데이터를 DB 기준으로 업데이트합니다.",
+        "message": (
+            "서버가 수집한 최신 원천 데이터를 Postgres DB 기준으로 업데이트합니다."
+            if persistent
+            else "최신 원천 데이터가 임시 파일 저장소에 저장됩니다. 재배포/재시작 후 보존을 장담할 수 없습니다."
+        ),
     }
 
 
@@ -1576,6 +1584,19 @@ def database_status() -> dict:
     enabled = database_storage_enabled()
     ready = ensure_database_schema() if enabled else False
     counts = db_storage_counts() if ready else {}
+    requested = database_storage_requested()
+    if ready:
+        message = "Postgres DB를 기준 저장소로 사용 중입니다."
+        next_action = "운영 가능"
+    elif DATABASE_URL:
+        message = "DATABASE_URL은 설정되어 있으나 DB 연결 또는 스키마 확인에 실패했습니다."
+        next_action = "DB 연결 오류 확인"
+    elif requested:
+        message = "DATABASE_URL이 없어 서버 수집 데이터가 임시 파일 저장소로 대체됩니다."
+        next_action = "Postgres DATABASE_URL 연결"
+    else:
+        message = "DB 저장소가 비활성화되어 파일 저장소를 사용합니다."
+        next_action = "운영 전 DB 저장소 검토"
     return {
         "backend": SIGNAL_STORAGE_BACKEND,
         "urlConfigured": bool(DATABASE_URL),
@@ -1583,9 +1604,14 @@ def database_status() -> dict:
         "ready": ready,
         "implementation": "postgres" if enabled else "filesystem",
         "persistent": bool(ready),
+        "volatileFallback": not bool(ready),
+        "requiredForStableOperation": True,
+        "requested": requested,
         "autoMigrate": SIGNAL_DB_AUTO_MIGRATE,
         "migration": dict(DB_MIGRATION_STATUS),
         "counts": counts,
+        "message": message,
+        "nextAction": next_action,
         "error": DB_LAST_ERROR,
     }
 
@@ -4566,14 +4592,18 @@ def candidate_data_snapshot_status() -> dict:
     data = candidate_data_snapshot_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    storage = "postgres" if database_storage_enabled() else "filesystem"
-    if not database_storage_enabled() and CANDIDATE_DATA_FILE.exists():
+    db_ready = bool(database_storage_enabled() and ensure_database_schema())
+    storage = "postgres" if db_ready else "filesystem"
+    if not db_ready and CANDIDATE_DATA_FILE.exists():
         storage = "filesystem"
+    persistent = storage == "postgres"
     return {
         "enabled": True,
         "storage": storage,
         "file": display_local_path(CANDIDATE_DATA_FILE),
-        "databaseReady": database_storage_enabled(),
+        "databaseReady": db_ready,
+        "persistent": persistent,
+        "volatileFallback": not persistent,
         "itemCount": len(items),
         "storedCount": summary.get("storedCount", 0),
         "displayReadyCount": summary.get("displayReadyCount", 0),
@@ -4582,7 +4612,11 @@ def candidate_data_snapshot_status() -> dict:
         "carriedForwardFields": summary.get("carriedForwardFields", {}),
         "missingCounts": summary.get("missingCounts", {}),
         "latestAt": data.get("updatedAt", ""),
-        "message": "후보별 최신 수신 데이터 묶음을 저장합니다.",
+        "message": (
+            "후보별 최신 수신 데이터 묶음을 Postgres DB에 저장합니다."
+            if persistent
+            else "후보별 최신 수신 데이터 묶음이 임시 파일 저장소에 저장됩니다. 운영 기준 저장소는 아직 미완료입니다."
+        ),
     }
 
 
@@ -12141,6 +12175,8 @@ def snapshot_storage_status() -> dict:
             "runsDirExists": RUNS_DIR.exists(),
             "writable": True,
             "persistent": True,
+            "volatileFallback": False,
+            "operationReady": True,
             "recentRunCount": len(recent_runs),
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
@@ -12172,6 +12208,8 @@ def snapshot_storage_status() -> dict:
         "runsDirExists": RUNS_DIR.exists(),
         "writable": writable,
         "persistent": persistent,
+        "volatileFallback": True,
+        "operationReady": False,
         "recentRunCount": len(recent_runs),
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
@@ -12182,7 +12220,7 @@ def snapshot_storage_status() -> dict:
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
-            else "현재 스냅샷은 파일 저장소에 남습니다. 운영 전에는 영구 저장소를 검토하세요."
+            else "DB가 연결되지 않아 스냅샷, 후보 풀, Toss 최신값이 임시 파일 저장소에 남습니다. 실전 운영 전에는 Postgres DB 연결이 필요합니다."
         ),
         "error": error,
     }
