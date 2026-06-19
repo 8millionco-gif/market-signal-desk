@@ -216,6 +216,10 @@ SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RE
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 SIGNAL_CANDIDATE_PREFETCH_ENABLED = os.getenv("SIGNAL_CANDIDATE_PREFETCH_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_CANDIDATE_PREFETCH_LIMIT = max(1, int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_LIMIT", "80")))
+SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS = max(
+    30,
+    int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS", "60")),
+)
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -257,6 +261,7 @@ MARKET_DATA_LOCK = threading.Lock()
 LIVE_STATE_LOCK = threading.Lock()
 CANDIDATE_DATA_LOCK = threading.Lock()
 STOCK_SEARCH_MASTER_LOCK = threading.Lock()
+CANDIDATE_PREFETCH_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
@@ -300,6 +305,8 @@ SCHEDULER_STATE: dict[str, object] = {
     "lastRuns": {},
     "lastPerformanceUpdate": {},
     "lastPerformanceError": "",
+    "lastCandidatePrefetch": {},
+    "lastCandidatePrefetchError": "",
 }
 DISCOVERY_BOT_STATE: dict[str, object] = {
     "started": False,
@@ -11610,6 +11617,9 @@ def scheduler_config_status() -> dict:
     return {
         "enabled": SIGNAL_SCHEDULER_ENABLED,
         "intervalSeconds": SIGNAL_SCHEDULER_INTERVAL_SECONDS,
+        "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+        "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
+        "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
         "historyLimit": SIGNAL_RUN_HISTORY_LIMIT,
         "performanceAutoUpdate": SIGNAL_PERFORMANCE_AUTO_UPDATE,
         "performanceMinAgeMinutes": max(0, SIGNAL_PERFORMANCE_MIN_AGE_MINUTES),
@@ -11675,6 +11685,73 @@ def next_scheduler_run(now: datetime | None = None) -> dict:
         })
     candidates.sort(key=lambda item: item["runAt"])
     return candidates[0] if candidates else {}
+
+
+def candidate_prefetch_due(now: datetime | None = None) -> bool:
+    if not SIGNAL_SCHEDULER_ENABLED or not SIGNAL_CANDIDATE_PREFETCH_ENABLED:
+        return False
+    now = now or datetime.now(KST)
+    with SCHEDULER_LOCK:
+        latest = SCHEDULER_STATE.get("lastCandidatePrefetch", {})
+    latest_at = ""
+    if isinstance(latest, dict):
+        latest_at = str(latest.get("updatedAt") or latest.get("checkedAt") or "")
+    parsed = parse_iso_datetime(latest_at)
+    if parsed is None:
+        return True
+    age_seconds = max(0, int((now - parsed.astimezone(KST)).total_seconds()))
+    return age_seconds >= SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS
+
+
+def run_scheduler_candidate_prefetch(now: datetime | None = None) -> dict:
+    now = now or datetime.now(KST)
+    if not CANDIDATE_PREFETCH_LOCK.acquire(blocking=False):
+        status = {
+            "enabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+            "skipped": True,
+            "reason": "already-running",
+            "checkedAt": now.isoformat(timespec="seconds"),
+            "message": "후보 데이터 보강이 이미 실행 중입니다.",
+        }
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastCandidatePrefetch"] = status
+        return status
+    try:
+        with DISCOVERY_BOT_LOCK:
+            discovery_running = bool(DISCOVERY_BOT_STATE.get("running"))
+        if discovery_running:
+            status = {
+                "enabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+                "skipped": True,
+                "reason": "discovery-running",
+                "checkedAt": now.isoformat(timespec="seconds"),
+                "message": "발굴 봇 실행 중이라 후보 데이터 보강을 다음 주기로 미룹니다.",
+            }
+        else:
+            status = prefetch_candidate_pool_market_data(
+                discovery_bot_mode(),
+                trigger="scheduler-prefetch",
+            )
+            status["scheduled"] = True
+            status["intervalSeconds"] = SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS
+            status["checkedAt"] = now.isoformat(timespec="seconds")
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastCandidatePrefetch"] = status
+            SCHEDULER_STATE["lastCandidatePrefetchError"] = ""
+        return status
+    except Exception as error:
+        status = {
+            "enabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+            "error": str(error)[:240],
+            "checkedAt": now.isoformat(timespec="seconds"),
+            "message": "후보 풀 Toss 데이터 보강에 실패했습니다.",
+        }
+        with SCHEDULER_LOCK:
+            SCHEDULER_STATE["lastCandidatePrefetch"] = status
+            SCHEDULER_STATE["lastCandidatePrefetchError"] = status["error"]
+        return status
+    finally:
+        CANDIDATE_PREFETCH_LOCK.release()
 
 
 def dashboard_summary(payload: dict) -> dict:
@@ -11817,6 +11894,7 @@ def discovery_bot_config_status() -> dict:
         "dashboardStoredDiscoveryFirst": SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST,
         "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
+        "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
@@ -13313,6 +13391,8 @@ def scheduler_status() -> dict:
             "lastRuns": SCHEDULER_STATE.get("lastRuns", {}),
             "lastPerformanceUpdate": SCHEDULER_STATE.get("lastPerformanceUpdate", {}),
             "lastPerformanceError": SCHEDULER_STATE.get("lastPerformanceError", ""),
+            "lastCandidatePrefetch": SCHEDULER_STATE.get("lastCandidatePrefetch", {}),
+            "lastCandidatePrefetchError": SCHEDULER_STATE.get("lastCandidatePrefetchError", ""),
         }
     return {
         "config": scheduler_config_status(),
@@ -13332,6 +13412,8 @@ def scheduler_loop() -> None:
         STOCK_SEARCH_MASTER_STATE["lastCheckedAt"] = now.isoformat(timespec="seconds")
         if stock_search_master_refresh_due(now):
             refresh_stock_search_master(trigger="scheduled")
+        if candidate_prefetch_due(now):
+            run_scheduler_candidate_prefetch(now)
         if SIGNAL_SCHEDULER_ENABLED:
             for job in scheduler_jobs():
                 if not job_is_due(job, now):
