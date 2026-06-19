@@ -342,8 +342,12 @@ function statusFallbacks() {
   };
 }
 
-async function loadDashboard() {
-  startActivity("오늘 후보 갱신 중", "국내/해외 후보와 시장 지표를 불러옵니다");
+async function loadDashboard(options = {}) {
+  const forceRefresh = Boolean(options.refresh);
+  startActivity(
+    forceRefresh ? "오늘 후보 갱신 중" : "저장 후보 불러오는 중",
+    forceRefresh ? "국내/해외 후보와 시장 지표를 새로 분석합니다" : "최근 저장된 후보와 시장 지표를 먼저 불러옵니다"
+  );
   state.viewingSnapshot = null;
   const fallbacks = statusFallbacks();
   updateActivity("연결 상태 확인 중", "토스·뉴스·공시·OpenAI 연결 상태를 점검합니다");
@@ -387,8 +391,13 @@ async function loadDashboard() {
   });
 
   try {
-    updateActivity("후보 분석 중", "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다");
-    const dashboard = await fetchJson(`/api/dashboard?mode=${state.mode}`, 30000);
+    updateActivity(
+      forceRefresh ? "후보 분석 중" : "저장 데이터 확인 중",
+      forceRefresh ? "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다" : "DB나 최신 스냅샷에 저장된 후보를 확인합니다"
+    );
+    const params = new URLSearchParams({ mode: state.mode });
+    if (forceRefresh) params.set("refresh", "1");
+    const dashboard = await fetchJson(`/api/dashboard?${params.toString()}`, forceRefresh ? 45000 : 15000);
     await statusPromise;
     state.dashboard = dashboard;
     if (!state.selectedSymbol) {
@@ -1424,7 +1433,11 @@ function renderMarket() {
   const snapshotText = state.viewingSnapshot
     ? `스냅샷 보기: ${modeLabel(state.viewingSnapshot.mode)} · ${timeLabel(state.viewingSnapshot.createdAt)}`
     : "";
-  els.marketNote.textContent = [snapshotText, market.note, fxText, indexText].filter(Boolean).join(" ");
+  const cache = state.dashboard?.cache ?? {};
+  const cacheText = cache.cached
+    ? `저장본: ${modeLabel(cache.mode || cache.requestedMode)} · ${cache.createdAt ? timeLabel(cache.createdAt) : "시간 미확인"}${cache.fallbackError ? " · 실시간 갱신 실패 후 대체" : ""}`
+    : "";
+  els.marketNote.textContent = [cacheText, snapshotText, market.note, fxText, indexText].filter(Boolean).join(" ");
 }
 
 function renderMetrics() {
@@ -1546,7 +1559,11 @@ function renderMetrics() {
     const detail = scanned
       ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${sourceReliabilityText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
-    els.candidateSource.textContent = `${sourceLabel}${detail}`;
+    const cache = state.dashboard?.cache ?? {};
+    const cacheText = cache.cached
+      ? `${cache.source === "discovery_latest" ? "저장 발굴본" : "저장 스냅샷"}${cache.createdAt ? ` · ${timeLabel(cache.createdAt)}` : ""}`
+      : "";
+    els.candidateSource.textContent = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
   }
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
   els.metricHighScore.textContent = summary.highScoreCount ?? 0;
@@ -4151,7 +4168,7 @@ els.refreshButton.addEventListener("click", () => {
     loadPerformance();
     return;
   }
-  loadDashboard();
+  loadDashboard({ refresh: true });
 });
 
 async function refreshSchedulerStatusOnly() {

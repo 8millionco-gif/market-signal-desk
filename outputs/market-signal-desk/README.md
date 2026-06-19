@@ -375,6 +375,8 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 
 성과 검증이 실행되면 저장된 스냅샷 후보의 기준가와 현재가를 비교하고, 연결된 후보 풀 종목에는 관측 횟수, 승률, 평균 변화율, 최근 성과가 누적됩니다. 이 값은 같은 종목을 다시 볼지, 더 낮출지 판단하는 보조 신호이며 단독 매수 신호로 쓰지 않습니다.
 
+웹 화면의 기본 `/api/dashboard` 조회는 DB의 최신 발굴 결과 또는 스냅샷을 먼저 사용합니다. 외부 API 지연으로 화면이 비는 것을 줄이기 위한 읽기 전용 경로이며, 새 후보 분석을 강제로 실행하려면 `/api/dashboard?mode=close&refresh=1` 또는 화면의 새로고침 버튼을 사용합니다.
+
 ```powershell
 $env:SIGNAL_CANDIDATE_POOL_ENABLED="1"
 $env:SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT="8"

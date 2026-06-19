@@ -1021,6 +1021,50 @@ def db_snapshot_detail(run_id: str) -> dict | None:
         return None
 
 
+def db_latest_snapshot_detail(mode: str | None = None) -> dict | None:
+    if not ensure_database_schema():
+        return None
+    try:
+        psycopg, _jsonb = psycopg_modules()
+        params: tuple = ()
+        where_clause = ""
+        if mode:
+            where_clause = "WHERE mode = %s"
+            params = (mode,)
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT payload
+                    FROM signal_snapshots
+                    {where_clause}
+                    ORDER BY created_at DESC, updated_at DESC
+                    LIMIT 1
+                    """,
+                    params,
+                )
+                row = cur.fetchone()
+        if not row:
+            set_db_error("")
+            return None
+        snapshot = normalize_db_payload(row[0], {})
+        if not isinstance(snapshot, dict):
+            return None
+        record = {
+            "id": snapshot.get("id", ""),
+            "mode": snapshot.get("mode"),
+            "trigger": snapshot.get("trigger"),
+            "createdAt": snapshot.get("createdAt"),
+            "file": "database",
+            "summary": snapshot.get("summary", {}),
+        }
+        set_db_error("")
+        return {"record": record, "dashboard": snapshot.get("dashboard", {})}
+    except Exception as error:
+        set_db_error(error)
+        return None
+
+
 def database_status() -> dict:
     enabled = database_storage_enabled()
     ready = ensure_database_schema() if enabled else False
@@ -8992,6 +9036,99 @@ def scheduler_snapshot_detail(run_id: str) -> dict | None:
     }
 
 
+def latest_file_snapshot_detail(mode: str | None = None) -> dict | None:
+    if not RUNS_DIR.exists():
+        return None
+    for path in sorted(RUNS_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            snapshot = read_json(path, {})
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        if mode and str(snapshot.get("mode", "")) != mode:
+            continue
+        dashboard_payload = snapshot.get("dashboard", {})
+        if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+            continue
+        return {
+            "record": scheduler_record_from_snapshot(path, snapshot),
+            "dashboard": dashboard_payload,
+        }
+    return None
+
+
+def latest_scheduler_snapshot_detail(mode: str | None = None) -> dict | None:
+    if database_storage_enabled():
+        detail = db_latest_snapshot_detail(mode)
+        if detail is not None:
+            return detail
+        if DB_LAST_ERROR:
+            file_detail = latest_file_snapshot_detail(mode)
+            if file_detail is not None:
+                return file_detail
+    return latest_file_snapshot_detail(mode)
+
+
+def cached_dashboard_detail(mode: str) -> dict | None:
+    latest_discovery = discovery_latest_record(include_dashboard=True)
+    if isinstance(latest_discovery, dict):
+        discovery_dashboard = latest_discovery.get("dashboard", {})
+        if (
+            isinstance(discovery_dashboard, dict)
+            and discovery_dashboard
+            and str(latest_discovery.get("mode", "")) == mode
+        ):
+            return {
+                "source": "discovery_latest",
+                "record": {key: value for key, value in latest_discovery.items() if key != "dashboard"},
+                "dashboard": discovery_dashboard,
+            }
+
+    scheduler_detail = latest_scheduler_snapshot_detail(mode)
+    if isinstance(scheduler_detail, dict) and isinstance(scheduler_detail.get("dashboard"), dict):
+        return {"source": "snapshot", **scheduler_detail}
+
+    if isinstance(latest_discovery, dict):
+        discovery_dashboard = latest_discovery.get("dashboard", {})
+        if isinstance(discovery_dashboard, dict) and discovery_dashboard:
+            return {
+                "source": "discovery_latest",
+                "record": {key: value for key, value in latest_discovery.items() if key != "dashboard"},
+                "dashboard": discovery_dashboard,
+            }
+
+    fallback_detail = latest_scheduler_snapshot_detail(None)
+    if isinstance(fallback_detail, dict) and isinstance(fallback_detail.get("dashboard"), dict):
+        return {"source": "snapshot", **fallback_detail}
+    return None
+
+
+def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
+    detail = cached_dashboard_detail(mode)
+    if not detail:
+        return None
+    dashboard_payload = detail.get("dashboard")
+    if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+        return None
+    record = detail.get("record", {}) if isinstance(detail.get("record"), dict) else {}
+    payload = copy.deepcopy(dashboard_payload)
+    payload["cache"] = {
+        "cached": True,
+        "source": detail.get("source", "snapshot"),
+        "requestedMode": mode,
+        "mode": record.get("mode") or payload.get("mode", ""),
+        "id": record.get("id", ""),
+        "createdAt": record.get("createdAt", payload.get("generatedAt", "")),
+        "fallbackError": fallback_error,
+    }
+    if isinstance(payload.get("summary"), dict):
+        payload["summary"]["dashboardCacheSource"] = payload["cache"]["source"]
+        payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
+        payload["summary"]["dashboardCacheFallbackError"] = fallback_error
+    return payload
+
+
 def current_price_lookup(symbols: list[str]) -> tuple[dict[str, dict], dict]:
     unique = unique_symbols(symbols)
     seed_lookup = {
@@ -9917,7 +10054,20 @@ class AppHandler(BaseHTTPRequestHandler):
             mode = query.get("mode", ["close"])[0]
             if mode not in {"close", "preopen", "intraday"}:
                 mode = "close"
-            self.send_json(dashboard(mode))
+            force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
+            if not force_refresh:
+                cached_payload = cached_dashboard_payload(mode)
+                if cached_payload is not None:
+                    self.send_json(cached_payload)
+                    return
+            try:
+                self.send_json(dashboard(mode))
+            except Exception as error:
+                cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
+                if cached_payload is not None:
+                    self.send_json(cached_payload)
+                    return
+                raise
             return
 
         if parsed.path.startswith("/api/signals/"):
