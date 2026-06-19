@@ -3266,6 +3266,7 @@ function renderStorageStatus() {
   const counts = database.counts ?? {};
   const rawEvents = status.rawEvents ?? {};
   const candidateData = status.candidateData ?? {};
+  const marketData = status.marketData ?? {};
   const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
@@ -3284,7 +3285,7 @@ function renderStorageStatus() {
       : "대기"
     : "꺼짐";
   const recordText = counts.snapshotCount != null
-    ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0} · 데이터 ${counts.candidateDataCount ?? 0}`
+    ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0} · 데이터 ${counts.candidateDataCount ?? 0} · 최신 ${counts.marketDataLatestCount ?? 0}`
     : "-";
   const rawSourceText = rawEvents.bySource && Object.keys(rawEvents.bySource).length
     ? Object.entries(rawEvents.bySource)
@@ -3295,6 +3296,16 @@ function renderStorageStatus() {
   const rawEventText = rawEvents.enabled
     ? `${rawEvents.count ?? 0}건${rawSourceText ? ` · ${rawSourceText}` : ""}`
     : "꺼짐";
+  const marketSourceText = marketData.bySource && Object.keys(marketData.bySource).length
+    ? Object.entries(marketData.bySource)
+        .slice(0, 3)
+        .map(([source, count]) => `${source} ${count}`)
+        .join(" · ")
+    : "";
+  const marketDataText = marketData.enabled
+    ? `${marketData.itemCount ?? 0}개${marketSourceText ? ` · ${marketSourceText}` : ""}`
+    : "꺼짐";
+  const marketLatestText = marketData.latestAt ? timeLabel(marketData.latestAt) : "-";
   const candidateDataText = candidateData.enabled
     ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.storage ?? "-"}`
     : "꺼짐";
@@ -3315,6 +3326,8 @@ function renderStorageStatus() {
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
+    ["최신 수집값", Boolean(marketData.enabled && Number(marketData.itemCount ?? 0) > 0), marketDataText],
+    ["최신값 갱신", Boolean(marketData.latestAt), marketLatestText],
     ["후보 데이터", Boolean(candidateData.enabled && Number(candidateData.itemCount ?? 0) > 0), candidateDataText],
     ["진입 데이터", Boolean(Number(candidateData.entryReadyCount ?? 0) > 0), candidateReadyText],
     ["누락 항목", candidateMissingText === "누락 없음", candidateMissingText],

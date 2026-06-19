@@ -38,6 +38,7 @@ DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard-cache.json"
 RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
+MARKET_DATA_LATEST_FILE = DATA_DIR / "market-data-latest.json"
 LIVE_STATE_FILE = DATA_DIR / "live-state.json"
 CANDIDATE_DATA_FILE = DATA_DIR / "candidate-data-snapshots.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
@@ -48,6 +49,9 @@ SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "500"))
 SIGNAL_RAW_EVENT_PAYLOAD_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_PAYLOAD_LIMIT", "40"))
+SIGNAL_MARKET_DATA_LATEST_ENABLED = os.getenv("SIGNAL_MARKET_DATA_LATEST_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = int(os.getenv("SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS", "2000"))
+MARKET_DATA_LATEST_KV_KEY = "market_data_latest"
 SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH = os.getenv("SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS = int(os.getenv("SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS", "86400"))
 STOCK_SEARCH_MASTER_KV_KEY = "stock_search_master"
@@ -235,6 +239,7 @@ CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
 RAW_EVENT_LOCK = threading.Lock()
+MARKET_DATA_LOCK = threading.Lock()
 LIVE_STATE_LOCK = threading.Lock()
 CANDIDATE_DATA_LOCK = threading.Lock()
 STOCK_SEARCH_MASTER_LOCK = threading.Lock()
@@ -258,6 +263,13 @@ RAW_EVENT_STATE: dict[str, object] = {
     "lastSource": "",
     "lastEventType": "",
     "lastStorage": "",
+    "lastError": "",
+}
+MARKET_DATA_LATEST_STATE: dict[str, object] = {
+    "enabled": SIGNAL_MARKET_DATA_LATEST_ENABLED,
+    "lastUpdatedAt": "",
+    "lastStorage": "",
+    "lastCount": 0,
     "lastError": "",
 }
 STOCK_SEARCH_MASTER_STATE: dict[str, object] = {
@@ -468,12 +480,20 @@ def db_storage_counts() -> dict:
                 pool_row = cur.fetchone()
                 cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (CANDIDATE_DATA_KV_KEY,))
                 candidate_data_row = cur.fetchone()
+                cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (MARKET_DATA_LATEST_KV_KEY,))
+                market_data_row = cur.fetchone()
         pool_payload = normalize_db_payload(pool_row[0], {}) if pool_row else {}
         pool_items = pool_payload.get("items", {}) if isinstance(pool_payload, dict) and isinstance(pool_payload.get("items"), dict) else {}
         candidate_data_payload = normalize_db_payload(candidate_data_row[0], {}) if candidate_data_row else {}
         candidate_data_items = (
             candidate_data_payload.get("items", {})
             if isinstance(candidate_data_payload, dict) and isinstance(candidate_data_payload.get("items"), dict)
+            else {}
+        )
+        market_data_payload = normalize_db_payload(market_data_row[0], {}) if market_data_row else {}
+        market_data_items = (
+            market_data_payload.get("items", {})
+            if isinstance(market_data_payload, dict) and isinstance(market_data_payload.get("items"), dict)
             else {}
         )
         active_pool = len([
@@ -489,6 +509,7 @@ def db_storage_counts() -> dict:
             "candidatePoolCount": len(pool_items),
             "candidatePoolActiveCount": active_pool,
             "candidateDataCount": len(candidate_data_items),
+            "marketDataLatestCount": len(market_data_items),
         }
     except Exception as error:
         set_db_error(error)
@@ -846,6 +867,346 @@ def file_write_raw_event(event: dict) -> bool:
             return False
 
 
+def market_data_latest_empty() -> dict:
+    return {"version": 1, "updatedAt": "", "items": {}, "summary": {}}
+
+
+def market_data_latest_data() -> dict:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return market_data_latest_empty()
+    stored = db_read_kv(MARKET_DATA_LATEST_KV_KEY, None) if database_storage_enabled() else None
+    file_data = safe_read_json_file(MARKET_DATA_LATEST_FILE)
+    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else market_data_latest_empty()
+    if not isinstance(data, dict):
+        return market_data_latest_empty()
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    if not isinstance(data.get("summary"), dict):
+        data["summary"] = {}
+    return data
+
+
+def market_data_latest_write(data: dict) -> tuple[bool, str]:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return False, "disabled"
+    payload = live_state_json_safe(data)
+    if database_storage_enabled() and db_write_kv(MARKET_DATA_LATEST_KV_KEY, payload):
+        return True, "postgres"
+    write_json(MARKET_DATA_LATEST_FILE, payload)
+    return True, "filesystem-fallback" if database_storage_enabled() else "filesystem"
+
+
+def market_data_latest_key(source: str, event_type: str, symbol: str = "", query: str = "") -> str:
+    symbol = str(symbol or "").strip().upper()
+    if symbol:
+        return f"{source}:{event_type}:{symbol}"
+    query = str(query or "").strip()
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16] if query else "global"
+    return f"{source}:{event_type}:{digest}"
+
+
+def payload_result_rows(payload: object) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if isinstance(result, dict):
+        rows = result.get("items") or result.get("data") or result.get("list")
+        if isinstance(rows, list):
+            return [item for item in rows if isinstance(item, dict)]
+    return []
+
+
+def payload_symbol(value: dict) -> str:
+    for key in ("symbol", "ticker", "code", "stockCode", "isuSrtCd", "itemCode"):
+        symbol = str(value.get(key, "")).strip().upper()
+        if symbol:
+            return symbol
+    return ""
+
+
+def market_data_records_from_event(event: dict) -> list[tuple[str, dict]]:
+    source = str(event.get("source", "unknown")).strip().lower() or "unknown"
+    event_type = str(event.get("eventType", "raw")).strip().lower() or "raw"
+    symbol = str(event.get("symbol", "")).strip().upper()
+    query = str(event.get("query", "")).strip()
+    payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) and isinstance(payload.get("metadata"), dict) else {}
+    collected_at = str(event.get("collectedAt", ""))
+    base_record = {
+        "source": source,
+        "eventType": event_type,
+        "symbol": symbol,
+        "query": query,
+        "collectedAt": collected_at,
+        "rawEventId": event.get("id", ""),
+        "metadata": metadata,
+        "payload": payload,
+    }
+    records: list[tuple[str, dict]] = [(market_data_latest_key(source, event_type, symbol, query), base_record)]
+
+    for row in payload_result_rows(data):
+        row_symbol = payload_symbol(row)
+        if not row_symbol:
+            continue
+        record = {
+            **base_record,
+            "symbol": row_symbol,
+            "payload": {
+                "data": row,
+                "metadata": metadata,
+            },
+        }
+        records.append((market_data_latest_key(source, event_type, row_symbol, ""), record))
+    return records
+
+
+def trim_market_data_latest_items(items: dict) -> dict:
+    if len(items) <= SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS:
+        return items
+    ranked = sorted(
+        items.items(),
+        key=lambda pair: str(pair[1].get("collectedAt", "")) if isinstance(pair[1], dict) else "",
+        reverse=True,
+    )
+    return dict(ranked[: max(1, SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS)])
+
+
+def update_market_data_latest(event: dict) -> dict:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return {"enabled": False, "stored": False, "storage": "disabled", "updatedCount": 0}
+    records = market_data_records_from_event(event)
+    if not records:
+        return {"enabled": True, "stored": False, "storage": "", "updatedCount": 0}
+    with MARKET_DATA_LOCK:
+        data = market_data_latest_data()
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        for key, record in records:
+            previous = items.get(key, {}) if isinstance(items.get(key), dict) else {}
+            items[key] = {
+                **previous,
+                **record,
+                "updatedAt": event.get("collectedAt", datetime.now(KST).isoformat(timespec="seconds")),
+                "observations": int(previous.get("observations", 0) or 0) + 1,
+            }
+        data["items"] = trim_market_data_latest_items(items)
+        data["updatedAt"] = datetime.now(KST).isoformat(timespec="seconds")
+        by_source: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        for item in data["items"].values():
+            if not isinstance(item, dict):
+                continue
+            item_source = str(item.get("source", "unknown"))
+            item_type = str(item.get("eventType", "raw"))
+            by_source[item_source] = by_source.get(item_source, 0) + 1
+            by_type[item_type] = by_type.get(item_type, 0) + 1
+        data["summary"] = {
+            "itemCount": len(data["items"]),
+            "bySource": by_source,
+            "byType": by_type,
+            "updatedAt": data["updatedAt"],
+        }
+        ok, storage = market_data_latest_write(data)
+    MARKET_DATA_LATEST_STATE.update({
+        "enabled": True,
+        "lastUpdatedAt": data["updatedAt"] if ok else "",
+        "lastStorage": storage if ok else "",
+        "lastCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
+        "lastError": "" if ok else "latest-write-failed",
+    })
+    return {
+        "enabled": True,
+        "stored": ok,
+        "storage": storage,
+        "updatedCount": len(records),
+        "itemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
+        "updatedAt": data.get("updatedAt", ""),
+    }
+
+
+def market_data_latest_status() -> dict:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
+    data = market_data_latest_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+    storage = "postgres" if database_storage_enabled() else "filesystem"
+    if not database_storage_enabled() and MARKET_DATA_LATEST_FILE.exists():
+        storage = "filesystem"
+    return {
+        "enabled": True,
+        "storage": storage,
+        "databaseReady": database_storage_enabled(),
+        "itemCount": len(items),
+        "bySource": summary.get("bySource", {}),
+        "byType": summary.get("byType", {}),
+        "latestAt": data.get("updatedAt", ""),
+        "lastStorage": MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
+        "lastUpdatedAt": MARKET_DATA_LATEST_STATE.get("lastUpdatedAt", ""),
+        "message": "서버가 수집한 최신 원천 데이터를 DB 기준으로 업데이트합니다.",
+    }
+
+
+def stored_market_data_latest_records(source: str = "", event_type: str = "") -> dict[str, dict]:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return {}
+    data = market_data_latest_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    source_filter = str(source or "").strip().lower()
+    type_filter = str(event_type or "").strip().lower()
+    records: dict[str, dict] = {}
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        item_source = str(item.get("source", "")).strip().lower()
+        item_type = str(item.get("eventType", "")).strip().lower()
+        if source_filter and item_source != source_filter:
+            continue
+        if type_filter and item_type != type_filter:
+            continue
+        symbol = str(item.get("symbol", "")).strip().upper()
+        payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+        row = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        row_symbol = payload_symbol(row)
+        normalized = symbol or row_symbol
+        if normalized:
+            previous = records.get(normalized)
+            if not previous or str(item.get("updatedAt") or item.get("collectedAt") or "") >= str(previous.get("updatedAt") or previous.get("collectedAt") or ""):
+                records[normalized] = item
+    return records
+
+
+def market_data_record_payload_row(record: dict) -> dict:
+    payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
+    row = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+    return row
+
+
+def market_data_record_timestamp(record: dict) -> str:
+    row = market_data_record_payload_row(record)
+    return str(
+        row.get("timestamp")
+        or row.get("updatedAt")
+        or record.get("updatedAt")
+        or record.get("collectedAt")
+        or ""
+    )
+
+
+def timestamp_is_newer(left: str, right: str) -> bool:
+    left_dt = parse_iso_datetime(str(left or ""))
+    right_dt = parse_iso_datetime(str(right or ""))
+    if left_dt is None:
+        return False
+    if right_dt is None:
+        return True
+    return left_dt > right_dt
+
+
+def live_price_from_market_data_record(record: dict, fallback_updated_at: str = "") -> dict | None:
+    row = market_data_record_payload_row(record)
+    last_price = row.get("lastPrice")
+    currency = row.get("currency")
+    if last_price in {"", None} or not currency:
+        return None
+    updated_at = str(record.get("updatedAt") or record.get("collectedAt") or fallback_updated_at)
+    live_price = {
+        "lastPrice": str(last_price),
+        "currency": str(currency),
+        "timestamp": row.get("timestamp") or updated_at,
+        "updatedAt": updated_at,
+        "source": "toss",
+        "dataSource": "market_data_latest",
+        "retained": True,
+        "message": "서버 DB에 저장된 최신 토스 현재가를 후보 판단에 반영했습니다.",
+    }
+    change = change_from_toss_price_row(row)
+    if change:
+        live_price["changeSource"] = "market-data-latest"
+    else:
+        live_price["changeSource"] = "pending-change"
+        live_price["changeMessage"] = "DB 최신 가격에는 있으나 등락률 기준가는 추가 확인 중입니다."
+    live_price["freshness"] = live_price_freshness(live_price, updated_at)
+    return live_price
+
+
+def merge_market_data_latest_into_candidates(candidates: list[dict]) -> tuple[list[dict], dict]:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return candidates, {"enabled": False, "mergedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
+    records = stored_market_data_latest_records("toss", "prices")
+    if not records:
+        return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 가격이 아직 없습니다."}
+
+    merged: list[dict] = []
+    merged_count = 0
+    price_merged_count = 0
+    change_merged_count = 0
+    retained_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            merged.append(candidate)
+            continue
+        item = copy.deepcopy(candidate)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        record = records.get(symbol)
+        if not record:
+            merged.append(item)
+            continue
+
+        record_live_price = live_price_from_market_data_record(record, item.get("updated", ""))
+        if record_live_price is None:
+            merged.append(item)
+            continue
+
+        current_live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+        current_timestamp = str(current_live_price.get("timestamp") or current_live_price.get("updatedAt") or "")
+        record_timestamp = market_data_record_timestamp(record)
+        has_current_price = candidate_has_toss_last_price(item)
+        should_merge_price = not has_current_price or timestamp_is_newer(record_timestamp, current_timestamp)
+        if should_merge_price:
+            item["price"] = display_price(str(record_live_price["lastPrice"]), str(record_live_price["currency"]))
+            item["livePrice"] = record_live_price
+            price_merged_count += 1
+        else:
+            retained_count += 1
+
+        row = market_data_record_payload_row(record)
+        change = change_from_toss_price_row(row)
+        if change and (not candidate_data_has_change(item) or should_merge_price):
+            item["change"] = change
+            if isinstance(item.get("livePrice"), dict):
+                item["livePrice"] = {
+                    **item["livePrice"],
+                    "changeSource": "market-data-latest",
+                    "changeMessage": "DB에 저장된 토스 최신 가격 기준 등락률을 반영했습니다.",
+                }
+            change_merged_count += 1
+
+        item["marketDataLatest"] = {
+            "source": "market_data_latest",
+            "eventType": record.get("eventType", ""),
+            "collectedAt": record.get("collectedAt", ""),
+            "updatedAt": record.get("updatedAt", ""),
+            "ageSeconds": seconds_since_timestamp(record_timestamp),
+            "message": "서버가 수집해 저장한 최신 원천 가격을 우선 반영했습니다.",
+        }
+        merged_count += 1
+        merged.append(item)
+
+    return merged, {
+        "enabled": True,
+        "source": "market_data_latest",
+        "mergedCount": merged_count,
+        "priceMergedCount": price_merged_count,
+        "changeMergedCount": change_merged_count,
+        "retainedCount": retained_count,
+        "availableCount": len(records),
+        "message": f"DB 최신 토스 가격 {merged_count}개를 후보 판단에 반영했습니다.",
+    }
+
+
 def write_raw_event(
     source: str,
     event_type: str,
@@ -889,7 +1250,8 @@ def write_raw_event(
         "lastStorage": storage if stored else "",
         "lastError": "" if stored else str(RAW_EVENT_STATE.get("lastError", "")),
     })
-    return {"stored": stored, "storage": storage, "id": event["id"]}
+    latest = update_market_data_latest(event) if stored else {"stored": False, "updatedCount": 0}
+    return {"stored": stored, "storage": storage, "id": event["id"], "latest": latest}
 
 
 def db_raw_event_counts() -> dict:
@@ -9922,6 +10284,7 @@ def dashboard_status_defaults() -> dict:
         },
         "candidate_pool": candidate_pool_summary(),
         "candidate_data": candidate_data_snapshot_status(),
+        "market_data_latest": market_data_latest_status(),
     }
 
 
@@ -9946,6 +10309,7 @@ def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
     portfolio = safe_portfolio_status()
     raw_candidates, discovery_status = initial_candidates(data, watched, mode, force_discovery=force_discovery)
     candidates = [decorate_candidate(item, watched) for item in raw_candidates]
+    candidates, market_data_merge_status = merge_market_data_latest_into_candidates(candidates)
     defaults = dashboard_status_defaults()
     return {
         "mode": mode,
@@ -9968,6 +10332,8 @@ def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
             },
             "discovery": discovery_status,
             "candidate_pool": discovery_status.get("candidatePool") or defaults.get("candidate_pool", {}),
+            "market_data_latest": market_data_latest_status(),
+            "market_data_merge": market_data_merge_status,
         },
         "pipeline": [
             pipeline_step(
@@ -9976,6 +10342,13 @@ def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
                 "ok",
                 discovery_status.get("message", "후보와 시장 데이터를 수집했습니다."),
                 len(candidates),
+            ),
+            pipeline_step(
+                "storage",
+                "DB 최신 가격 반영",
+                "ok" if market_data_merge_status.get("mergedCount", 0) else "fallback",
+                market_data_merge_status.get("message", "DB 최신 토스 가격을 확인했습니다."),
+                market_data_merge_status.get("mergedCount", 0),
             )
         ],
     }
@@ -10076,6 +10449,7 @@ def score_signal_context(context: dict) -> dict:
         mode=context["mode"],
         stage="selected",
     )
+    context["statuses"]["market_data_latest"] = market_data_latest_status()
     context["pipeline"].append(
         pipeline_step(
             "scorer",
@@ -10101,6 +10475,15 @@ def score_signal_context(context: dict) -> dict:
             "ok" if context["statuses"]["candidate_data"].get("stored", False) else "fallback",
             context["statuses"]["candidate_data"].get("message", "후보별 수신 데이터 묶음을 저장했습니다."),
             context["statuses"]["candidate_data"].get("storedCount", 0),
+        )
+    )
+    context["pipeline"].append(
+        pipeline_step(
+            "storage",
+            "원천 최신값 저장",
+            "ok" if context["statuses"]["market_data_latest"].get("itemCount", 0) else "fallback",
+            context["statuses"]["market_data_latest"].get("message", "수집 원천 데이터를 최신값 저장소에 반영했습니다."),
+            context["statuses"]["market_data_latest"].get("itemCount", 0),
         )
     )
     return context
@@ -10180,6 +10563,8 @@ def build_dashboard_payload(context: dict) -> dict:
     discovery_status = context["statuses"]["discovery"]
     selection_status = context["statuses"]["selection"]
     pool_status = context["statuses"].get("candidate_pool", candidate_pool_summary())
+    market_data_status = context["statuses"].get("market_data_latest", market_data_latest_status())
+    market_data_merge_status = context["statuses"].get("market_data_merge", {})
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         "mode": context["mode"],
@@ -10295,6 +10680,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "verifyDecisionCount": selection_status.get("verifyDecisionCount"),
             "portfolioLinkedCandidateCount": context["statuses"].get("portfolio", {}).get("linkedCandidateCount", 0),
             "portfolioHoldingCount": context["statuses"].get("portfolio", {}).get("holdingCount", 0),
+            "marketDataLatestCount": market_data_status.get("itemCount"),
+            "marketDataLatestAt": market_data_status.get("latestAt"),
+            "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),
+            "marketDataPriceMergedCount": market_data_merge_status.get("priceMergedCount", 0),
+            "marketDataChangeMergedCount": market_data_merge_status.get("changeMergedCount", 0),
             "investableCandidateCount": selection_status.get("investableCandidateCount"),
             "watchCandidateCount": selection_status.get("watchCandidateCount"),
             "deferCandidateCount": selection_status.get("deferCandidateCount"),
@@ -10308,6 +10698,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "discovery": discovery_status,
             "selection": selection_status,
             "candidatePool": pool_status,
+            "marketDataLatest": market_data_status,
+            "marketDataMerge": market_data_merge_status,
             "portfolio": context["statuses"].get("portfolio", {}),
             "toss": {
                 "config": toss_config_status(),
@@ -10698,6 +11090,7 @@ def snapshot_storage_status() -> dict:
     db_status = database_status()
     raw_events = raw_event_storage_status()
     candidate_data = candidate_data_snapshot_status()
+    market_data = market_data_latest_status()
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         return {
@@ -10713,7 +11106,8 @@ def snapshot_storage_status() -> dict:
             "database": db_status,
             "rawEvents": raw_events,
             "candidateData": candidate_data,
-            "message": "Postgres DB에 스냅샷과 후보 풀을 저장합니다.",
+            "marketData": market_data,
+            "message": "Postgres DB에 스냅샷, 후보 풀, 최신 수집값을 저장합니다.",
             "error": "",
         }
 
@@ -10743,6 +11137,7 @@ def snapshot_storage_status() -> dict:
         "database": db_status,
         "rawEvents": raw_events,
         "candidateData": candidate_data,
+        "marketData": market_data,
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
@@ -10972,6 +11367,7 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
             [item for item in candidates if isinstance(item, dict)],
             mode,
         )
+        merged_candidates, market_data_merge = merge_market_data_latest_into_candidates(merged_candidates)
         merge_by_symbol = {
             str(item.get("symbol", "")).strip().upper(): item
             for item in merged_candidates
@@ -10996,6 +11392,7 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     else:
         freshness_counts = {}
         candidate_data_merge = {"mergedCount": 0}
+        market_data_merge = {"mergedCount": 0}
     payload["cache"] = {
         "cached": True,
         "source": detail.get("source", "snapshot"),
@@ -11011,8 +11408,12 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
         payload["summary"]["livePriceFreshnessCounts"] = freshness_counts
         payload["summary"]["candidateDataMergedCount"] = candidate_data_merge.get("mergedCount", 0)
+        payload["summary"]["marketDataMergedCount"] = market_data_merge.get("mergedCount", 0)
+        payload["summary"]["marketDataPriceMergedCount"] = market_data_merge.get("priceMergedCount", 0)
     integrations = payload.get("integrations", {}) if isinstance(payload.get("integrations"), dict) else {}
     integrations["candidateDataMerge"] = candidate_data_merge
+    integrations["marketDataMerge"] = market_data_merge
+    integrations["marketDataLatest"] = market_data_latest_status()
     payload["integrations"] = integrations
     return payload
 
@@ -11031,6 +11432,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     market = copy.deepcopy(data.get("market", {}))
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
     candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
     candidates = sort_candidates_for_mode(candidates, mode)
@@ -11078,6 +11480,8 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
             "selection": selection_status,
             "candidate_pool": pool_status,
             "candidate_data_merge": candidate_data_merge,
+            "market_data_latest": market_data_latest_status(),
+            "market_data_merge": market_data_merge,
         },
         "pipeline": [
             pipeline_step(
@@ -11093,6 +11497,13 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
                 "ok" if candidate_data_merge.get("mergedCount", 0) else "fallback",
                 candidate_data_merge.get("message", "저장된 후보별 토스 데이터를 확인했습니다."),
                 candidate_data_merge.get("mergedCount", 0),
+            ),
+            pipeline_step(
+                "storage",
+                "DB 최신 가격 반영",
+                "ok" if market_data_merge.get("mergedCount", 0) else "fallback",
+                market_data_merge.get("message", "DB 최신 토스 가격을 확인했습니다."),
+                market_data_merge.get("mergedCount", 0),
             ),
             pipeline_step(
                 "scorer",
@@ -11253,6 +11664,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         if isinstance(item, dict) and str(item.get("symbol", "")).strip()
     ]
     base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode)
+    base_candidates, market_data_merge_status = merge_market_data_latest_into_candidates(base_candidates)
     base_candidates, live_state_status = merge_live_state_into_candidates(base_candidates, mode)
     requested = unique_symbols(symbols)
     has_requested_symbols = bool(requested)
@@ -11282,7 +11694,11 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
             "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
             "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
             "candidates": [],
-            "summary": {"candidateCount": 0, "livePriceUpdatedAt": datetime.now(KST).isoformat(timespec="seconds")},
+            "summary": {
+                "candidateCount": 0,
+                "livePriceUpdatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+                "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),
+            },
             "message": "갱신할 후보가 없습니다.",
         }
 
@@ -11314,6 +11730,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     candidates = sort_candidates_for_mode(candidates, mode)
     live_state_write_status = update_live_state_from_candidates(candidates, mode)
     candidate_data_status = update_candidate_data_snapshots(candidates, mode, stage="live-price")
+    market_data_status = market_data_latest_status()
     freshness_counts = live_price_freshness_counts(candidates)
     summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
     summary.update({
@@ -11322,6 +11739,11 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "livePriceRefreshedCount": len(candidates),
         "liveStateMergedCount": live_state_status.get("mergedCount", 0),
         "candidateDataMergedCount": candidate_data_merge_status.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),
+        "marketDataPriceMergedCount": market_data_merge_status.get("priceMergedCount", 0),
+        "marketDataChangeMergedCount": market_data_merge_status.get("changeMergedCount", 0),
+        "marketDataLatestCount": market_data_status.get("itemCount", 0),
+        "marketDataLatestAt": market_data_status.get("latestAt", ""),
         "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
@@ -11338,9 +11760,11 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "refreshedCount": len(candidates),
         "freshnessCounts": freshness_counts,
         "candidateDataRead": candidate_data_merge_status,
+        "marketDataRead": market_data_merge_status,
         "stateRead": live_state_status,
         "stateWrite": live_state_write_status,
         "candidateData": candidate_data_status,
+        "marketDataLatest": market_data_status,
         "updatedAt": summary["livePriceUpdatedAt"],
     }
     toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}
@@ -11352,6 +11776,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "trades": trade_status,
     })
     integrations["toss"] = toss_status
+    integrations["marketDataMerge"] = market_data_merge_status
+    integrations["marketDataLatest"] = market_data_status
     return {
         "mode": mode,
         "source": "live-price",
