@@ -12537,6 +12537,43 @@ def score_signal_context(context: dict) -> dict:
 
 
 def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
+    def data_readiness_rank(item: dict) -> int:
+        evaluation = item.get("evaluationMode", {}) if isinstance(item, dict) else {}
+        readiness = item.get("priceReadiness", {}) if isinstance(item, dict) else {}
+        key = str(
+            (evaluation.get("key") if isinstance(evaluation, dict) else "")
+            or (readiness.get("key") if isinstance(readiness, dict) else "")
+            or "collecting"
+        )
+        base = {
+            "entry_ready": 130,
+            "closed_baseline": 112 if mode in {"close", "preopen"} else 78,
+            "display_ready": 100 if mode in {"close", "preopen"} else 88,
+            "collecting_change": 42,
+            "change_wait": 42,
+            "collecting_price": 24,
+            "price_wait": 24,
+            "collecting": 18,
+            "unavailable": 0,
+        }.get(key, 18)
+        blockers = []
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("blockerReasons"), list):
+            blockers = [str(value) for value in evaluation.get("blockerReasons", [])]
+        elif isinstance(readiness, dict) and isinstance(readiness.get("blockerReasons"), list):
+            blockers = [str(value) for value in readiness.get("blockerReasons", [])]
+        blocker_text = " ".join(blockers)
+        if "가격 미수신" in blocker_text:
+            base -= 24
+        if "등락률" in blocker_text:
+            base -= 12
+        if "응답 없음" in blocker_text:
+            base -= 10
+        if "후보 제한" in blocker_text:
+            base -= 8
+        if "장 시간 외" in blocker_text and mode in {"close", "preopen"}:
+            base += 10
+        return bounded_int(base, 0, 140)
+
     def compression_rank(item: dict) -> int:
         compression = item.get("candidateCompression", {}) if isinstance(item, dict) else {}
         tier = str(compression.get("tier", "")) if isinstance(compression, dict) else ""
@@ -12573,11 +12610,11 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
 
     if mode == "preopen":
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
     elif mode == "intraday":
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
+        candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
     else:
-        candidates.sort(key=lambda item: (compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item), candidate_pool_decision_bonus(item)), reverse=True)
+        candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item), candidate_pool_decision_bonus(item)), reverse=True)
     return candidates
 
 

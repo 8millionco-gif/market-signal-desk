@@ -2082,6 +2082,8 @@ function sortCandidatesForStrategy(candidates = [], strategy = "action") {
 }
 
 function compareCandidatesForAction(a, b) {
+  const readinessDiff = dataReadinessPriority(a) - dataReadinessPriority(b);
+  if (readinessDiff !== 0) return readinessDiff;
   const compressionDiff = compressionPriority(a) - compressionPriority(b);
   if (compressionDiff !== 0) return compressionDiff;
   const priorityDiff = actionPriority(a) - actionPriority(b);
@@ -2091,6 +2093,31 @@ function compareCandidatesForAction(a, b) {
   const decisionDiff = Number(decisionGroupForDisplay(b).score ?? 0) - Number(decisionGroupForDisplay(a).score ?? 0);
   if (decisionDiff !== 0) return decisionDiff;
   return Number(b.totalScore ?? 0) - Number(a.totalScore ?? 0);
+}
+
+function dataReadinessPriority(item) {
+  const evaluation = evaluationModeForDisplay(item);
+  const key = evaluation.key || "collecting";
+  let priority = {
+    entry_ready: 0,
+    closed_baseline: state.mode === "close" || state.mode === "preopen" ? 1 : 3,
+    display_ready: state.mode === "close" || state.mode === "preopen" ? 2 : 2,
+    collecting_change: 5,
+    change_wait: 5,
+    collecting_price: 7,
+    price_wait: 7,
+    collecting: 8,
+    unavailable: 10
+  }[key] ?? 8;
+  const blockers = Array.isArray(evaluation.blockerReasons) ? evaluation.blockerReasons.join(" ") : "";
+  if (blockers.includes("가격 미수신")) priority += 3;
+  if (blockers.includes("등락률")) priority += 1;
+  if (blockers.includes("응답 없음")) priority += 1;
+  if (blockers.includes("후보 제한")) priority += 1;
+  if (blockers.includes("장 시간 외") && (state.mode === "close" || state.mode === "preopen")) {
+    priority = Math.max(0, priority - 1);
+  }
+  return priority;
 }
 
 function compressionPriority(item) {
