@@ -3711,48 +3711,7 @@ function renderDetail() {
       ${newsSignalSection(item)}
       ${priceReactionSection(item)}
       ${tradePlanSection(item)}
-      ${officialSignalSection(item)}
-
-      ${riskDecisionSection(item)}
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">근거</p>
-          <h2>확인한 출처</h2>
-        </div>
-        <ul class="source-list">
-          ${item.sources
-            .slice(0, 6)
-            .map(
-              (source) => `
-                <li>
-                  <strong>${escapeHtml(source.title)}</strong>
-                  <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
-                </li>
-              `
-            )
-            .join("")}
-        </ul>
-      </section>
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">연관 종목</p>
-          <h2>같이 볼 대상</h2>
-        </div>
-        <ul class="related-list">
-          ${item.related
-            .map(
-              (related) => `
-                <li>
-                  <strong>${escapeHtml(related.name)} <span class="${changeClass(related.change)}">${escapeHtml(related.change)}</span></strong>
-                  <span>${escapeHtml(related.symbol)} · ${escapeHtml(related.relation)}</span>
-                </li>
-              `
-            )
-            .join("")}
-        </ul>
-      </section>
+      ${supportingDetailSection(item)}
     </div>
   `;
 
@@ -4237,6 +4196,122 @@ function riskDecisionSection(item) {
         </div>
       </div>
     </section>
+  `;
+}
+
+function supportingDetailSection(item) {
+  const signal = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
+  const officialItems = Array.isArray(signal.items) ? signal.items.slice(0, 4) : [];
+  const sources = Array.isArray(item.sources) ? item.sources.slice(0, 6) : [];
+  const related = Array.isArray(item.related) ? item.related : [];
+  const entry = uniqueTexts(item.entryConditions, 3);
+  const noEntry = uniqueTexts(item.noEntry, 3);
+  const stopRules = uniqueTexts(item.stopRules, 3);
+  return `
+    <details class="detail-section support-detail-section">
+      <summary>
+        <span>
+          <em>추가 확인</em>
+          <strong>공시·출처·연관 종목</strong>
+        </span>
+        <b>펼치기</b>
+      </summary>
+      <div class="support-grid">
+        <div class="support-block">
+          <div class="section-title">
+            <p class="eyebrow">공식 이벤트</p>
+            <h2>${escapeHtml(signal.summary || "공시 확인")}</h2>
+          </div>
+          <div class="stat-grid">
+            ${statCard("공시 수", signal.count ? `${signal.count}건` : "-")}
+            ${statCard("리스크", signal.riskCount != null ? `${signal.riskCount}건` : "-")}
+          </div>
+          <ul class="source-list official-event-list">
+            ${
+              officialItems.length
+                ? officialItems
+                    .map(
+                      (event) => `
+                        <li class="official-tone-${escapeHtml(event.eventTone || "neutral")}">
+                          <strong>${escapeHtml(event.eventLabel || officialToneText(event.eventTone))} · ${escapeHtml(event.reportName || "-")}</strong>
+                          <span>${escapeHtml(event.receivedDate || "-")}${event.url ? " · OpenDART" : ""}</span>
+                        </li>
+                      `
+                    )
+                    .join("")
+                : `<li><strong>공시 이벤트 없음</strong><span>현재 후보와 연결된 주요 공시가 없습니다.</span></li>`
+            }
+          </ul>
+        </div>
+
+        <div class="support-block">
+          <div class="section-title">
+            <p class="eyebrow">판단 기준</p>
+            <h2>진입 전 체크</h2>
+          </div>
+          <div class="compact-checks">
+            <div>
+              <strong>매수 관찰</strong>
+              <ul class="bullet-list entry-list">${entry.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>
+            </div>
+            <div>
+              <strong>제외 조건</strong>
+              <ul class="bullet-list avoid-list">${noEntry.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>
+            </div>
+            <div>
+              <strong>리스크</strong>
+              <ul class="bullet-list risk-list">${stopRules.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="support-block">
+          <div class="section-title">
+            <p class="eyebrow">근거</p>
+            <h2>확인한 출처</h2>
+          </div>
+          <ul class="source-list">
+            ${
+              sources.length
+                ? sources
+                    .map(
+                      (source) => `
+                        <li>
+                          <strong>${escapeHtml(source.title)}</strong>
+                          <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
+                        </li>
+                      `
+                    )
+                    .join("")
+                : `<li><strong>출처 확인 중</strong><span>뉴스 또는 공시 출처가 아직 연결되지 않았습니다.</span></li>`
+            }
+          </ul>
+        </div>
+
+        <div class="support-block">
+          <div class="section-title">
+            <p class="eyebrow">연관 종목</p>
+            <h2>같이 볼 대상</h2>
+          </div>
+          <ul class="related-list">
+            ${
+              related.length
+                ? related
+                    .map(
+                      (entry) => `
+                        <li>
+                          <strong>${escapeHtml(entry.name)} <span class="${changeClass(entry.change)}">${escapeHtml(entry.change)}</span></strong>
+                          <span>${escapeHtml(entry.symbol)} · ${escapeHtml(entry.relation)}</span>
+                        </li>
+                      `
+                    )
+                    .join("")
+                : `<li><strong>연관 종목 없음</strong><span>현재 후보와 연결된 비교 대상이 없습니다.</span></li>`
+            }
+          </ul>
+        </div>
+      </div>
+    </details>
   `;
 }
 
