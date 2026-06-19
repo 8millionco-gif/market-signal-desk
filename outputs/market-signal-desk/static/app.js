@@ -675,6 +675,9 @@ function livePriceSymbols() {
   const candidates = state.dashboard?.candidates ?? [];
   const selected = normalizeLiveSymbol(selectedCandidate()?.symbol || state.selectedSymbol || "");
   const prioritySymbols = priorityLiveSymbols();
+  const visibleSymbols = filteredCandidates()
+    .filter((item) => item?.symbol)
+    .map(candidateLiveSymbol);
   const candidateSymbols = candidates
     .filter((item) => item?.symbol)
     .map(candidateLiveSymbol);
@@ -682,7 +685,7 @@ function livePriceSymbols() {
     .filter((item) => item?.symbol)
     .sort((a, b) => livePricePriority(a) - livePricePriority(b))
     .map(candidateLiveSymbol);
-  return [...new Set([selected, ...prioritySymbols, ...rankedOverflow, ...candidateSymbols].filter(Boolean))]
+  return [...new Set([selected, ...prioritySymbols, ...visibleSymbols, ...rankedOverflow, ...candidateSymbols].filter(Boolean))]
     .slice(0, LIVE_PRICE_SYMBOL_LIMIT);
 }
 
@@ -700,7 +703,7 @@ function candidateNeedsMarketDepth(item) {
 
 function livePriceRefreshDetail(symbols) {
   const selected = selectedCandidate();
-  const topCandidate = (state.dashboard?.candidates ?? [])[0];
+  const topCandidate = filteredCandidates()[0] || (state.dashboard?.candidates ?? [])[0];
   const needsDepth =
     candidateNeedsMarketDepth(selected) ||
     candidateNeedsMarketDepth(topCandidate);
@@ -1221,6 +1224,28 @@ function renderLoadError(error) {
 
 function filteredCandidates() {
   return sortCandidatesForStrategy(applyStrategyFilter(baseFilteredCandidates()), state.strategy);
+}
+
+function selectionLockedByLookup() {
+  return Boolean(state.selectedLookup?.symbol && state.selectedLookup.symbol === state.selectedSymbol);
+}
+
+function selectionFromCandidates(candidates = []) {
+  if (!Array.isArray(candidates) || !candidates.length) return null;
+  if (state.selectedSymbol) {
+    const current = candidates.find((item) => item.symbol === state.selectedSymbol);
+    if (current) return current;
+  }
+  return candidates[0] || null;
+}
+
+function syncSelectedToVisibleCandidates(candidates = filteredCandidates()) {
+  if (selectionLockedByLookup()) return false;
+  const next = selectionFromCandidates(candidates);
+  const nextSymbol = next?.symbol ?? null;
+  if (state.selectedSymbol === nextSymbol) return false;
+  state.selectedSymbol = nextSymbol;
+  return true;
 }
 
 function baseFilteredCandidates() {
@@ -1824,15 +1849,14 @@ function candidateStrategyCounts(candidates = []) {
 }
 
 function selectedCandidate() {
-  if (state.selectedLookup?.symbol === state.selectedSymbol) {
+  if (selectionLockedByLookup()) {
     return state.selectedLookup;
   }
   const candidates = state.dashboard?.candidates ?? [];
-  return (
-    candidates.find((item) => item.symbol === state.selectedSymbol) ||
-    candidates[0] ||
-    null
-  );
+  if (state.selectedSymbol) {
+    return candidates.find((item) => item.symbol === state.selectedSymbol) || null;
+  }
+  return selectionFromCandidates(filteredCandidates());
 }
 
 function candidateFromSearchResult(item, options = {}) {
@@ -4132,6 +4156,7 @@ function renderPrinciples() {
 
 function applySearchQuery(query) {
   state.query = String(query ?? "").trim();
+  state.selectedLookup = null;
   if (els.searchInput) {
     els.searchInput.value = state.query;
   }
@@ -4140,6 +4165,9 @@ function applySearchQuery(query) {
     state.searchTimer = null;
   }
   renderFeed();
+  renderTradeDecisionStatus();
+  renderDetail();
+  refreshLivePrices();
   loadStockSearch();
 }
 
@@ -4225,6 +4253,7 @@ function candidateSignalMeta(item) {
 function renderFeed() {
   renderStrategyCounts();
   const candidates = filteredCandidates();
+  const selectionChanged = syncSelectedToVisibleCandidates(candidates);
   renderQuickSearch();
   renderStockSearchResults();
   if (!candidates.length) {
@@ -4235,6 +4264,12 @@ function renderFeed() {
         <p>${escapeHtml(strategyEmptyMessage(state.strategy))}</p>
       </div>
     `;
+    if (selectionChanged && state.view === "signals") {
+      window.requestAnimationFrame(() => {
+        renderTradeDecisionStatus();
+        renderDetail();
+      });
+    }
     return;
   }
 
@@ -4278,6 +4313,13 @@ function renderFeed() {
       `;
     })
     .join("");
+
+  if (selectionChanged && state.view === "signals") {
+    window.requestAnimationFrame(() => {
+      renderTradeDecisionStatus();
+      renderDetail();
+    });
+  }
 
   document.querySelectorAll(".feed-item").forEach((button) => {
     button.addEventListener("click", () => {
@@ -4422,7 +4464,7 @@ async function openSearchResult(symbol) {
   updateShellView();
   updateViewButtons();
   if (candidate) {
-    state.selectedLookup = null;
+    state.selectedLookup = candidate;
     state.selectedSymbol = candidate.symbol;
     state.stockSearch = { ...state.stockSearch, analyzingSymbol: null };
     renderFeed();
@@ -5871,7 +5913,11 @@ document.querySelectorAll(".tab").forEach((button) => {
     document.querySelectorAll(".tab").forEach((target) => target.classList.remove("active"));
     button.classList.add("active");
     state.filter = button.dataset.filter;
+    state.selectedLookup = null;
     renderFeed();
+    renderTradeDecisionStatus();
+    renderDetail();
+    refreshLivePrices();
   });
 });
 
@@ -5880,12 +5926,17 @@ document.querySelectorAll(".strategy-button").forEach((button) => {
     document.querySelectorAll(".strategy-button").forEach((target) => target.classList.remove("active"));
     button.classList.add("active");
     state.strategy = button.dataset.strategy || "action";
+    state.selectedLookup = null;
     renderFeed();
+    renderTradeDecisionStatus();
+    renderDetail();
+    refreshLivePrices();
   });
 });
 
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
+  state.selectedLookup = null;
   if (state.searchTimer) {
     window.clearTimeout(state.searchTimer);
   }
@@ -5893,6 +5944,8 @@ els.searchInput.addEventListener("input", (event) => {
     loadStockSearch();
   }, 280);
   renderFeed();
+  renderTradeDecisionStatus();
+  renderDetail();
 });
 
 els.searchInput.addEventListener("keydown", (event) => {
