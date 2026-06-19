@@ -39,6 +39,10 @@ services:
         value: "58"
       - key: SIGNAL_CANDIDATE_POOL_TOP_LIMIT
         value: "5"
+      - key: SIGNAL_CANDIDATE_PREFETCH_ENABLED
+        value: "1"
+      - key: SIGNAL_CANDIDATE_PREFETCH_LIMIT
+        value: "80"
       - key: SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED
         value: "1"
       - key: SIGNAL_CANDIDATE_DATA_MAX_ITEMS

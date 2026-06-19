@@ -212,6 +212,8 @@ SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN
 SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "200"))
 SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
+SIGNAL_CANDIDATE_PREFETCH_ENABLED = os.getenv("SIGNAL_CANDIDATE_PREFETCH_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_CANDIDATE_PREFETCH_LIMIT = max(1, int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_LIMIT", "80")))
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -11061,6 +11063,184 @@ def dashboard(mode: str, force_discovery: bool = False) -> dict:
     return build_dashboard_payload(context)
 
 
+def candidate_from_pool_record_for_prefetch(record: dict, seed_lookup: dict[str, dict], watched: set[str]) -> dict:
+    entry = candidate_pool_entry_from_record(record)
+    symbol = str(entry.get("symbol", "")).strip().upper()
+    if symbol and symbol in seed_lookup:
+        candidate = copy.deepcopy(seed_lookup[symbol])
+        candidate["headline"] = entry.get("headline") or candidate.get("headline", "")
+        candidate["themes"] = unique_texts(
+            [
+                *text_list(entry.get("themes", []), limit=8),
+                *text_list(candidate.get("themes", []), limit=8),
+            ],
+            limit=8,
+        )
+    else:
+        candidate = default_candidate_for_entry(
+            entry,
+            [],
+            {
+                "source": "candidate-pool",
+                "total": 0,
+                "display": 0,
+                "message": "후보 풀 저장값을 기반으로 보강 대상을 구성했습니다.",
+            },
+        )
+
+    candidate["symbol"] = symbol or str(candidate.get("symbol", "")).strip().upper()
+    candidate["name"] = candidate.get("name") or entry.get("name") or candidate["symbol"]
+    candidate["market"] = candidate.get("market") or entry.get("market", "")
+    candidate["category"] = candidate.get("category") or entry.get("category", "")
+    candidate["candidateSource"] = "candidate-pool-prefetch"
+    candidate["discoveryTier"] = entry.get("discoveryTier", candidate.get("discoveryTier", "pool"))
+    candidate["opportunityType"] = entry.get("opportunityType", candidate.get("opportunityType", "pool-retain"))
+
+    for key in ("price", "change"):
+        value = record.get(key)
+        if value not in {None, "", "-"}:
+            candidate[key] = value
+    if record.get("lastSeenAt"):
+        candidate["updated"] = record.get("lastSeenAt")
+
+    discovery = dict(candidate.get("discovery", {})) if isinstance(candidate.get("discovery"), dict) else {}
+    memory = entry.get("poolMemory") if isinstance(entry.get("poolMemory"), dict) else candidate_pool_memory_payload(record)
+    discovery.update({
+        "source": discovery.get("source") or "candidate-pool",
+        "poolRetained": True,
+        "poolMemory": memory,
+        "poolScore": bounded_int(memory.get("score", record.get("retainScore", 0)), 0, 100),
+        "score": max(
+            bounded_int(discovery.get("score", 0), 0, 100),
+            bounded_int(record.get("retainScore", record.get("totalScore", 0)), 0, 100),
+        ),
+        "evidenceScore": max(
+            bounded_int(discovery.get("evidenceScore", 0), 0, 100),
+            bounded_int(record.get("evidenceScore", 0), 0, 100),
+        ),
+        "evidenceGrade": discovery.get("evidenceGrade") or record.get("evidenceGrade", ""),
+        "qualityTier": discovery.get("qualityTier") or record.get("qualityTier", ""),
+    })
+    candidate["discovery"] = discovery
+    candidate["totalScore"] = bounded_int(record.get("totalScore", candidate.get("totalScore", 0)), 0, 100)
+    candidate["triggerReadiness"] = bounded_int(record.get("triggerReadiness", candidate.get("triggerReadiness", 0)), 0, 100)
+    return decorate_candidate(candidate, watched)
+
+
+def prefetch_enrichment_status(source: str, error: Exception, message: str) -> dict:
+    return {
+        "source": source,
+        "enabled": True,
+        "error": str(error)[:180],
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "message": message,
+    }
+
+
+def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market: dict | None = None) -> dict:
+    if not SIGNAL_CANDIDATE_PREFETCH_ENABLED:
+        return {
+            "enabled": False,
+            "mode": mode,
+            "trigger": trigger,
+            "message": "후보 풀 사전 보강이 꺼져 있습니다.",
+        }
+
+    records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_PREFETCH_LIMIT)
+    if not records:
+        return {
+            "enabled": True,
+            "mode": mode,
+            "trigger": trigger,
+            "inputCount": 0,
+            "prefetchedCount": 0,
+            "message": "보강할 후보 풀 종목이 아직 없습니다.",
+        }
+
+    data = seed_data()
+    seed_lookup = {
+        str(item.get("symbol", "")).strip().upper(): item
+        for item in data.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    }
+    watched = set(watchlist())
+    candidates = [candidate_from_pool_record_for_prefetch(record, seed_lookup, watched) for record in records]
+    candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, live_state_merge_status = merge_live_state_into_candidates(candidates, mode)
+    candidates, market_data_merge_status = merge_market_data_latest_into_candidates(candidates)
+
+    statuses: dict[str, dict] = {
+        "candidateDataMerge": candidate_data_merge_status,
+        "liveStateMerge": live_state_merge_status,
+        "marketDataMerge": market_data_merge_status,
+    }
+
+    enrichers = [
+        ("prices", enrich_candidates_with_toss_prices, "토스 현재가 사전 보강에 실패했습니다."),
+        ("candles", enrich_candidates_with_toss_candles, "토스 차트 사전 보강에 실패했습니다."),
+        ("orderbook", enrich_candidates_with_toss_orderbook, "토스 호가 사전 보강에 실패했습니다."),
+        ("trades", enrich_candidates_with_toss_trades, "토스 체결 사전 보강에 실패했습니다."),
+        ("disclosures", enrich_candidates_with_dart_disclosures, "공시 사전 보강에 실패했습니다."),
+        ("naver", enrich_candidates_with_naver_news, "뉴스 사전 보강에 실패했습니다."),
+        ("gdelt", enrich_candidates_with_gdelt_news, "글로벌 뉴스 사전 보강에 실패했습니다."),
+    ]
+    for key, enricher, failure_message in enrichers:
+        try:
+            candidates, statuses[key] = enricher(candidates)
+        except Exception as error:
+            statuses[key] = prefetch_enrichment_status("error", error, failure_message)
+
+    try:
+        portfolio = safe_portfolio_status()
+        candidates, statuses["portfolio"] = enrich_candidates_with_portfolio(candidates, portfolio)
+    except Exception as error:
+        statuses["portfolio"] = prefetch_enrichment_status("error", error, "포트폴리오 사전 보강에 실패했습니다.")
+
+    candidates, statuses["selection"] = apply_candidate_selection(
+        candidates,
+        market if isinstance(market, dict) else data.get("market", {}),
+        watched,
+    )
+    candidates = sort_candidates_for_mode(candidates, mode)
+    live_state_status = update_live_state_from_candidates(candidates, mode)
+    pool_status = update_candidate_pool(candidates, mode=mode, stage="prefetch")
+    candidate_data_status = update_candidate_data_snapshots(candidates, mode, stage=f"prefetch-{trigger}")
+
+    completeness = [candidate.get("dataCompleteness", {}) for candidate in candidates if isinstance(candidate, dict)]
+    entry_ready_count = len([item for item in completeness if isinstance(item, dict) and item.get("entryReady")])
+    display_ready_count = len([item for item in completeness if isinstance(item, dict) and item.get("displayReady")])
+    missing_counts: dict[str, int] = {}
+    for item in completeness:
+        if not isinstance(item, dict):
+            continue
+        missing_values = item.get("missing", []) if isinstance(item.get("missing"), list) else []
+        for key in missing_values:
+            missing_counts[str(key)] = missing_counts.get(str(key), 0) + 1
+
+    price_status = statuses.get("prices", {})
+    return {
+        "enabled": True,
+        "mode": mode,
+        "trigger": trigger,
+        "inputCount": len(records),
+        "prefetchedCount": len(candidates),
+        "limit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
+        "priceCount": price_status.get("priceCount", 0),
+        "storedFallbackCount": price_status.get("storedFallbackCount", 0),
+        "retainedCount": price_status.get("retainedCount", 0),
+        "missingCount": price_status.get("missingCount", 0),
+        "displayReadyCount": display_ready_count,
+        "entryReadyCount": entry_ready_count,
+        "missingCounts": missing_counts,
+        "candidateData": candidate_data_status,
+        "liveState": live_state_status,
+        "candidatePool": pool_status,
+        "statuses": statuses,
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "message": f"후보 풀 {len(candidates)}개를 서버에서 사전 보강하고 저장했습니다.",
+    }
+
+
 def minutes_from_hhmm(value: str) -> int | None:
     match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(value or "").strip())
     if not match:
@@ -11295,6 +11475,8 @@ def discovery_bot_config_status() -> dict:
         "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
         "mode": discovery_bot_mode(),
         "dashboardStoredDiscoveryFirst": SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST,
+        "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
+        "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
@@ -11348,13 +11530,22 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
     try:
         now = datetime.now(KST)
         payload = dashboard(selected_mode, force_discovery=True)
+        prefetch_status = prefetch_candidate_pool_market_data(
+            selected_mode,
+            trigger=trigger,
+            market=payload.get("market", {}),
+        )
+        payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
+        summary = dashboard_summary(payload)
+        summary["candidatePrefetch"] = prefetch_status
         run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{selected_mode}-discovery-{trigger}"
         record = {
             "id": run_id,
             "mode": selected_mode,
             "trigger": trigger,
             "createdAt": now.isoformat(timespec="seconds"),
-            "summary": dashboard_summary(payload),
+            "summary": summary,
+            "prefetch": prefetch_status,
             "dashboard": payload,
         }
         write_discovery_latest_record(record)
@@ -12699,6 +12890,14 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
         raise ValueError("mode는 close, preopen, intraday 중 하나여야 합니다.")
     now = datetime.now(KST)
     payload = dashboard(mode, force_discovery=True)
+    prefetch_status = prefetch_candidate_pool_market_data(
+        mode,
+        trigger=trigger,
+        market=payload.get("market", {}),
+    )
+    payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
+    summary = dashboard_summary(payload)
+    summary["candidatePrefetch"] = prefetch_status
     run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{mode}-{trigger}"
     file_name = f"{now.date().isoformat()}_{mode}_{trigger}_{now.strftime('%H%M%S')}.json"
     path = RUNS_DIR / file_name
@@ -12707,7 +12906,8 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
         "mode": mode,
         "trigger": trigger,
         "createdAt": now.isoformat(timespec="seconds"),
-        "summary": dashboard_summary(payload),
+        "summary": summary,
+        "prefetch": prefetch_status,
         "dashboard": payload,
     }
     if db_write_snapshot(snapshot, file_name=file_name):
