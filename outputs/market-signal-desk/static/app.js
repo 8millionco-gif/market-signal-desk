@@ -145,7 +145,15 @@ function scoreClass(score) {
 }
 
 function changeClass(change) {
-  return String(change).trim().startsWith("-") ? "change-down" : "change-up";
+  const text = String(change ?? "").trim();
+  if (text.startsWith("-")) return "change-down";
+  if (text.startsWith("+")) return "change-up";
+  return "change-neutral";
+}
+
+function displayChangeText(change) {
+  const text = String(change ?? "").trim();
+  return text && text !== "-" ? text : "등락률 확인 중";
 }
 
 function initials(name) {
@@ -670,14 +678,73 @@ function livePriceIntegrationsPatch(integrations) {
 }
 
 function renderLivePriceUpdate() {
-  renderMarket();
-  renderMetrics();
   renderTradeDecisionStatus();
   renderLivePriceStatus();
-  renderCandidatePoolStatus();
+  renderCandidateSourceDetail();
   renderTossStatus();
-  renderFeed();
-  renderCurrentView();
+  updateLivePriceFragments();
+}
+
+function updateLivePriceFragments() {
+  updateFeedPriceFragments();
+  updateSelectedPriceFragments();
+}
+
+function updateFeedPriceFragments() {
+  const candidates = state.dashboard?.candidates ?? [];
+  const bySymbol = new Map(candidates.map((item) => [item.symbol, item]));
+  document.querySelectorAll(".feed-item[data-symbol]").forEach((button) => {
+    const item = bySymbol.get(button.dataset.symbol);
+    if (!item) return;
+    const plan = tradePlan(item);
+    const action = button.querySelector("[data-feed-action]");
+    const score = button.querySelector("[data-feed-score]");
+    const time = button.querySelector("[data-feed-time]");
+    const decision = button.querySelector("[data-feed-decision]");
+    const primary = primaryDecisionForDisplay(item, plan);
+    if (action) {
+      action.textContent = feedActionLabel(item, plan);
+      action.className = `feed-action ${plan.tone}`;
+    }
+    if (score) {
+      score.textContent = item.totalScore ?? "-";
+      score.className = `score-pill ${scoreClass(item.totalScore)}`;
+    }
+    if (time) time.textContent = livePriceLabel(item) || item.updated || "";
+    if (decision) {
+      decision.textContent = primary.label;
+      decision.className = `feed-badge decision-badge decision-${primary.key}`;
+    }
+  });
+}
+
+function updateSelectedPriceFragments() {
+  const item = selectedCandidate();
+  if (!item) return;
+  const plan = tradePlan(item);
+  const primaryDecision = primaryDecisionForDisplay(item, plan);
+  const priceNode = document.querySelector("[data-selected-price]");
+  const changeNode = document.querySelector("[data-selected-change]");
+  const sourceNode = document.querySelector("[data-selected-price-meta]");
+  const decisionNode = document.querySelector("[data-selected-decision-summary]");
+  const decisionLabelNode = decisionNode?.querySelector("strong");
+  const decisionDetailNode = decisionNode?.querySelector("span");
+  if (priceNode) priceNode.textContent = item.price || "-";
+  if (changeNode) {
+    changeNode.textContent = displayChangeText(item.change);
+    changeNode.className = changeClass(item.change);
+  }
+  if (sourceNode) sourceNode.textContent = priceMeta(item);
+  if (decisionNode) decisionNode.className = `decision-summary decision-${primaryDecision.key}`;
+  if (decisionLabelNode) decisionLabelNode.textContent = primaryDecision.label;
+  if (decisionDetailNode) decisionDetailNode.textContent = primaryDecision.detail;
+
+  const flow = document.querySelector(".signal-flow-strip");
+  if (flow) flow.outerHTML = signalFlowStrip(item, plan, primaryDecision);
+  const priceSection = document.querySelector(".price-reaction-section");
+  if (priceSection) priceSection.outerHTML = priceReactionSection(item);
+  const planSection = document.querySelector(".trade-plan-section");
+  if (planSection) planSection.outerHTML = tradePlanSection(item);
 }
 
 async function refreshLivePrices() {
@@ -1066,7 +1133,7 @@ function reactionStageForDisplay(item) {
       ])
     : [
         ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
-        ["가격 방향", hasPositivePrice, change == null ? "등락률 확인 중" : item.change],
+        ["가격 방향", hasPositivePrice, displayChangeText(item.change)],
         ["거래 반응", hasVolume, volumeReactionText(item)],
         ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
       ];
@@ -1430,7 +1497,7 @@ function renderTradeDecisionStatus() {
     ["가격 반응", stage.tone === "buy", stage.label],
     ["최종 판단", primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
     ["관찰 매수", plan.tone === "buy", currentRow],
-    ["현재가", plan.hasPrice, `${item.price ?? "-"} ${item.change ?? ""}`.trim()],
+    ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayChangeText(item.change)}`.trim()],
     ["보유", Boolean(plan.holding), holdingRow]
   ];
   els.tradeDecisionStatus.innerHTML = rows
@@ -3655,7 +3722,7 @@ function renderFeed() {
             <span class="feed-title">
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
-              <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}">${escapeHtml(primaryDecision.label)}</span>
+              <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}" data-feed-decision>${escapeHtml(primaryDecision.label)}</span>
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
             <span class="feed-signal-line ${escapeHtml(plan.tone)}">
@@ -3664,9 +3731,9 @@ function renderFeed() {
             </span>
           </span>
           <span class="feed-meta">
-            <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(actionLabel)}</span>
-            <span class="score-pill ${scoreClass(item.totalScore)}">${item.totalScore}</span>
-            <span class="feed-time">${escapeHtml(liveText || item.updated)}</span>
+            <span class="feed-action ${escapeHtml(plan.tone)}" data-feed-action>${escapeHtml(actionLabel)}</span>
+            <span class="score-pill ${scoreClass(item.totalScore)}" data-feed-score>${item.totalScore}</span>
+            <span class="feed-time" data-feed-time>${escapeHtml(liveText || item.updated)}</span>
           </span>
         </button>
       `;
@@ -4025,19 +4092,19 @@ function renderDetail() {
         <div class="hero-title">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
           <h2>${escapeHtml(item.name)}</h2>
-          <span>${escapeHtml(item.price)}</span>
-          <span class="${changeClass(item.change)}">${escapeHtml(item.change)}</span>
+          <span data-selected-price>${escapeHtml(item.price)}</span>
+          <span class="${changeClass(item.change)}" data-selected-change>${escapeHtml(displayChangeText(item.change))}</span>
           <button class="watch-button ${item.isWatched ? "active" : ""}" id="watchButton">
             ${item.isWatched ? "관심 해제" : "관심 등록"}
           </button>
         </div>
         <p class="headline">${escapeHtml(item.headline)}</p>
         <p class="thesis">${escapeHtml(item.thesis)}</p>
-        <p class="decision-summary decision-${escapeHtml(primaryDecision.key)}">
+        <p class="decision-summary decision-${escapeHtml(primaryDecision.key)}" data-selected-decision-summary>
           <strong>${escapeHtml(primaryDecision.label)}</strong>
           <span>${escapeHtml(primaryDecision.detail)}</span>
         </p>
-        <p class="data-source">${escapeHtml(priceMeta(item))}</p>
+        <p class="data-source" data-selected-price-meta>${escapeHtml(priceMeta(item))}</p>
         <div class="chips">
           ${item.tags.map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
         </div>
@@ -4401,7 +4468,7 @@ function statCard(label, value) {
 }
 
 function tradeNowGuide(item, plan) {
-  const current = `${item?.price ?? "-"} ${item?.change ?? ""}`.trim();
+  const current = `${item?.price ?? "-"} ${displayChangeText(item?.change)}`.trim();
   const entry = rowValue(plan, "관찰 매수");
   const pullback = rowValue(plan, "눌림 대기");
   const rebound = rowValue(plan, "반등 확인");
