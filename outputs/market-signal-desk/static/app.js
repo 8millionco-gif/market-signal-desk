@@ -725,24 +725,7 @@ function candidateNeedsMarketDepth(item) {
 }
 
 function livePriceRefreshDetail(symbols) {
-  const selected = selectedCandidate();
-  const topCandidate = filteredCandidates()[0] || (state.dashboard?.candidates ?? [])[0];
-  const visibleNeedsChange = filteredCandidates()
-    .slice(0, Math.min(10, symbols.length || 10))
-    .some(candidateNeedsMarketDepth);
-  const needsDepth =
-    visibleNeedsChange ||
-    candidateNeedsMarketDepth(selected) ||
-    candidateNeedsMarketDepth(topCandidate);
-  const nextCount = Number(state.livePrice.refreshCount || 0) + 1;
-  const scheduledDepth = nextCount % LIVE_MARKET_DEPTH_REFRESH_EVERY === 0;
-  const lastDepthAt = Date.parse(state.livePrice.lastDepthAt || "");
-  const depthCooldownMs = Math.max(
-    Number(state.livePrice.pollSeconds || 10) * 1000 * LIVE_MARKET_DEPTH_REFRESH_EVERY,
-    30000
-  );
-  const depthDue = !Number.isFinite(lastDepthAt) || Date.now() - lastDepthAt >= depthCooldownMs;
-  return needsDepth && (scheduledDepth || depthDue) ? "market-depth" : "price";
+  return "price";
 }
 
 function livePricePriority(item) {
