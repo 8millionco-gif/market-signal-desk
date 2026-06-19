@@ -5322,6 +5322,10 @@ def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_t
         return None
     completeness = candidate_data_completeness(candidate)
     candidate["dataCompleteness"] = completeness
+    candidate["priceReadiness"] = candidate_price_readiness(candidate)
+    candidate["evaluationMode"] = candidate_evaluation_mode(candidate)
+    candidate["tradeDataGate"] = candidate_trade_data_gate(candidate)
+    candidate = enforce_trade_data_gate_on_candidate(candidate)
     return {
         "symbol": symbol,
         "name": candidate.get("name", ""),
@@ -5337,8 +5341,9 @@ def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_t
         "triggerReadiness": candidate.get("triggerReadiness", 0),
         "preopenPriority": candidate.get("preopenPriority", 0),
         "score": compact_raw_payload(candidate.get("score", {}), list_limit=20),
-        "priceReadiness": compact_raw_payload(candidate_price_readiness(candidate), list_limit=20),
-        "evaluationMode": compact_raw_payload(candidate_evaluation_mode(candidate), list_limit=20),
+        "priceReadiness": compact_raw_payload(candidate.get("priceReadiness", {}), list_limit=20),
+        "evaluationMode": compact_raw_payload(candidate.get("evaluationMode", {}), list_limit=20),
+        "tradeDataGate": compact_raw_payload(candidate.get("tradeDataGate", {}), list_limit=20),
         "livePrice": compact_raw_payload(candidate.get("livePrice", {}), list_limit=20),
         "liveCandles": compact_raw_payload(candidate.get("liveCandles", {}), list_limit=20),
         "liveOrderbook": compact_raw_payload(candidate.get("liveOrderbook", {}), list_limit=20),
@@ -5399,6 +5404,13 @@ def carry_forward_candidate_data_record(record: dict, previous: dict) -> tuple[d
     if carried:
         record["carriedForward"] = unique_texts(carried, limit=8)
         record["dataCompleteness"] = candidate_data_completeness(record)
+        record["priceReadiness"] = compact_raw_payload(candidate_price_readiness(record), list_limit=20)
+        record["evaluationMode"] = compact_raw_payload(candidate_evaluation_mode(record), list_limit=20)
+        record["tradeDataGate"] = compact_raw_payload(candidate_trade_data_gate(record), list_limit=20)
+        gated_record = enforce_trade_data_gate_on_candidate(record)
+        for key in ("finalDecision", "signalValidation", "candidateCompression", "tradeDataGate"):
+            if key in gated_record:
+                record[key] = compact_raw_payload(gated_record[key], list_limit=20)
     return record, unique_texts(carried, limit=8)
 
 
