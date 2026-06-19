@@ -1089,16 +1089,16 @@ function signalValidationForDisplay(item) {
 }
 
 function reactionGateLabel(value) {
-  if (value === "confirmed") return "가격 반응 확인";
-  if (value === "watch") return "추가 관찰";
-  if (value === "wait") return "반응 확인 중";
-  if (value === "blocked") return "오늘 제외";
+  if (value === "confirmed") return "반응 확인";
+  if (value === "watch") return "관찰 지속";
+  if (value === "wait") return "반응 대기";
+  if (value === "blocked") return "반응 차단";
   return "가격 반응";
 }
 
 function reactionBadgeText(reaction) {
   const score = reaction?.score != null ? ` ${reaction.score}` : "";
-  return `${reactionGateLabel(reaction?.reactionGate)}${score}`;
+  return `${reaction?.decision?.label || reaction.decisionLabel || reactionGateLabel(reaction?.reactionGate)}${score}`;
 }
 
 function priceFreshnessInfo(item) {
@@ -1247,6 +1247,7 @@ function volumeReactionText(item) {
 
 function reactionStageForDisplay(item) {
   const reaction = item?.priceReaction ?? {};
+  const decision = reaction.decision ?? {};
   const metrics = reaction.metrics ?? {};
   const serverCriteria = Array.isArray(reaction.entryCriteria) ? reaction.entryCriteria.filter(Boolean) : [];
   const confirmationCount = Number(metrics.confirmationCount ?? 0);
@@ -1260,10 +1261,15 @@ function reactionStageForDisplay(item) {
   const missingFactors = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
   const gate = reaction.reactionGate || "";
 
-  let label = "가격 확인 필요";
-  let tone = "wait";
-  let summary = reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
-  if (gate === "blocked") {
+  let label = decision.label || reaction.decisionLabel || "가격 확인 필요";
+  let tone = decision.tone || "wait";
+  let summary = decision.summary || reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
+  if (decision.key) {
+    if (decision.key === "blocked") tone = "risk";
+    else if (decision.key === "confirmed") tone = "buy";
+    else if (decision.key === "watch") tone = "watch";
+    else tone = "wait";
+  } else if (gate === "blocked") {
     label = "오늘 제외";
     tone = "risk";
     summary = reaction.nextCheck || "재료 대비 가격 또는 거래량 반응이 부정적이라 신규 진입을 막습니다.";
@@ -1310,12 +1316,19 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   const decision = item?.finalDecision ?? {};
   const gate = item?.qualityGate ?? {};
   const reaction = item?.priceReaction ?? {};
+  const reactionDecision = reaction.decision ?? {};
   const freshness = priceFreshnessInfo(item);
   if (plan.tone === "sell") {
     return { key: "sell", label: "분할매도 점검", detail: plan.summary || "보유 수익을 점검합니다." };
   }
   if (plan.tone === "risk" || decision.actionKey === "exclude" || gate.key === "exclude") {
     return { key: "avoid", label: "오늘 제외", detail: plan.summary || "신규 진입하지 않습니다." };
+  }
+  if (reactionDecision.key === "blocked") {
+    return { key: "avoid", label: reactionDecision.action || "오늘 제외", detail: reactionDecision.summary || "가격 반응이 차단되어 신규 진입하지 않습니다." };
+  }
+  if (["wait", "watch"].includes(reactionDecision.key) && !reactionDecision.tradeAllowed && (decision.actionKey === "buy" || gate.key === "actionable")) {
+    return { key: "wait", label: reactionDecision.label || "반응 대기", detail: reactionDecision.summary || "가격·거래량 반응을 더 확인합니다." };
   }
   if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
     if (!freshness.isFresh) {

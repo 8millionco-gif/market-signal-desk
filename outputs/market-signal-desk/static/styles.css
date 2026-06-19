@@ -1525,6 +1525,24 @@ h3 {
   color: var(--green);
 }
 
+.reaction-status-card.reaction-watch {
+  border-color: rgba(105, 210, 231, 0.28);
+  background: rgba(105, 210, 231, 0.08);
+}
+
+.reaction-status-card.reaction-watch strong {
+  color: var(--cyan);
+}
+
+.reaction-status-card.reaction-wait {
+  border-color: rgba(244, 201, 93, 0.26);
+  background: rgba(244, 201, 93, 0.08);
+}
+
+.reaction-status-card.reaction-wait strong {
+  color: var(--amber);
+}
+
 .reaction-status-card.reaction-risk {
   border-color: rgba(255, 100, 115, 0.28);
   background: rgba(255, 100, 115, 0.08);

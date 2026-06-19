@@ -4565,12 +4565,62 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     else:
         next_check = "가격 반응과 리스크 기준을 한 번 더 확인합니다."
 
+    if reaction_gate == "blocked":
+        reaction_decision = {
+            "key": "blocked",
+            "label": "반응 차단",
+            "tone": "risk",
+            "action": "오늘 제외",
+            "summary": next_check,
+            "tradeAllowed": False,
+        }
+    elif supports_entry:
+        reaction_decision = {
+            "key": "confirmed",
+            "label": "반응 확인",
+            "tone": "buy",
+            "action": "매수 구간 점검",
+            "summary": next_check,
+            "tradeAllowed": True,
+        }
+    elif reaction_gate == "confirmed":
+        reaction_decision = {
+            "key": "confirmed",
+            "label": "반응 확인",
+            "tone": "buy",
+            "action": "조건 점검",
+            "summary": next_check,
+            "tradeAllowed": False,
+        }
+    elif reaction_gate == "watch":
+        reaction_decision = {
+            "key": "watch",
+            "label": "관찰 지속",
+            "tone": "watch",
+            "action": "추가 확인",
+            "summary": next_check,
+            "tradeAllowed": False,
+        }
+    else:
+        reaction_decision = {
+            "key": "wait",
+            "label": "반응 대기",
+            "tone": "wait",
+            "action": "진입 보류",
+            "summary": next_check,
+            "tradeAllowed": False,
+        }
+
     return {
         "key": key,
         "label": label,
         "priority": priority,
         "score": score,
         "reactionGate": reaction_gate,
+        "decision": reaction_decision,
+        "decisionKey": reaction_decision["key"],
+        "decisionLabel": reaction_decision["label"],
+        "actionLabel": reaction_decision["action"],
         "entryBlock": entry_block,
         "supportsEntry": supports_entry,
         "entryReady": supports_entry,
