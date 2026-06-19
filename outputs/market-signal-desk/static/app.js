@@ -3546,11 +3546,11 @@ function renderStorageStatus() {
         .join(" · ")
     : "";
   const marketDataText = marketData.enabled
-    ? `${marketData.itemCount ?? 0}개 · ${marketData.persistent ? "DB" : "임시"}${marketSourceText ? ` · ${marketSourceText}` : ""}`
+    ? `${marketData.itemCount ?? 0}개 · ${marketData.readSource === "postgres" ? "DB 읽기" : marketData.readSource === "filesystem" ? "파일 fallback" : "비어 있음"}${marketSourceText ? ` · ${marketSourceText}` : ""}`
     : "꺼짐";
   const marketLatestText = marketData.latestAt ? timeLabel(marketData.latestAt) : "-";
   const candidateDataText = candidateData.enabled
-    ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.persistent ? "DB" : "임시"}`
+    ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.readSource === "postgres" ? "DB 읽기" : candidateData.readSource === "filesystem" ? "파일 fallback" : "비어 있음"}`
     : "꺼짐";
   const candidateReadyText = candidateData.enabled
     ? `후보 ${candidateData.displayReadyCount ?? 0} · 진입 ${candidateData.entryReadyCount ?? 0}`
@@ -3562,12 +3562,34 @@ function renderStorageStatus() {
         .join(" · ")
     : "누락 없음";
   const candidateLatestText = candidateData.latestAt ? timeLabel(candidateData.latestAt) : "-";
+  const storageBasisText = (info) => {
+    if (!info?.enabled) return "꺼짐";
+    const readSource = info.readSource || info.storage || "unknown";
+    const sourceText = readSource === "postgres"
+      ? "DB 기준"
+      : readSource === "filesystem"
+      ? "파일 fallback"
+      : readSource === "empty"
+      ? "저장 없음"
+      : readSource;
+    const dbCount = Number(info.dbItemCount ?? 0);
+    const fileCount = Number(info.fileItemCount ?? 0);
+    return `${sourceText} · DB ${dbCount} · 파일 ${fileCount}`;
+  };
+  const marketStorageReady = Boolean(marketData.enabled && marketData.readSource === "postgres");
+  const candidateStorageReady = Boolean(candidateData.enabled && candidateData.readSource === "postgres");
+  const storageWarningText = marketStorageReady && candidateStorageReady
+    ? "후보/최신값 DB 기준"
+    : `후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`;
   const rows = [
     ["운영 저장소", operationReady, operationReady ? "DB 기준" : "미완료"],
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
+    ["후보 기준", candidateStorageReady, storageBasisText(candidateData)],
+    ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
+    ["판단 기준", marketStorageReady && candidateStorageReady, storageWarningText],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],

@@ -742,6 +742,43 @@ def db_write_kv(key: str, payload) -> bool:
         return False
 
 
+def payload_item_count(payload: object, item_key: str = "items") -> int:
+    if not isinstance(payload, dict):
+        return 0
+    items = payload.get(item_key)
+    if isinstance(items, dict):
+        return len(items)
+    if isinstance(items, list):
+        return len(items)
+    return 0
+
+
+def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items") -> dict:
+    db_enabled = database_storage_enabled()
+    db_ready = bool(db_enabled and ensure_database_schema())
+    db_payload = db_read_kv(key, None) if db_ready else None
+    file_payload = safe_read_json_file(file_path)
+    if isinstance(db_payload, dict):
+        read_source = "postgres"
+    elif isinstance(file_payload, dict):
+        read_source = "filesystem"
+    else:
+        read_source = "empty"
+    file_exists = file_path.exists()
+    return {
+        "readSource": read_source,
+        "databaseConfigured": bool(DATABASE_URL),
+        "databaseEnabled": db_enabled,
+        "databaseReady": db_ready,
+        "databaseError": DB_LAST_ERROR,
+        "dbItemCount": payload_item_count(db_payload, item_key),
+        "fileItemCount": payload_item_count(file_payload, item_key),
+        "fileExists": file_exists,
+        "writeFallback": bool(db_enabled and read_source != "postgres"),
+        "readable": read_source != "empty",
+    }
+
+
 def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
     if not ensure_database_schema():
         return False
@@ -1178,15 +1215,31 @@ def market_data_latest_status() -> dict:
     data = market_data_latest_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    db_ready = bool(database_storage_enabled() and ensure_database_schema())
-    storage = "postgres" if db_ready else "filesystem"
-    if not db_ready and MARKET_DATA_LATEST_FILE.exists():
-        storage = "filesystem"
+    probe = kv_payload_read_probe(MARKET_DATA_LATEST_KV_KEY, MARKET_DATA_LATEST_FILE)
+    storage = probe["readSource"]
     persistent = storage == "postgres"
+    if persistent:
+        message = "서버가 수집한 최신 원천 데이터를 Postgres DB에서 읽고 업데이트합니다."
+    elif probe["databaseReady"] and probe["fileItemCount"] > 0:
+        message = "DB는 연결됐지만 최신 원천 데이터가 아직 DB에 없어 파일 fallback을 읽고 있습니다. 다음 수집 또는 DB 이관 후 DB 기준으로 전환됩니다."
+    elif probe["databaseReady"]:
+        message = "DB는 연결됐지만 최신 원천 데이터가 아직 저장되지 않았습니다. 다음 수집 주기에서 DB에 저장됩니다."
+    elif probe["databaseConfigured"]:
+        message = "DB 연결 또는 스키마 확인에 실패해 최신 원천 데이터를 파일 fallback으로 읽습니다."
+    else:
+        message = "최신 원천 데이터가 임시 파일 저장소에 저장됩니다. 재배포/재시작 후 보존을 장담할 수 없습니다."
     return {
         "enabled": True,
         "storage": storage,
-        "databaseReady": db_ready,
+        "readSource": probe["readSource"],
+        "databaseConfigured": probe["databaseConfigured"],
+        "databaseReady": probe["databaseReady"],
+        "databaseError": probe["databaseError"],
+        "dbItemCount": probe["dbItemCount"],
+        "fileItemCount": probe["fileItemCount"],
+        "fileExists": probe["fileExists"],
+        "writeFallback": probe["writeFallback"],
+        "operationReady": persistent and len(items) > 0,
         "persistent": persistent,
         "volatileFallback": not persistent,
         "itemCount": len(items),
@@ -1195,11 +1248,7 @@ def market_data_latest_status() -> dict:
         "latestAt": data.get("updatedAt", ""),
         "lastStorage": MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
         "lastUpdatedAt": MARKET_DATA_LATEST_STATE.get("lastUpdatedAt", ""),
-        "message": (
-            "서버가 수집한 최신 원천 데이터를 Postgres DB 기준으로 업데이트합니다."
-            if persistent
-            else "최신 원천 데이터가 임시 파일 저장소에 저장됩니다. 재배포/재시작 후 보존을 장담할 수 없습니다."
-        ),
+        "message": message,
     }
 
 
@@ -4847,16 +4896,32 @@ def candidate_data_snapshot_status() -> dict:
     data = candidate_data_snapshot_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    db_ready = bool(database_storage_enabled() and ensure_database_schema())
-    storage = "postgres" if db_ready else "filesystem"
-    if not db_ready and CANDIDATE_DATA_FILE.exists():
-        storage = "filesystem"
+    probe = kv_payload_read_probe(CANDIDATE_DATA_KV_KEY, CANDIDATE_DATA_FILE)
+    storage = probe["readSource"]
     persistent = storage == "postgres"
+    if persistent:
+        message = "후보별 최신 수신 데이터 묶음을 Postgres DB에서 읽고 업데이트합니다."
+    elif probe["databaseReady"] and probe["fileItemCount"] > 0:
+        message = "DB는 연결됐지만 후보 데이터 묶음이 아직 DB에 없어 파일 fallback을 읽고 있습니다. 다음 수집 또는 DB 이관 후 DB 기준으로 전환됩니다."
+    elif probe["databaseReady"]:
+        message = "DB는 연결됐지만 후보 데이터 묶음이 아직 저장되지 않았습니다. 다음 후보 수집에서 DB에 저장됩니다."
+    elif probe["databaseConfigured"]:
+        message = "DB 연결 또는 스키마 확인에 실패해 후보 데이터 묶음을 파일 fallback으로 읽습니다."
+    else:
+        message = "후보별 최신 수신 데이터 묶음이 임시 파일 저장소에 저장됩니다. 운영 기준 저장소는 아직 미완료입니다."
     return {
         "enabled": True,
         "storage": storage,
         "file": display_local_path(CANDIDATE_DATA_FILE),
-        "databaseReady": db_ready,
+        "readSource": probe["readSource"],
+        "databaseConfigured": probe["databaseConfigured"],
+        "databaseReady": probe["databaseReady"],
+        "databaseError": probe["databaseError"],
+        "dbItemCount": probe["dbItemCount"],
+        "fileItemCount": probe["fileItemCount"],
+        "fileExists": probe["fileExists"],
+        "writeFallback": probe["writeFallback"],
+        "operationReady": persistent and len(items) > 0,
         "persistent": persistent,
         "volatileFallback": not persistent,
         "itemCount": len(items),
@@ -4867,11 +4932,7 @@ def candidate_data_snapshot_status() -> dict:
         "carriedForwardFields": summary.get("carriedForwardFields", {}),
         "missingCounts": summary.get("missingCounts", {}),
         "latestAt": data.get("updatedAt", ""),
-        "message": (
-            "후보별 최신 수신 데이터 묶음을 Postgres DB에 저장합니다."
-            if persistent
-            else "후보별 최신 수신 데이터 묶음이 임시 파일 저장소에 저장됩니다. 운영 기준 저장소는 아직 미완료입니다."
-        ),
+        "message": message,
     }
 
 
@@ -12468,15 +12529,23 @@ def snapshot_storage_status() -> dict:
     market_data = market_data_latest_status()
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
+        data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent"))
+        operation_ready = bool(data_storage_ready)
+        if operation_ready:
+            message = "Postgres DB에 스냅샷, 후보 풀, 최신 수집값을 저장하고 DB 기준으로 읽습니다."
+            error = ""
+        else:
+            message = "DB는 연결됐지만 후보 데이터 또는 최신 가격 데이터가 아직 DB 기준으로 읽히지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
+            error = "candidate-or-market-data-not-db-backed"
         return {
             "mode": SIGNAL_STORAGE_BACKEND,
             "implementation": "postgres",
             "runsDir": display_local_path(RUNS_DIR),
             "runsDirExists": RUNS_DIR.exists(),
             "writable": True,
-            "persistent": True,
-            "volatileFallback": False,
-            "operationReady": True,
+            "persistent": operation_ready,
+            "volatileFallback": not operation_ready,
+            "operationReady": operation_ready,
             "recentRunCount": len(recent_runs),
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
@@ -12484,8 +12553,8 @@ def snapshot_storage_status() -> dict:
             "rawEvents": raw_events,
             "candidateData": candidate_data,
             "marketData": market_data,
-            "message": "Postgres DB에 스냅샷, 후보 풀, 최신 수집값을 저장합니다.",
-            "error": "",
+            "message": message,
+            "error": error,
         }
 
     writable = False
