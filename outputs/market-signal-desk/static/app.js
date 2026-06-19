@@ -173,7 +173,7 @@ const QUICK_SEARCH_PRESETS = [
 const DASHBOARD_BROWSER_CACHE_PREFIX = "marketSignalDashboardCache:";
 const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
-const LIVE_PRICE_SYMBOL_LIMIT = 24;
+const LIVE_PRICE_SYMBOL_LIMIT = 80;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
@@ -736,7 +736,13 @@ function livePriceRefreshDetail(symbols) {
     candidateNeedsMarketDepth(topCandidate);
   const nextCount = Number(state.livePrice.refreshCount || 0) + 1;
   const scheduledDepth = nextCount % LIVE_MARKET_DEPTH_REFRESH_EVERY === 0;
-  return needsDepth || scheduledDepth ? "market-depth" : "price";
+  const lastDepthAt = Date.parse(state.livePrice.lastDepthAt || "");
+  const depthCooldownMs = Math.max(
+    Number(state.livePrice.pollSeconds || 10) * 1000 * LIVE_MARKET_DEPTH_REFRESH_EVERY,
+    30000
+  );
+  const depthDue = !Number.isFinite(lastDepthAt) || Date.now() - lastDepthAt >= depthCooldownMs;
+  return needsDepth && (scheduledDepth || depthDue) ? "market-depth" : "price";
 }
 
 function livePricePriority(item) {
@@ -802,6 +808,7 @@ function candidateLiveRenderSignature(item = {}) {
 function mergeLivePricePayload(payload) {
   const incoming = Array.isArray(payload?.candidates) ? payload.candidates : [];
   if (!state.dashboard || !incoming.length) return false;
+  const priceOnly = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const existing = state.dashboard.candidates ?? [];
   const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
   const previousSignatures = new Map(existing.map((item) => [item.symbol, candidateLiveRenderSignature(item)]));
@@ -809,7 +816,7 @@ function mergeLivePricePayload(payload) {
   const incomingSymbols = new Set(incomingBySymbol.keys());
   const merged = existing.map((item) => {
     const next = incomingBySymbol.get(item.symbol);
-    return next ? mergeLiveCandidate(item, next) : item;
+    return next ? mergeLiveCandidate(item, next, { priceOnly }) : item;
   });
   if (payload?.allowCandidateAppend) {
     incoming.forEach((item) => {
@@ -898,8 +905,9 @@ function retainedLivePrice(current) {
   };
 }
 
-function mergeLiveCandidate(current, incoming) {
+function mergeLiveCandidate(current, incoming, options = {}) {
   const merged = { ...current };
+  const priceOnly = Boolean(options.priceOnly);
   const retainCurrentPrice = currentLivePriceStillUsable(current) && incomingLivePriceMissing(incoming);
   const retainCurrentChange =
     !retainCurrentPrice &&
@@ -907,7 +915,17 @@ function mergeLiveCandidate(current, incoming) {
     incomingChangeMissing(incoming);
   const priceRetainedFields = new Set(["price", "change", "updated", "livePrice", "dataCompleteness", "priceReadiness", "evaluationMode", "priceReaction", "qualityGate", "finalDecision", "signalValidation"]);
   const changeRetainedFields = new Set(["change", "priceReaction", "dataCompleteness", "priceReadiness", "evaluationMode", "qualityGate", "finalDecision", "signalValidation"]);
-  const liveFields = [
+  const priceOnlyFields = [
+    "price",
+    "change",
+    "updated",
+    "livePrice",
+    "dataCompleteness",
+    "priceReadiness",
+    "evaluationMode",
+    "priceReaction"
+  ];
+  const analysisFields = [
     "price",
     "change",
     "chart",
@@ -928,6 +946,7 @@ function mergeLiveCandidate(current, incoming) {
     "decisionGroup",
     "candidateCompression"
   ];
+  const liveFields = priceOnly ? priceOnlyFields : analysisFields;
   liveFields.forEach((key) => {
     if (retainCurrentPrice && priceRetainedFields.has(key)) return;
     if (retainCurrentChange && changeRetainedFields.has(key)) return;
@@ -984,6 +1003,8 @@ function livePriceSummaryPatch(summary) {
     "livePriceStoredFallbackCount",
     "livePriceRetainedCount",
     "livePriceMissingCount",
+    "candidateMarketDataLatestUpdatedCount",
+    "candidateMarketDataLatestStored",
     "stableDecisionCount",
     "finalDecisionStabilitySeconds",
     "candidateDataCarriedForwardCount",
@@ -1004,6 +1025,9 @@ function livePriceIntegrationsPatch(integrations) {
   const source = integrations && typeof integrations === "object" ? integrations : {};
   const patch = {};
   if (source.livePrice) patch.livePrice = source.livePrice;
+  if (source.candidateMarketDataLatest) patch.candidateMarketDataLatest = source.candidateMarketDataLatest;
+  if (source.marketDataLatest) patch.marketDataLatest = source.marketDataLatest;
+  if (source.marketDataMerge) patch.marketDataMerge = source.marketDataMerge;
   if (source.toss) {
     patch.toss = {
       ...(state.dashboard?.integrations?.toss ?? {}),
