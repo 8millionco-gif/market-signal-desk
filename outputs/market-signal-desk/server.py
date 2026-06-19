@@ -8246,7 +8246,7 @@ def candidate_core_eligible(candidate: dict) -> bool:
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else candidate_signal_validation_profile(candidate)
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
     evidence = candidate_discovery_evidence_strength(candidate)
-    price_readiness = candidate_price_readiness(candidate)
+    trade_gate = candidate_trade_data_gate(candidate)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     action_key = str(final_decision.get("actionKey", ""))
@@ -8259,7 +8259,9 @@ def candidate_core_eligible(candidate: dict) -> bool:
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     if candidate_is_portfolio_linked(candidate):
         return False
-    if not price_readiness["entryReady"]:
+    if not trade_gate.get("tradeReady"):
+        return False
+    if not validation.get("entryReady") or str(validation.get("key", "")) != "confirmed":
         return False
     if official.get("riskLevel") in {"medium", "high"}:
         return False
@@ -8274,7 +8276,8 @@ def candidate_core_eligible(candidate: dict) -> bool:
         and readiness >= (68 if validation.get("entryReady") else 50)
         and confidence_score >= 58
         and reliability_score >= 50
-        and reaction_score >= (56 if reaction_gate == "confirmed" else 28)
+        and reaction_gate == "confirmed"
+        and reaction_score >= 56
         and risk < 22
         and heat < 14
     )
@@ -8309,6 +8312,8 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         score_detail = item.get("score", {}) if isinstance(item.get("score"), dict) else {}
         official = item.get("officialSignal", {}) if isinstance(item.get("officialSignal"), dict) else {}
         price_readiness = candidate_price_readiness(item)
+        trade_gate = candidate_trade_data_gate(item)
+        item["tradeDataGate"] = trade_gate
         action_key = str(final_decision.get("actionKey", "verify"))
         gate_key = str(gate.get("key", "defer"))
         reaction_gate = str(reaction.get("reactionGate", "wait"))
@@ -8327,18 +8332,18 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         )
         soft_exclude = action_key == "exclude" or gate_key == "exclude"
 
-        if not price_readiness["displayReady"]:
+        if not trade_gate.get("displayReady"):
             tier, label = "wait", "보강 대기"
-            reason = price_readiness["message"]
-        elif not price_readiness["entryReady"] and hard_exclude:
+            reason = str(trade_gate.get("reason") or price_readiness["message"])
+        elif not trade_gate.get("tradeReady") and hard_exclude:
             tier, label = "exclude", "제외"
             reason = "가격 반응 데이터가 미완성이고 리스크 기준에 걸려 신규 진입 제외"
-        elif not price_readiness["entryReady"]:
-            if price_readiness.get("key") == "closed_baseline":
+        elif not trade_gate.get("tradeReady"):
+            if trade_gate.get("closedBaseline"):
                 tier, label = "wait", "장마감 관찰"
             else:
                 tier, label = "wait", "보강 대기"
-            reason = f"{price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
+            reason = f"{trade_gate.get('reason') or price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
         elif id(item) in core_item_ids:
             tier, label = "core", "핵심"
             if validation_key == "confirmed":
@@ -8380,7 +8385,9 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "rank": rank_by_symbol.get(symbol, 0),
             "score": compression_score,
             "coreLimit": max_core,
-            "tradeReady": tier == "core" and validation_key == "confirmed",
+            "tradeReady": tier == "core" and bool(trade_gate.get("tradeReady")) and validation_key == "confirmed",
+            "entryReady": bool(trade_gate.get("entryReady")),
+            "readinessKey": trade_gate.get("readinessKey", ""),
             "reason": reason,
             "confidenceScore": bounded_int(confidence.get("score", 0), 0, 100),
             "reactionScore": bounded_int(reaction.get("score", 0), 0, 100),
