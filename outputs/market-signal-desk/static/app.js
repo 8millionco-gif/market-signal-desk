@@ -1008,6 +1008,7 @@ function renderCandidatePoolStatus() {
 
 function candidateSourceLabel(summary = {}) {
   const cache = state.dashboard?.cache ?? {};
+  if (cache.cached && cache.source === "dashboard_cache") return "저장 대시보드";
   if (cache.cached && cache.source === "discovery_latest") return "저장 발굴본";
   if (cache.cached) return "저장 스냅샷";
   if (summary.candidateSourceStored) return "저장 발굴 후보";

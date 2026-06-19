@@ -28,6 +28,8 @@ Thumbs.db
 outputs/market-signal-desk/data/runs/
 outputs/market-signal-desk/data/watchlist.json
 outputs/market-signal-desk/data/dart-corp-codes.json
+outputs/market-signal-desk/data/candidate-pool.json
+outputs/market-signal-desk/data/dashboard-cache.json
 outputs/market-signal-desk/__pycache__/
 
 # Local test run artifacts

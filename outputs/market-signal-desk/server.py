@@ -36,6 +36,7 @@ DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
 DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
+DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard-cache.json"
 RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -9714,7 +9715,106 @@ def latest_scheduler_snapshot_detail(mode: str | None = None) -> dict | None:
     return latest_file_snapshot_detail(mode)
 
 
+def dashboard_cache_key(mode: str) -> str:
+    selected = mode if mode in {"close", "preopen", "intraday"} else "close"
+    return f"dashboard_cache:{selected}"
+
+
+def dashboard_cache_file_data() -> dict:
+    data = safe_read_json_file(DASHBOARD_CACHE_FILE) or {"items": {}}
+    if not isinstance(data, dict):
+        return {"items": {}}
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    return data
+
+
+def dashboard_cache_record(mode: str) -> dict | None:
+    key = dashboard_cache_key(mode)
+    stored = db_read_kv(key, None) if database_storage_enabled() else None
+    if isinstance(stored, dict) and isinstance(stored.get("dashboard"), dict):
+        return stored
+    data = dashboard_cache_file_data()
+    record = data.get("items", {}).get(mode)
+    if isinstance(record, dict) and isinstance(record.get("dashboard"), dict):
+        return record
+    return None
+
+
+def write_dashboard_cache_record(mode: str, dashboard_payload: dict, source: str = "dashboard") -> bool:
+    if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+        return False
+    candidates = dashboard_payload.get("candidates", [])
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    selected_mode = mode if mode in {"close", "preopen", "intraday"} else str(dashboard_payload.get("mode", "close"))
+    payload = copy.deepcopy(dashboard_payload)
+    payload.pop("cache", None)
+    created_at = str(payload.get("generatedAt") or datetime.now(KST).isoformat(timespec="seconds"))
+    record = {
+        "id": f"{created_at}-{selected_mode}-dashboard-cache",
+        "mode": selected_mode,
+        "source": source,
+        "createdAt": created_at,
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "summary": payload.get("summary", {}),
+        "dashboard": payload,
+    }
+    if db_write_kv(dashboard_cache_key(selected_mode), record):
+        return True
+    data = dashboard_cache_file_data()
+    items = data.get("items", {})
+    items[selected_mode] = record
+    data["items"] = items
+    data["updatedAt"] = record["updatedAt"]
+    write_json(DASHBOARD_CACHE_FILE, data)
+    return True
+
+
+def cached_detail_timestamp(detail: dict) -> datetime:
+    record = detail.get("record", {}) if isinstance(detail.get("record"), dict) else {}
+    dashboard_payload = detail.get("dashboard", {}) if isinstance(detail.get("dashboard"), dict) else {}
+    text = str(record.get("createdAt") or dashboard_payload.get("generatedAt") or "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(timezone.utc)
+
+
+def newest_cached_detail(details: list[dict]) -> dict | None:
+    usable = [
+        detail
+        for detail in details
+        if isinstance(detail, dict) and isinstance(detail.get("dashboard"), dict) and detail.get("dashboard")
+    ]
+    if not usable:
+        return None
+    return max(usable, key=cached_detail_timestamp)
+
+
+def dashboard_cache_detail(mode: str) -> dict | None:
+    record = dashboard_cache_record(mode)
+    if not isinstance(record, dict):
+        return None
+    dashboard_payload = record.get("dashboard", {})
+    if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+        return None
+    return {
+        "source": "dashboard_cache",
+        "record": {key: value for key, value in record.items() if key != "dashboard"},
+        "dashboard": dashboard_payload,
+    }
+
+
 def cached_dashboard_detail(mode: str) -> dict | None:
+    exact_details: list[dict] = []
+    cache_detail = dashboard_cache_detail(mode)
+    if cache_detail is not None:
+        exact_details.append(cache_detail)
+
     latest_discovery = discovery_latest_record(include_dashboard=True)
     if isinstance(latest_discovery, dict):
         discovery_dashboard = latest_discovery.get("dashboard", {})
@@ -9723,29 +9823,35 @@ def cached_dashboard_detail(mode: str) -> dict | None:
             and discovery_dashboard
             and str(latest_discovery.get("mode", "")) == mode
         ):
-            return {
+            exact_details.append({
                 "source": "discovery_latest",
                 "record": {key: value for key, value in latest_discovery.items() if key != "dashboard"},
                 "dashboard": discovery_dashboard,
-            }
+            })
 
     scheduler_detail = latest_scheduler_snapshot_detail(mode)
     if isinstance(scheduler_detail, dict) and isinstance(scheduler_detail.get("dashboard"), dict):
-        return {"source": "snapshot", **scheduler_detail}
+        exact_details.append({"source": "snapshot", **scheduler_detail})
 
+    exact_match = newest_cached_detail(exact_details)
+    if exact_match is not None:
+        return exact_match
+
+    fallback_details: list[dict] = []
     if isinstance(latest_discovery, dict):
         discovery_dashboard = latest_discovery.get("dashboard", {})
         if isinstance(discovery_dashboard, dict) and discovery_dashboard:
-            return {
+            fallback_details.append({
                 "source": "discovery_latest",
                 "record": {key: value for key, value in latest_discovery.items() if key != "dashboard"},
                 "dashboard": discovery_dashboard,
-            }
+            })
 
     fallback_detail = latest_scheduler_snapshot_detail(None)
     if isinstance(fallback_detail, dict) and isinstance(fallback_detail.get("dashboard"), dict):
-        return {"source": "snapshot", **fallback_detail}
-    return None
+        fallback_details.append({"source": "snapshot", **fallback_detail})
+    return newest_cached_detail(fallback_details)
+
 
 
 def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
@@ -10712,7 +10818,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json(cached_payload)
                     return
             try:
-                self.send_json(dashboard(mode, force_discovery=force_refresh))
+                payload = dashboard(mode, force_discovery=force_refresh)
+                write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
+                self.send_json(payload)
             except Exception as error:
                 cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if cached_payload is not None:
