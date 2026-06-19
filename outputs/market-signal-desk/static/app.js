@@ -1564,6 +1564,7 @@ function renderMetrics() {
     const groups = summary.decisionGroups ?? {};
     const gates = summary.qualityGateCounts ?? {};
     const reactions = summary.priceReactionCounts ?? {};
+    const reactionGates = summary.priceReactionGateCounts ?? {};
     const decisions = summary.finalDecisionCounts ?? {};
     const compressionCounts = summary.candidateCompressionCounts ?? {};
     const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
@@ -1595,6 +1596,10 @@ function renderMetrics() {
     const reactionText =
       reactions.strong || reactions.confirmed || reactions.weak || reactions.missing
         ? ` · 가격반응 강 ${reactions.strong ?? 0} · 확인 ${reactions.confirmed ?? 0} · 약 ${reactions.weak ?? 0} · 부족 ${reactions.missing ?? 0}`
+        : "";
+    const reactionGateText =
+      reactionGates.confirmed || reactionGates.watch || reactionGates.wait || reactionGates.blocked || summary.priceReactionEntryBlockedCount
+        ? ` · 반응게이트 확인 ${reactionGates.confirmed ?? 0} · 관찰 ${reactionGates.watch ?? 0} · 대기 ${reactionGates.wait ?? 0} · 차단 ${reactionGates.blocked ?? 0} · 진입차단 ${summary.priceReactionEntryBlockedCount ?? 0}`
         : "";
     const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
     const portfolioLinked = Number(summary.portfolioLinkedCandidateCount ?? 0);
@@ -1643,7 +1648,7 @@ function renderMetrics() {
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${sourceReliabilityText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${sourceReliabilityText}${reactionText}${reactionGateText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     const cache = state.dashboard?.cache ?? {};
     const cacheText = cache.cached
@@ -3945,6 +3950,9 @@ function decisionGroupSection(item) {
   const confidence = item.dataConfidence ?? {};
   const sourceReliability = item.sourceReliability ?? {};
   const reaction = item.priceReaction ?? {};
+  const reactionMetrics = reaction.metrics ?? {};
+  const confirmedFactors = Array.isArray(reactionMetrics.confirmedFactors) ? reactionMetrics.confirmedFactors : [];
+  const missingFactors = Array.isArray(reactionMetrics.missingFactors) ? reactionMetrics.missingFactors : [];
   const gate = item.qualityGate ?? {};
   const finalDecision = item.finalDecision ?? {};
   const holding = selectedHoldingFor(item);
@@ -3964,6 +3972,9 @@ function decisionGroupSection(item) {
         ${sourceReliability.score != null ? statCard("원천 신뢰", `${sourceReliability.label ?? "-"} · ${sourceReliability.score}/100`) : ""}
         ${reaction.score != null ? statCard("가격 반응", `${reaction.label ?? "-"} · ${reaction.score}/100`) : ""}
         ${reaction.reactionGate ? statCard("반응 게이트", reactionGateLabel(reaction.reactionGate)) : ""}
+        ${reactionMetrics.confirmationCount != null ? statCard("반응 확인", `${reactionMetrics.confirmationCount}/${reactionMetrics.requiredConfirmations ?? 2}`) : ""}
+        ${confirmedFactors.length ? statCard("확인 요소", confirmedFactors.join(", ")) : ""}
+        ${missingFactors.length ? statCard("부족 요소", missingFactors.join(", ")) : ""}
         ${holding ? statCard("보유 손익", `${holding.profitLossRate ?? "-"} · ${holding.judgement ?? "보유"}`) : ""}
         ${holding ? statCard("평균단가", holding.averagePurchasePrice ?? "-") : ""}
         ${gate.label ? statCard("게이트", gate.label) : ""}
@@ -3979,6 +3990,8 @@ function decisionGroupSection(item) {
         ${(sourceReliability.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 보강: ${text}`)}</li>`).join("")}
         ${(sourceReliability.blockers ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 차단: ${text}`)}</li>`).join("")}
         ${(reaction.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`가격 반응: ${text}`)}</li>`).join("")}
+        ${confirmedFactors.length ? `<li>${escapeHtml(`반응 확인 요소: ${confirmedFactors.join(", ")}`)}</li>` : ""}
+        ${missingFactors.length ? `<li>${escapeHtml(`반응 부족 요소: ${missingFactors.join(", ")}`)}</li>` : ""}
         ${(reaction.blockers ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 차단: ${text}`)}</li>`).join("")}
         ${(reaction.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 경고: ${text}`)}</li>`).join("")}
         ${(gate.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`게이트: ${text}`)}</li>`).join("")}

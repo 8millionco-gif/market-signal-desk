@@ -4174,28 +4174,45 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     warnings: list[str] = []
     blockers: list[str] = []
     sources: list[str] = []
+    confirmed_factors: list[str] = []
+    missing_factors: list[str] = []
 
     change = display_percent_to_decimal(candidate.get("change"))
     live_price = candidate.get("livePrice", {})
     has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
     if has_live_price:
         sources.append("토스 현재가")
+    price_reaction_positive = False
+    price_reaction_confirmed = False
     if change is None:
         warnings.append("등락률 미확인")
+        missing_factors.append("가격")
     elif change >= Decimal("0.4") and change <= Decimal("3"):
         score += 28
+        price_reaction_positive = True
+        price_reaction_confirmed = True
+        confirmed_factors.append("가격")
         reasons.append(f"가격이 {display_change(change)}로 재료에 반응")
     elif change > 0:
         score += 18
+        price_reaction_positive = True
+        if change >= Decimal("0.25"):
+            price_reaction_confirmed = True
+            confirmed_factors.append("가격")
+        else:
+            missing_factors.append("가격 강도")
         reasons.append(f"가격이 {display_change(change)}로 소폭 반응")
     elif change >= Decimal("-0.5"):
         score += 8
+        missing_factors.append("가격")
         warnings.append(f"가격 반응이 {display_change(change)}로 약함")
     elif change >= Decimal("-2"):
         score += 3
+        missing_factors.append("가격")
         warnings.append(f"가격이 {display_change(change)}로 약세")
     else:
         score -= 8
+        missing_factors.append("가격")
         warnings.append(f"가격이 {display_change(change)}로 재료를 부정")
 
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
@@ -4204,19 +4221,27 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     has_live_candles = isinstance(candles, dict) and candles.get("source") == "toss"
     if has_live_candles:
         sources.append("토스 일봉")
+    volume_confirmed = False
     if volume is None:
         warnings.append("거래량 배수 미확인")
+        missing_factors.append("거래량")
     elif volume >= Decimal("2.2"):
         score += 25
+        volume_confirmed = True
+        confirmed_factors.append("거래량")
         reasons.append(f"거래량 {volume.quantize(Decimal('0.1'))}배로 수급 반응 강함")
     elif volume >= Decimal("1.5"):
         score += 18
+        volume_confirmed = True
+        confirmed_factors.append("거래량")
         reasons.append(f"거래량 {volume.quantize(Decimal('0.1'))}배로 수급 확인")
     elif volume >= Decimal("1.1"):
         score += 10
         reasons.append(f"거래량 {volume.quantize(Decimal('0.1'))}배로 최소 반응")
+        missing_factors.append("거래량 강도")
     else:
         score += 2
+        missing_factors.append("거래량")
         warnings.append(f"거래량 {volume.quantize(Decimal('0.1'))}배로 반응 부족")
 
     orderbook = candidate.get("liveOrderbook", {})
@@ -4271,6 +4296,20 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         (orderbook_imbalance is not None and orderbook_imbalance <= Decimal("-15"))
         or (trade_bias is not None and trade_bias <= Decimal("-15"))
     )
+    if liquidity_positive:
+        confirmed_factors.append("수급")
+    else:
+        missing_factors.append("수급")
+    confirmed_factors = unique_texts(confirmed_factors, limit=4)
+    missing_factors = unique_texts(missing_factors, limit=4)
+    confirmation_count = len(confirmed_factors)
+    required_confirmations = 2 if has_event else 1
+    if price_reaction_confirmed and volume_confirmed:
+        score += 12
+        reasons.append("가격과 거래량이 동시에 확인")
+    elif price_reaction_confirmed and liquidity_positive:
+        score += 10
+        reasons.append("가격과 수급이 동시에 확인")
     reaction_gate = "watch"
     entry_block = False
 
@@ -4278,6 +4317,11 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         reaction_gate = "wait"
         entry_block = True
         blockers.append("실시간 현재가 미확인")
+    if has_event and not price_reaction_positive:
+        score = min(score, 40)
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("재료 대비 가격 상승 반응 미확인")
     if has_event and change is not None and change <= 0 and (volume is None or volume < Decimal("1.2")):
         score = min(score, 38)
         warnings.append("뉴스·공시 재료 대비 가격과 거래량 반응 부족")
@@ -4298,6 +4342,11 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         reaction_gate = "wait"
         entry_block = True
         blockers.append("가격은 움직였지만 거래량·수급 확인 부족")
+    elif has_event and confirmation_count < required_confirmations:
+        score = min(score, 52)
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("가격·거래량·수급 중 2개 이상 확인 필요")
     elif has_event and liquidity_negative:
         score = min(score, 44)
         reaction_gate = "wait"
@@ -4320,7 +4369,12 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         key, label, priority = "missing", "반응 부족", 3
 
     if reaction_gate not in {"blocked", "wait"}:
-        if key in {"strong", "confirmed"} and has_live_price:
+        if (
+            key in {"strong", "confirmed"}
+            and has_live_price
+            and price_reaction_confirmed
+            and (volume_confirmed or liquidity_positive)
+        ):
             reaction_gate = "confirmed"
         elif key == "weak":
             reaction_gate = "watch"
@@ -4329,6 +4383,15 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
             if has_event:
                 entry_block = True
 
+    supports_entry = (
+        reaction_gate == "confirmed"
+        and not entry_block
+        and has_live_price
+        and price_reaction_confirmed
+        and (volume_confirmed or liquidity_positive)
+        and confirmation_count >= required_confirmations
+    )
+
     return {
         "key": key,
         "label": label,
@@ -4336,7 +4399,7 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         "score": score,
         "reactionGate": reaction_gate,
         "entryBlock": entry_block,
-        "supportsEntry": key in {"strong", "confirmed"} and reaction_gate == "confirmed" and not entry_block,
+        "supportsEntry": supports_entry,
         "hasEvent": has_event,
         "metrics": {
             "priceChange": display_change(change) if change is not None else "",
@@ -4347,6 +4410,13 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
             "hasTrades": has_trades,
             "orderbookImbalance": display_change(orderbook_imbalance) if orderbook_imbalance is not None else "",
             "tradeBias": display_change(trade_bias) if trade_bias is not None else "",
+            "priceConfirmed": price_reaction_confirmed,
+            "volumeConfirmed": volume_confirmed,
+            "liquidityConfirmed": liquidity_positive,
+            "confirmationCount": confirmation_count,
+            "requiredConfirmations": required_confirmations,
+            "confirmedFactors": confirmed_factors,
+            "missingFactors": missing_factors,
         },
         "sources": unique_texts(sources, limit=4),
         "reasons": unique_texts(reasons, limit=5),
@@ -4852,6 +4922,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction_key = str(reaction.get("key", "missing"))
     reaction_gate = str(reaction.get("reactionGate", "wait"))
     reaction_entry_block = bool(reaction.get("entryBlock"))
+    reaction_supports_entry = bool(reaction.get("supportsEntry"))
+    reaction_supports_entry = bool(reaction.get("supportsEntry"))
     live_price = candidate.get("livePrice", {})
     has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
     official_signal = candidate.get("officialSignal", {})
@@ -4880,9 +4952,18 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif risk >= 24 or total < 45 or group_key == "exclude":
         key, label, priority = "exclude", "오늘 제외", 4
         reasons.append("리스크 또는 종합 점수가 기준 미달")
-    elif group_key == "action" and has_live_price and confidence_score >= 68 and reaction_score >= 56 and risk < 18 and heat < 10 and readiness >= 70:
+    elif (
+        group_key == "action"
+        and has_live_price
+        and confidence_score >= 68
+        and reaction_supports_entry
+        and reaction_score >= 62
+        and risk < 18
+        and heat < 10
+        and readiness >= 70
+    ):
         key, label, priority = "actionable", "실전 후보", 0
-        reasons.append("가격 반응·준비도·신뢰도 기준 통과")
+        reasons.append("가격·거래량 반응, 준비도, 신뢰도 기준 통과")
     elif reaction_key in {"missing", "weak"} and reaction.get("hasEvent"):
         key, label, priority = "defer", "반응 확인 대기", 3
         reasons.append("재료 대비 가격·거래량 반응 부족")
@@ -5044,7 +5125,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
             action_key, action, tone = "trim", "분할매도 검토", "sell"
             summary = "수익 또는 비중이 커진 보유 종목입니다. 신규 매수보다 일부 이익 실현과 비중 조절을 먼저 봅니다."
         elif profit_percent is not None and profit_percent <= Decimal("-3"):
-            if gate_key == "actionable" and reaction_key in {"strong", "confirmed"} and risk < 18:
+            if gate_key == "actionable" and reaction_supports_entry and risk < 18:
                 action_key, action, tone = "add", "추가매수 검토", "buy"
                 summary = "보유 손실 구간이지만 가격 반응과 신뢰도가 확인되어 소액 추가매수 조건을 점검합니다."
             else:
@@ -5095,9 +5176,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif weak:
         action_key, action, tone = "watch", "관찰", "wait"
         summary = "가격이 약한 구간이라 거래량을 동반한 반등 회복 전까지 관찰합니다."
-    elif gate_key == "actionable" and readiness >= 70 and total >= 72:
+    elif gate_key == "actionable" and reaction_supports_entry and readiness >= 70 and total >= 72:
         action_key, action, tone = "buy", "매수 가능", "buy"
-        summary = "신뢰도·가격·리스크 기준을 통과했습니다. 단, 분할 관찰 기준으로만 접근합니다."
+        summary = "신뢰도·가격·거래량 반응·리스크 기준을 통과했습니다. 단, 분할 관찰 기준으로만 접근합니다."
     elif group_key in {"hidden", "momentum"} or gate_key == "watch":
         action_key, action, tone = "watch", "관찰", "wait"
         summary = "재료는 있으나 가격·거래량 반응을 한 번 더 확인해야 합니다."
@@ -5350,7 +5431,7 @@ def candidate_core_eligible(candidate: dict) -> bool:
         return False
     if not validation.get("entryReady"):
         return False
-    if reaction.get("reactionGate") != "confirmed" or reaction.get("entryBlock"):
+    if reaction.get("reactionGate") != "confirmed" or reaction.get("entryBlock") or not reaction.get("supportsEntry"):
         return False
     return (
         bounded_int(candidate.get("totalScore", 0), 0, 100) >= 70
@@ -6386,6 +6467,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     official_counts = {"positive": 0, "risk": 0, "caution": 0, "neutral": 0, "highRisk": 0}
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     reaction_counts = {"strong": 0, "confirmed": 0, "weak": 0, "missing": 0}
+    reaction_gate_counts = {"confirmed": 0, "watch": 0, "wait": 0, "blocked": 0}
     final_decision_counts = {
         "buy": 0,
         "add": 0,
@@ -6478,6 +6560,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         reaction = candidate_price_reaction(item, score_detail)
         reaction_scores.append(bounded_int(reaction.get("score", 0), 0, 100))
         reaction_counts[reaction["key"]] = reaction_counts.get(reaction["key"], 0) + 1
+        reaction_gate = str(reaction.get("reactionGate", "wait"))
+        reaction_gate_counts[reaction_gate] = reaction_gate_counts.get(reaction_gate, 0) + 1
         gate = candidate_quality_gate(item, score_detail, total, readiness, confidence, reaction)
         confidence_scores.append(bounded_int(confidence.get("score", 0), 0, 100))
         gate_counts[gate["key"]] = gate_counts.get(gate["key"], 0) + 1
@@ -6542,6 +6626,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "actionCandidateCount": groups.get("action", 0),
         "qualityGateCounts": gate_counts,
         "priceReactionCounts": reaction_counts,
+        "priceReactionGateCounts": reaction_gate_counts,
+        "priceReactionEntryBlockedCount": len([item for item in enriched if item.get("priceReaction", {}).get("entryBlock")]),
         "finalDecisionCounts": final_decision_counts,
         **compression_status,
         "buyDecisionCount": final_decision_counts.get("buy", 0),
@@ -9050,6 +9136,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "decisionGroups": selection_status.get("decisionGroups", {}),
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
+            "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+            "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
             "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
             "signalValidationCounts": selection_status.get("signalValidationCounts", {}),
@@ -9314,6 +9402,8 @@ def dashboard_summary(payload: dict) -> dict:
         "filteredNewsCount": summary.get("filteredNewsCount"),
         "qualityGateCounts": summary.get("qualityGateCounts", {}),
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
+        "priceReactionGateCounts": summary.get("priceReactionGateCounts", {}),
+        "priceReactionEntryBlockedCount": summary.get("priceReactionEntryBlockedCount"),
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
         "candidateCompressionCounts": summary.get("candidateCompressionCounts", {}),
         "signalValidationCounts": summary.get("signalValidationCounts", {}),
