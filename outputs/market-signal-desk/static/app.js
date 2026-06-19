@@ -156,7 +156,15 @@ function changeClass(change) {
 
 function displayChangeText(change) {
   const text = String(change ?? "").trim();
-  return text && text !== "-" ? text : "등락률 확인 중";
+  if (!text || text === "-" || text.includes("확인")) return "-";
+  const parsed = parseDisplayPercent(text);
+  if (parsed == null) return text;
+  const sign = parsed > 0 ? "+" : parsed < 0 ? "-" : "";
+  const value = Math.abs(parsed).toLocaleString("ko-KR", {
+    minimumFractionDigits: Number.isInteger(parsed) ? 0 : 1,
+    maximumFractionDigits: 2
+  });
+  return `${sign}${value}%`;
 }
 
 function initials(name) {
@@ -746,17 +754,17 @@ function livePriceIntegrationsPatch(integrations) {
   return patch;
 }
 
-function renderLivePriceUpdate() {
+function renderLivePriceUpdate(payload = {}) {
   renderTradeDecisionStatus();
   renderLivePriceStatus();
   renderCandidateSourceDetail();
   renderTossStatus();
-  updateLivePriceFragments();
+  updateLivePriceFragments({ detail: payload.detail || "price" });
 }
 
-function updateLivePriceFragments() {
+function updateLivePriceFragments(options = {}) {
   updateFeedPriceFragments();
-  updateSelectedPriceFragments();
+  updateSelectedPriceFragments(options);
 }
 
 function updateFeedPriceFragments() {
@@ -769,6 +777,8 @@ function updateFeedPriceFragments() {
     const action = button.querySelector("[data-feed-action]");
     const score = button.querySelector("[data-feed-score]");
     const time = button.querySelector("[data-feed-time]");
+    const price = button.querySelector("[data-feed-price]");
+    const change = button.querySelector("[data-feed-change]");
     const decision = button.querySelector("[data-feed-decision]");
     const liveData = button.querySelector("[data-feed-live]");
     const primary = primaryDecisionForDisplay(item, plan);
@@ -781,6 +791,11 @@ function updateFeedPriceFragments() {
       score.className = `score-pill ${scoreClass(item.totalScore)}`;
     }
     if (time) time.textContent = livePriceLabel(item) || item.updated || "";
+    if (price) price.textContent = item.price || "-";
+    if (change) {
+      change.textContent = displayChangeText(item.change);
+      change.className = changeClass(item.change);
+    }
     if (decision) {
       decision.textContent = primary.label;
       decision.className = `feed-badge decision-badge decision-${primary.key}`;
@@ -789,7 +804,7 @@ function updateFeedPriceFragments() {
   });
 }
 
-function updateSelectedPriceFragments() {
+function updateSelectedPriceFragments(options = {}) {
   const item = selectedCandidate();
   if (!item) return;
   const plan = tradePlan(item);
@@ -811,13 +826,96 @@ function updateSelectedPriceFragments() {
   if (decisionNode) decisionNode.className = `decision-summary decision-${primaryDecision.key}`;
   if (decisionLabelNode) decisionLabelNode.textContent = primaryDecision.label;
   if (decisionDetailNode) decisionDetailNode.textContent = primaryDecision.detail;
+  updateSignalFlowFragments(item, plan, primaryDecision);
+  updatePriceReactionFragments(item);
+  updateTradePlanFragments(item);
+  if (options.detail && options.detail !== "price") {
+    drawChart(item.chart);
+  }
+}
 
-  const flow = document.querySelector(".signal-flow-strip");
-  if (flow) flow.outerHTML = signalFlowStrip(item, plan, primaryDecision);
-  const priceSection = document.querySelector(".price-reaction-section");
-  if (priceSection) priceSection.outerHTML = priceReactionSection(item);
-  const planSection = document.querySelector(".trade-plan-section");
-  if (planSection) planSection.outerHTML = tradePlanSection(item);
+function updateSignalFlowFragments(item, plan, primaryDecision) {
+  const stage = reactionStageForDisplay(item);
+  const sourceMeta = candidateSignalMeta(item) || "출처 확인 중";
+  const newsMeta = document.querySelector("[data-flow-news-meta]");
+  const priceLabel = document.querySelector("[data-flow-price-label]");
+  const priceSummary = document.querySelector("[data-flow-price-summary]");
+  const finalLabel = document.querySelector("[data-flow-final-label]");
+  const finalAction = document.querySelector("[data-flow-final-action]");
+  if (newsMeta) newsMeta.textContent = sourceMeta;
+  if (priceLabel) priceLabel.textContent = stage.label;
+  if (priceSummary) priceSummary.textContent = stage.summary;
+  if (finalLabel) finalLabel.textContent = primaryDecision.label;
+  if (finalAction) finalAction.textContent = plan.action;
+}
+
+function reactionCheckGridHtml(stage) {
+  return stage.checks
+    .map(
+      ([label, ok, value]) => `
+        <div class="${ok ? "ok" : "wait"}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function updatePriceReactionFragments(item) {
+  const stage = reactionStageForDisplay(item);
+  const label = document.querySelector("[data-reaction-label]");
+  const summary = document.querySelector("[data-reaction-summary]");
+  const card = document.querySelector("[data-reaction-status-card]");
+  const cardLabel = document.querySelector("[data-reaction-card-label]");
+  const cardMeta = document.querySelector("[data-reaction-card-meta]");
+  const checks = document.querySelector("[data-reaction-check-grid]");
+  if (label) label.textContent = stage.label;
+  if (summary) summary.textContent = stage.summary;
+  if (card) card.className = `reaction-status-card reaction-${stage.tone}`;
+  if (cardLabel) cardLabel.textContent = stage.label;
+  if (cardMeta) cardMeta.textContent = priceMeta(item);
+  if (checks) checks.innerHTML = reactionCheckGridHtml(stage);
+}
+
+function tradeZoneGridHtml(plan) {
+  return tradeZoneCards(plan)
+    .map(
+      ([label, value, note]) => `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+          <em>${escapeHtml(note)}</em>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function updateTradePlanFragments(item) {
+  const plan = tradePlan(item);
+  const now = tradeNowGuide(item, plan);
+  const action = document.querySelector("[data-plan-action]");
+  const summary = document.querySelector("[data-plan-summary]");
+  const pill = document.querySelector("[data-plan-action-pill]");
+  const nowCard = document.querySelector("[data-now-card]");
+  const nowTitle = document.querySelector("[data-now-title]");
+  const nowSummary = document.querySelector("[data-now-summary]");
+  const nowCurrent = document.querySelector("[data-now-current]");
+  const nowFocus = document.querySelector("[data-now-focus]");
+  const zoneGrid = document.querySelector("[data-trade-zone-grid]");
+  if (action) action.textContent = plan.action;
+  if (summary) summary.textContent = plan.summary;
+  if (pill) {
+    pill.textContent = plan.action;
+    pill.className = `action-pill ${plan.tone}`;
+  }
+  if (nowCard) nowCard.className = `decision-now-card decision-${now.tone}`;
+  if (nowTitle) nowTitle.textContent = now.title;
+  if (nowSummary) nowSummary.textContent = now.summary;
+  if (nowCurrent) nowCurrent.textContent = now.current || "-";
+  if (nowFocus) nowFocus.textContent = `기준 ${now.focus || "-"}`;
+  if (zoneGrid) zoneGrid.innerHTML = tradeZoneGridHtml(plan);
 }
 
 async function refreshLivePrices() {
@@ -868,7 +966,7 @@ async function refreshLivePrices() {
     symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length)
   };
   if (merged) {
-    renderLivePriceUpdate();
+    renderLivePriceUpdate(payload);
   } else {
     renderLivePriceStatus();
     renderCandidateSourceDetail();
@@ -3911,6 +4009,10 @@ function renderFeed() {
             </span>
           </span>
           <span class="feed-meta">
+            <span class="feed-price-line">
+              <b data-feed-price>${escapeHtml(item.price || "-")}</b>
+              <em class="${escapeHtml(changeClass(item.change))}" data-feed-change>${escapeHtml(displayChangeText(item.change))}</em>
+            </span>
             <span class="feed-action ${escapeHtml(plan.tone)}" data-feed-action>${escapeHtml(actionLabel)}</span>
             <span class="score-pill ${scoreClass(item.totalScore)}" data-feed-score>${item.totalScore}</span>
             <span class="feed-time" data-feed-time>${escapeHtml(liveText || item.updated)}</span>
@@ -4731,17 +4833,17 @@ function signalFlowStrip(item, plan, primaryDecision) {
       <div>
         <span>1. 뉴스 시그널</span>
         <strong>${escapeHtml(shortText(item.headline || item.thesis || "재료 확인 중", 46))}</strong>
-        <em>${escapeHtml(sourceMeta)}</em>
+        <em data-flow-news-meta>${escapeHtml(sourceMeta)}</em>
       </div>
       <div>
         <span>2. 가격 반응</span>
-        <strong>${escapeHtml(stage.label)}</strong>
-        <em>${escapeHtml(stage.summary)}</em>
+        <strong data-flow-price-label>${escapeHtml(stage.label)}</strong>
+        <em data-flow-price-summary>${escapeHtml(stage.summary)}</em>
       </div>
       <div>
         <span>3. 최종 판단</span>
-        <strong>${escapeHtml(primaryDecision.label)}</strong>
-        <em>${escapeHtml(plan.action)}</em>
+        <strong data-flow-final-label>${escapeHtml(primaryDecision.label)}</strong>
+        <em data-flow-final-action>${escapeHtml(plan.action)}</em>
       </div>
     </div>
   `;
@@ -4780,12 +4882,12 @@ function priceReactionSection(item) {
     <section class="detail-section price-reaction-section">
       <div class="section-title">
         <p class="eyebrow">가격 반응</p>
-        <h2>${escapeHtml(stage.label)}</h2>
-        <p>${escapeHtml(stage.summary)}</p>
+        <h2 data-reaction-label>${escapeHtml(stage.label)}</h2>
+        <p data-reaction-summary>${escapeHtml(stage.summary)}</p>
       </div>
-      <div class="reaction-status-card reaction-${escapeHtml(stage.tone)}">
-        <strong>${escapeHtml(stage.label)}</strong>
-        <span>${escapeHtml(priceMeta(item))}</span>
+      <div class="reaction-status-card reaction-${escapeHtml(stage.tone)}" data-reaction-status-card>
+        <strong data-reaction-card-label>${escapeHtml(stage.label)}</strong>
+        <span data-reaction-card-meta>${escapeHtml(priceMeta(item))}</span>
       </div>
       <details class="support-detail-section reaction-detail-toggle">
         <summary>
@@ -4795,17 +4897,8 @@ function priceReactionSection(item) {
           </span>
           <b>보기</b>
         </summary>
-        <div class="reaction-check-grid">
-          ${stage.checks
-            .map(
-              ([label, ok, value]) => `
-                <div class="${ok ? "ok" : "wait"}">
-                  <span>${escapeHtml(label)}</span>
-                  <strong>${escapeHtml(value)}</strong>
-                </div>
-              `
-            )
-            .join("")}
+        <div class="reaction-check-grid" data-reaction-check-grid>
+          ${reactionCheckGridHtml(stage)}
         </div>
         ${
           confirmed.length || reasons.length
@@ -4980,35 +5073,25 @@ function tradePlanSection(item) {
       <div class="trade-plan-head">
         <div>
           <p class="eyebrow">최종 판단</p>
-          <h2>${escapeHtml(plan.action)}</h2>
-          <p>${escapeHtml(plan.summary)}</p>
+          <h2 data-plan-action>${escapeHtml(plan.action)}</h2>
+          <p data-plan-summary>${escapeHtml(plan.summary)}</p>
         </div>
-        <span class="action-pill ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
+        <span class="action-pill ${escapeHtml(plan.tone)}" data-plan-action-pill>${escapeHtml(plan.action)}</span>
       </div>
-      <div class="decision-now-card decision-${escapeHtml(now.tone)}">
+      <div class="decision-now-card decision-${escapeHtml(now.tone)}" data-now-card>
         <div>
           <span>지금 할 일</span>
-          <strong>${escapeHtml(now.title)}</strong>
-          <p>${escapeHtml(now.summary)}</p>
+          <strong data-now-title>${escapeHtml(now.title)}</strong>
+          <p data-now-summary>${escapeHtml(now.summary)}</p>
         </div>
         <div>
           <span>현재가</span>
-          <strong>${escapeHtml(now.current || "-")}</strong>
-          <em>기준 ${escapeHtml(now.focus || "-")}</em>
+          <strong data-now-current>${escapeHtml(now.current || "-")}</strong>
+          <em data-now-focus>기준 ${escapeHtml(now.focus || "-")}</em>
         </div>
       </div>
-      <div class="trade-zone-grid">
-        ${tradeZoneCards(plan)
-          .map(
-            ([label, value, note]) => `
-              <div>
-                <span>${escapeHtml(label)}</span>
-                <strong>${escapeHtml(value)}</strong>
-                <em>${escapeHtml(note)}</em>
-              </div>
-            `
-          )
-          .join("")}
+      <div class="trade-zone-grid" data-trade-zone-grid>
+        ${tradeZoneGridHtml(plan)}
       </div>
       <ul class="trade-reasons">
         ${plan.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
