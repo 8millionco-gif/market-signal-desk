@@ -606,7 +606,7 @@ function renderLoadError(error) {
   if (els.candidatePoolStatus) {
     els.candidatePoolStatus.innerHTML = `
       <div>
-        <span>후보 풀</span>
+        <span>관찰 후보</span>
         <strong class="warn">연결 실패</strong>
       </div>
     `;
@@ -757,11 +757,11 @@ function signalValidationForDisplay(item) {
 }
 
 function reactionGateLabel(value) {
-  if (value === "confirmed") return "반응확인";
-  if (value === "watch") return "반응관찰";
-  if (value === "wait") return "반응대기";
-  if (value === "blocked") return "반응차단";
-  return "반응";
+  if (value === "confirmed") return "가격 반응 확인";
+  if (value === "watch") return "추가 관찰";
+  if (value === "wait") return "반응 확인 중";
+  if (value === "blocked") return "오늘 제외";
+  return "가격 반응";
 }
 
 function reactionBadgeText(reaction) {
@@ -808,8 +808,8 @@ function candidatePoolStateForDisplay(item) {
   const memory = item?.discovery?.poolMemory ?? {};
   const fallbackByCompression = {
     core: ["entry_candidate", "진입 후보"],
-    review: ["validating", "검증중"],
-    wait: ["watching", "관찰중"],
+    review: ["validating", "관찰 중"],
+    wait: ["watching", "관찰 중"],
     portfolio: ["portfolio", "보유 판단"],
     exclude: ["excluded", "제외"]
   };
@@ -1162,11 +1162,11 @@ function renderCandidatePoolStatus() {
         .join(" · ")
     : "상위 관찰 후보 없음";
   const rows = [
-    ["활성 후보", active > 0, `${active}/${total}`],
-    ["진입/검증", (counts.entry_candidate ?? 0) + (counts.validating ?? 0) > 0, `진입 ${counts.entry_candidate ?? 0} · 검증 ${counts.validating ?? 0}`],
-    ["눌림/관찰", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `눌림 ${counts.pullback_wait ?? 0} · 관찰 ${counts.watching ?? 0}`],
-    ["재점검", retained > 0 || selected > 0, `스캔 ${retained}${scanLimit ? `/${scanLimit}` : ""} · 선정 ${selected}`],
-    ["우선 감시", monitorReady > 0 || monitorWait > 0, `우선 ${monitorReady} · 대기 ${monitorWait}`],
+    ["관찰 후보", active > 0, `${active}/${total}`],
+    ["매수 관찰", (counts.entry_candidate ?? 0) + (counts.validating ?? 0) > 0, `${(counts.entry_candidate ?? 0) + (counts.validating ?? 0)}개`],
+    ["눌림 대기", (counts.pullback_wait ?? 0) + (counts.watching ?? 0) > 0, `${(counts.pullback_wait ?? 0) + (counts.watching ?? 0)}개`],
+    ["오늘 선정", retained > 0 || selected > 0, `${selected}개 · 재확인 ${retained}${scanLimit ? `/${scanLimit}` : ""}`],
+    ["우선 확인", monitorReady > 0 || monitorWait > 0, `${monitorReady}개 · 대기 ${monitorWait}`],
     ["흐름", improving >= weakening, `개선 ${improving} · 약화 ${weakening}`],
     ["성과", performanceMeasured > 0, `${performanceMeasured}건 · 승률 ${performanceHitRate} · 평균 ${performanceAverage}`],
     ["상위", top.length > 0, topText]
@@ -1190,7 +1190,7 @@ function candidateSourceLabel(summary = {}) {
   if (cache.cached && cache.source === "discovery_latest") return "저장 발굴본";
   if (cache.cached) return "저장 스냅샷";
   if (summary.candidateSourceStored) return "저장 발굴 후보";
-  if (summary.candidateSource === "candidate-pool") return "후보 풀 재점검";
+  if (summary.candidateSource === "candidate-pool") return "관찰 후보 재확인";
   if (summary.candidateSource === "auto-discovery") return "실시간 발굴";
   if (summary.candidateSource === "auto-news") return "자동 뉴스 선정";
   if (summary.candidateSource === "auto-universe") return "자동 유니버스 선정";
@@ -1848,7 +1848,7 @@ function renderMetrics() {
         ? `국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
         : "";
     const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
-    const briefText = [cacheText, sourceLabel, scanned ? `${scanned}종목 점검` : "", briefSplitText, briefMaterialText].filter(Boolean).join(" · ");
+    const briefText = [cacheText || sourceLabel, briefSplitText, briefMaterialText].filter(Boolean).join(" · ");
     els.candidateSource.textContent = briefText || sourceLabel;
     els.candidateSource.title = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
   }
@@ -3200,6 +3200,19 @@ function feedActionLabel(item, plan) {
   return primaryDecisionForDisplay(item, plan).label;
 }
 
+function candidateSignalMeta(item) {
+  const sourceCount = Array.isArray(item?.sources) ? item.sources.length : 0;
+  const newsCount = Number(item?.trend?.newsCount ?? 0);
+  const officialCount = Number(item?.officialSignal?.count ?? 0);
+  const parts = [];
+  if (sourceCount) parts.push(`출처 ${sourceCount}개`);
+  else if (newsCount) parts.push(`뉴스 ${newsCount}건`);
+  if (officialCount) parts.push(`공시 ${officialCount}건`);
+  const liveText = livePriceLabel(item);
+  if (liveText) parts.push(liveText);
+  return parts.join(" · ");
+}
+
 function renderFeed() {
   renderStrategyCounts();
   const candidates = filteredCandidates();
@@ -3220,12 +3233,11 @@ function renderFeed() {
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
       const plan = tradePlan(item);
-      const compression = compressionForDisplay(item);
-      const poolState = candidatePoolStateForDisplay(item);
       const actionLabel = feedActionLabel(item, plan);
       const priceGuide = primaryPriceGuide(plan);
       const primaryDecision = primaryDecisionForDisplay(item, plan);
       const liveText = livePriceLabel(item);
+      const signalMeta = candidateSignalMeta(item);
       return `
         <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -3233,18 +3245,16 @@ function renderFeed() {
             <span class="feed-title">
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
-              <span class="feed-badge compression-badge compression-${escapeHtml(compression.tier)}">${escapeHtml(compression.label)}${compression.tier === "core" ? ` #${escapeHtml(compression.rank)}` : ""}</span>
               <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}">${escapeHtml(primaryDecision.label)}</span>
-              ${poolState.momentumLabel ? `<span class="feed-badge pool-momentum pool-momentum-${escapeHtml(poolState.momentumLabel === "개선" ? "up" : poolState.momentumLabel === "약화" ? "down" : "flat")}">${escapeHtml(poolState.momentumLabel)}</span>` : ""}
             </span>
             <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
             <span class="feed-signal-line ${escapeHtml(plan.tone)}">
-              <strong>${escapeHtml(actionLabel)}</strong>
-              <em>${escapeHtml(shortText(priceGuide, 34))}</em>
+              <strong>뉴스 시그널</strong>
+              <em>${escapeHtml(shortText(signalMeta || priceGuide, 40))}</em>
             </span>
           </span>
           <span class="feed-meta">
-            <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(plan.action)}</span>
+            <span class="feed-action ${escapeHtml(plan.tone)}">${escapeHtml(actionLabel)}</span>
             <span class="score-pill ${scoreClass(item.totalScore)}">${item.totalScore}</span>
             <span class="feed-time">${escapeHtml(liveText || item.updated)}</span>
           </span>
@@ -3634,106 +3644,33 @@ function renderDetail() {
       </div>
     </div>
 
+    ${signalFlowStrip(item, plan, primaryDecision)}
+
     <div class="detail-grid">
+      ${newsSignalSection(item)}
+      ${priceReactionSection(item)}
       ${tradePlanSection(item)}
-      ${decisionGroupSection(item)}
-      ${candidatePoolSection(item)}
-      ${signalValidationSection(item)}
-      ${discoveryEvidenceSection(item)}
-      ${hiddenOpportunitySection(item)}
       ${officialSignalSection(item)}
 
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">진입 판단</p>
-          <h2>조건 충족 시에만 관찰</h2>
-        </div>
-        <ul class="bullet-list entry-list">
-          ${uniqueTexts(item.entryConditions, 6).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
-        </ul>
-      </section>
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">금지 조건</p>
-          <h2>이 경우 진입하지 않음</h2>
-        </div>
-        <ul class="bullet-list avoid-list">
-          ${uniqueTexts(item.noEntry, 6).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
-        </ul>
-      </section>
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">왜 후보인가</p>
-          <h2>뉴스와 가격 반응</h2>
-        </div>
-        <ul class="bullet-list">
-          ${uniqueTexts(item.why, 5).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
-        </ul>
-        ${selectionNotes(item)}
-      </section>
-
-      <section class="detail-section info-stack">
-        <div>
-          <div class="section-title">
-            <p class="eyebrow">트렌드</p>
-            <h2>관심도와 수급</h2>
-          </div>
-          <div class="stat-grid">
-            ${statCard("뉴스", `${item.trend?.newsCount ?? 0}건`)}
-            ${statCard("해외 뉴스", item.trend?.globalNewsCount != null ? `${item.trend.globalNewsCount}건` : "-")}
-            ${statCard("공식 이벤트", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
-            ${statCard("재료 뉴스", item.trend?.materialNewsCount != null ? `${item.trend.materialNewsCount}건` : "-")}
-            ${statCard("뉴스 관련성", item.trend?.newsRelevance != null ? `${item.trend.newsRelevance}/100` : "-")}
-            ${statCard("뉴스 증가", item.trend?.newsSpike ?? "-")}
-            ${statCard("거래량", item.trend?.volumeSpike ?? "-")}
-            ${statCard("일 거래량", item.trend?.dailyVolume ?? "-")}
-            ${statCard("체결", item.trend?.tradePressure ?? "-")}
-            ${statCard("호가", item.trend?.orderbookPressure ?? "-")}
-            ${statCard("스프레드", item.trend?.spread ?? "-")}
-            ${statCard("감성", item.trend?.sentiment ?? "-")}
-          </div>
-        </div>
-        ${analysisSummary(item)}
-      </section>
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">손절 기준</p>
-          <h2>매수 전에 정할 것</h2>
-        </div>
-        <ul class="bullet-list risk-list">
-          ${uniqueTexts(item.stopRules, 5).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
-        </ul>
-      </section>
+      ${riskDecisionSection(item)}
 
       <section class="detail-section">
         <div class="section-title">
           <p class="eyebrow">근거</p>
-          <h2>뉴스와 공시 메모</h2>
+          <h2>확인한 출처</h2>
         </div>
         <ul class="source-list">
           ${item.sources
+            .slice(0, 6)
             .map(
               (source) => `
                 <li>
                   <strong>${escapeHtml(source.title)}</strong>
-                  <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}${source.relevanceScore != null ? ` · 관련성 ${escapeHtml(source.relevanceScore)}` : ""}${source.impactTypes?.length ? ` · ${escapeHtml(source.impactTypes.slice(0, 2).join(","))}` : ""}</span>
+                  <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
                 </li>
               `
             )
             .join("")}
-        </ul>
-      </section>
-
-      <section class="detail-section">
-        <div class="section-title">
-          <p class="eyebrow">공시/리스크</p>
-          <h2>확인할 문장</h2>
-        </div>
-        <ul class="bullet-list risk-list">
-          ${uniqueTexts(item.disclosures, 6).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
         </ul>
       </section>
 
@@ -4055,13 +3992,130 @@ function statCard(label, value) {
   `;
 }
 
+function signalFlowStrip(item, plan, primaryDecision) {
+  const reaction = item?.priceReaction ?? {};
+  const reactionLabel = reaction.reactionGate ? reactionGateLabel(reaction.reactionGate) : "가격 확인";
+  const sourceMeta = candidateSignalMeta(item) || "출처 확인 중";
+  return `
+    <div class="signal-flow-strip">
+      <div>
+        <span>1. 뉴스 시그널</span>
+        <strong>${escapeHtml(shortText(item.headline || item.thesis || "재료 확인 중", 46))}</strong>
+        <em>${escapeHtml(sourceMeta)}</em>
+      </div>
+      <div>
+        <span>2. 가격 반응</span>
+        <strong>${escapeHtml(reactionLabel)}</strong>
+        <em>${escapeHtml(priceMeta(item))}</em>
+      </div>
+      <div>
+        <span>3. 최종 판단</span>
+        <strong>${escapeHtml(primaryDecision.label)}</strong>
+        <em>${escapeHtml(plan.action)}</em>
+      </div>
+    </div>
+  `;
+}
+
+function newsSignalSection(item) {
+  const reasons = uniqueTexts([item.thesis, ...(item.why ?? [])], 4);
+  const sourceCount = Array.isArray(item.sources) ? item.sources.length : 0;
+  const latestSource = item.sources?.[0];
+  return `
+    <section class="detail-section signal-story-section">
+      <div class="section-title">
+        <p class="eyebrow">뉴스 시그널</p>
+        <h2>왜 움직였나</h2>
+      </div>
+      <ul class="bullet-list">
+        ${reasons.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+      </ul>
+      <div class="signal-mini-stats">
+        ${statCard("확인 출처", sourceCount ? `${sourceCount}개` : "-")}
+        ${statCard("재료 뉴스", item.trend?.materialNewsCount != null ? `${item.trend.materialNewsCount}건` : "-")}
+        ${statCard("공시/IR", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
+        ${statCard("최근 출처", latestSource ? `${latestSource.publisher} · ${latestSource.time}` : "-")}
+      </div>
+    </section>
+  `;
+}
+
+function priceReactionSection(item) {
+  const reaction = item?.priceReaction ?? {};
+  const metrics = reaction.metrics ?? {};
+  const confirmed = uniqueTexts(metrics.confirmedFactors ?? [], 4);
+  const missing = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
+  const reasons = uniqueTexts(reaction.reasons ?? [], 4);
+  const reactionLabel = reaction.reactionGate ? reactionGateLabel(reaction.reactionGate) : "가격 확인 중";
+  return `
+    <section class="detail-section price-reaction-section">
+      <div class="section-title">
+        <p class="eyebrow">가격 반응</p>
+        <h2>${escapeHtml(reactionLabel)}</h2>
+      </div>
+      <div class="stat-grid">
+        ${statCard("현재가", item.price || "-")}
+        ${statCard("등락률", item.change || "-")}
+        ${statCard("거래량", item.trend?.volumeSpike ?? item.trend?.dailyVolume ?? "-")}
+        ${statCard("체결/호가", [item.trend?.tradePressure, item.trend?.orderbookPressure].filter(Boolean).join(" · ") || "-")}
+        ${statCard("반응 점수", reaction.score != null ? `${reaction.score}/100` : "-")}
+        ${statCard("갱신", livePriceLabel(item) || item.updated || "-")}
+      </div>
+      ${
+        confirmed.length || reasons.length
+          ? `<ul class="bullet-list entry-list">${uniqueTexts([...reasons, ...confirmed], 5).map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+      ${
+        missing.length
+          ? `<ul class="bullet-list risk-list">${missing.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function riskDecisionSection(item) {
+  const entry = uniqueTexts(item.entryConditions, 4);
+  const noEntry = uniqueTexts(item.noEntry, 4);
+  const stopRules = uniqueTexts(item.stopRules, 4);
+  return `
+    <section class="detail-section decision-check-section">
+      <div class="section-title">
+        <p class="eyebrow">판단 기준</p>
+        <h2>진입 전 체크</h2>
+      </div>
+      <div class="decision-check-grid">
+        <div>
+          <strong>매수 관찰 조건</strong>
+          <ul class="bullet-list entry-list">
+            ${entry.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+          </ul>
+        </div>
+        <div>
+          <strong>오늘 제외 조건</strong>
+          <ul class="bullet-list avoid-list">
+            ${noEntry.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+          </ul>
+        </div>
+        <div>
+          <strong>리스크 기준</strong>
+          <ul class="bullet-list risk-list">
+            ${stopRules.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
+          </ul>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function tradePlanSection(item) {
   const plan = tradePlan(item);
   return `
     <section class="detail-section trade-plan-section">
       <div class="trade-plan-head">
         <div>
-          <p class="eyebrow">가격 행동</p>
+          <p class="eyebrow">최종 판단</p>
           <h2>${escapeHtml(plan.action)}</h2>
           <p>${escapeHtml(plan.summary)}</p>
         </div>

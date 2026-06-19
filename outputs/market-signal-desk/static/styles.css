@@ -297,10 +297,13 @@ h3 {
 .candidate-source {
   display: block;
   margin-top: 4px;
+  overflow: hidden;
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .candidate-source-card {
@@ -1282,6 +1285,45 @@ h3 {
   background: #0d0f14;
 }
 
+.signal-flow-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--line-soft);
+}
+
+.signal-flow-strip div {
+  min-width: 0;
+  padding: 16px 18px;
+  background: rgba(18, 22, 31, 0.96);
+}
+
+.signal-flow-strip span,
+.signal-flow-strip em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-flow-strip strong {
+  display: block;
+  min-width: 0;
+  margin: 7px 0 5px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
@@ -1359,6 +1401,29 @@ h3 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.signal-mini-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.decision-check-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.decision-check-grid > div {
+  min-width: 0;
+}
+
+.decision-check-grid > div > strong {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 14px;
 }
 
 .stat-card {
@@ -1990,6 +2055,7 @@ h3 {
   .settings-grid,
   .detail-grid,
   .detail-hero,
+  .signal-flow-strip,
   .decision-panel,
   .performance-hero,
   .performance-grid {
