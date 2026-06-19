@@ -5672,6 +5672,37 @@ def candidate_is_portfolio_linked(candidate: dict) -> bool:
     return bool(portfolio.get("isHeld") or holding)
 
 
+def candidate_discovery_evidence_strength(candidate: dict) -> dict:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    evidence_grade = str(evidence.get("grade", discovery.get("evidenceGrade", "weak")))
+    evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
+    material_news = bounded_int(
+        trend.get("materialNewsCount", discovery.get("materialNewsItems", 0)),
+        0,
+        1_000,
+    )
+    official_count = bounded_int(official.get("count", 0), 0, 100)
+    official_positive = bounded_int(official.get("positiveCount", 0), 0, 100)
+    strong = (
+        evidence_grade in {"strong", "qualified"}
+        or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
+        or material_news >= 2
+        or official_positive > 0
+    )
+    qualified = strong or evidence_score >= 58 or material_news >= 1 or official_count > 0
+    return {
+        "strong": strong,
+        "qualified": qualified,
+        "score": evidence_score,
+        "grade": evidence_grade,
+        "materialNews": material_news,
+        "officialCount": official_count,
+    }
+
+
 def candidate_core_eligible(candidate: dict) -> bool:
     final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
     gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
@@ -5680,27 +5711,36 @@ def candidate_core_eligible(candidate: dict) -> bool:
     score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
     official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else candidate_signal_validation_profile(candidate)
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    evidence = candidate_discovery_evidence_strength(candidate)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     action_key = str(final_decision.get("actionKey", ""))
     gate_key = str(gate.get("key", ""))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
+    total = bounded_int(candidate.get("totalScore", 0), 0, 100)
+    readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
+    reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     if candidate_is_portfolio_linked(candidate):
         return False
     if official.get("riskLevel") in {"medium", "high"}:
         return False
-    if action_key not in {"buy", "add"} and gate_key != "actionable":
+    if action_key in {"exclude", "stop"} or gate_key == "exclude":
         return False
-    if not validation.get("entryReady"):
+    if reaction_gate == "blocked" or (reaction.get("entryBlock") and not evidence["strong"]):
         return False
-    if reaction.get("reactionGate") != "confirmed" or reaction.get("entryBlock") or not reaction.get("supportsEntry"):
+    if not evidence["qualified"]:
         return False
     return (
-        bounded_int(candidate.get("totalScore", 0), 0, 100) >= 70
-        and bounded_int(candidate.get("triggerReadiness", 0), 0, 100) >= 68
-        and bounded_int(confidence.get("score", 0), 0, 100) >= 68
-        and bounded_int(reaction.get("score", 0), 0, 100) >= 56
-        and risk < 18
-        and heat < 10
+        total >= (70 if validation.get("entryReady") else 60)
+        and readiness >= (68 if validation.get("entryReady") else 50)
+        and confidence_score >= 58
+        and reliability_score >= 50
+        and reaction_score >= (56 if reaction_gate == "confirmed" else 28)
+        and risk < 22
+        and heat < 14
     )
 
 
@@ -5742,7 +5782,10 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
 
         if id(item) in core_item_ids:
             tier, label = "core", "핵심"
-            reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
+            if validation_key == "confirmed":
+                reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
+            else:
+                reason = "강한 뉴스·공시 근거와 신뢰도 기준으로 우선 추적할 핵심 후보"
         elif action_key in {"exclude", "stop"} or gate_key == "exclude" or risk >= 24:
             tier, label = "exclude", "제외"
             reason = "리스크나 최종 판단 기준으로 오늘 신규 진입 제외"
@@ -5772,7 +5815,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "rank": rank_by_symbol.get(symbol, 0),
             "score": compression_score,
             "coreLimit": max_core,
-            "tradeReady": tier == "core",
+            "tradeReady": tier == "core" and validation_key == "confirmed",
             "reason": reason,
             "confidenceScore": bounded_int(confidence.get("score", 0), 0, 100),
             "reactionScore": bounded_int(reaction.get("score", 0), 0, 100),
