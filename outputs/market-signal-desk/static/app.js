@@ -485,13 +485,33 @@ async function loadDashboard(options = {}) {
     renderDartStatus();
     renderNewsStatus();
     renderOpenAIStatus();
+    renderCandidateSourceDetail();
   });
 
+  let warmCacheRendered = false;
+  if (!forceRefresh) {
+    const cachedDashboard = browserCachedDashboardPayload(state.mode, { name: "WarmStart" });
+    if (cachedDashboard) {
+      state.dashboard = cachedDashboard;
+      const candidates = state.dashboard.candidates ?? [];
+      if (!candidates.some((item) => item.symbol === state.selectedSymbol)) {
+        const defaultCandidate = bestCandidate(candidates);
+        state.selectedSymbol = defaultCandidate?.symbol ?? state.dashboard.selected?.symbol ?? null;
+      }
+      render();
+      renderCandidateSourceDetail();
+      finishActivity();
+      warmCacheRendered = true;
+    }
+  }
+
   try {
-    updateActivity(
-      forceRefresh ? "후보 분석 중" : "저장 데이터 확인 중",
-      forceRefresh ? "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다" : "DB나 최신 스냅샷에 저장된 후보를 확인합니다"
-    );
+    if (!warmCacheRendered) {
+      updateActivity(
+        forceRefresh ? "후보 분석 중" : "저장 데이터 확인 중",
+        forceRefresh ? "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다" : "DB나 최신 스냅샷에 저장된 후보를 확인합니다"
+      );
+    }
     const params = new URLSearchParams({ mode: state.mode });
     if (forceRefresh) params.set("refresh", "1");
     const dashboard = await fetchJson(`/api/dashboard?${params.toString()}`, forceRefresh ? 45000 : 15000);
@@ -502,7 +522,9 @@ async function loadDashboard(options = {}) {
       const defaultCandidate = bestCandidate(state.dashboard.candidates ?? []);
       state.selectedSymbol = defaultCandidate?.symbol ?? state.dashboard.selected?.symbol ?? null;
     }
-    updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
+    if (!warmCacheRendered) {
+      updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
+    }
     render();
     finishActivity();
     startLivePricePolling();
