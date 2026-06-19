@@ -22,6 +22,10 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Windows runtimes can miss tzdata.
+    ZoneInfo = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -82,6 +86,7 @@ TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS",
 SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "10"))
 SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
 SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
+SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS = int(os.getenv("SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 7)))
 SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
 SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
@@ -1105,7 +1110,7 @@ def timestamp_is_newer(left: str, right: str) -> bool:
     return left_dt > right_dt
 
 
-def live_price_from_market_data_record(record: dict, fallback_updated_at: str = "") -> dict | None:
+def live_price_from_market_data_record(record: dict, fallback_updated_at: str = "", market: str = "") -> dict | None:
     row = market_data_record_payload_row(record)
     last_price = row.get("lastPrice")
     currency = row.get("currency")
@@ -1128,7 +1133,7 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
     else:
         live_price["changeSource"] = "pending-change"
         live_price["changeMessage"] = "DB 최신 가격에는 있으나 등락률 기준가는 추가 확인 중입니다."
-    live_price["freshness"] = live_price_freshness(live_price, updated_at)
+    live_price["freshness"] = live_price_freshness(live_price, updated_at, market)
     return live_price
 
 
@@ -1155,7 +1160,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict]) -> tuple[li
             merged.append(item)
             continue
 
-        record_live_price = live_price_from_market_data_record(record, item.get("updated", ""))
+        record_live_price = live_price_from_market_data_record(record, item.get("updated", ""), str(item.get("market", "")))
         if record_live_price is None:
             merged.append(item)
             continue
@@ -2940,14 +2945,93 @@ def seconds_since_timestamp(value: str | None) -> int | None:
     return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
 
 
-def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "") -> dict:
+def us_eastern_datetime(now: datetime | None = None) -> datetime:
+    base = now or datetime.now(KST)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=KST)
+    if ZoneInfo is not None:
+        try:
+            return base.astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            pass
+    dst_month = 3 <= base.astimezone(timezone.utc).month <= 11
+    offset = -4 if dst_month else -5
+    return base.astimezone(timezone(timedelta(hours=offset)))
+
+
+def us_market_holiday_label(day) -> str:
+    month_day = day.strftime("%m-%d")
+    if month_day == "01-01":
+        return "New Year's Day"
+    if month_day == "06-19":
+        return "Juneteenth"
+    if month_day == "07-04":
+        return "Independence Day"
+    if month_day == "12-25":
+        return "Christmas"
+    return ""
+
+
+def market_session_context(market: str = "", now: datetime | None = None) -> dict:
+    normalized = str(market or "").strip().upper()
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    if normalized in {"US", "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}:
+        eastern = us_eastern_datetime(current)
+        minutes = eastern.hour * 60 + eastern.minute
+        holiday = us_market_holiday_label(eastern.date())
+        is_weekend = eastern.weekday() >= 5
+        is_regular = not is_weekend and not holiday and (9 * 60 + 30) <= minutes < (16 * 60)
+        if holiday:
+            phase, label = "holiday", "미국장 휴장"
+        elif is_weekend:
+            phase, label = "closed", "미국장 휴장"
+        elif minutes < 9 * 60 + 30:
+            phase, label = "preopen", "미국장 개장 전"
+        elif minutes >= 16 * 60:
+            phase, label = "after_close", "미국장 마감 후"
+        else:
+            phase, label = "regular", "미국장 정규장"
+        return {
+            "market": "US",
+            "phase": phase,
+            "label": label,
+            "isRegular": is_regular,
+            "isClosedOrPreopen": not is_regular,
+            "holiday": holiday,
+            "timestamp": eastern.isoformat(timespec="seconds"),
+        }
+    return {
+        "market": normalized or "KR",
+        "phase": "regular",
+        "label": "정규장 기준",
+        "isRegular": True,
+        "isClosedOrPreopen": False,
+        "holiday": "",
+        "timestamp": current.astimezone(KST).isoformat(timespec="seconds"),
+    }
+
+
+def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "", market: str = "") -> dict:
     live_price = live_price if isinstance(live_price, dict) else {}
     source = str(live_price.get("source", "")).strip()
     timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or fallback_updated_at or "").strip()
     age_seconds = seconds_since_timestamp(timestamp)
+    session = market_session_context(market)
+    closed_baseline_allowed = (
+        source == "toss"
+        and bool(live_price.get("lastPrice"))
+        and bool(session.get("isClosedOrPreopen"))
+        and (age_seconds is None or age_seconds <= SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS)
+    )
 
     if source == "toss":
-        if age_seconds is None:
+        if closed_baseline_allowed:
+            status, label = "closed-baseline", "마감가 기준"
+            session_reason = str(session.get("label") or "비정규 시간")
+            message = f"{session_reason}이라 직전 정규장 마감가와 저장된 가격 기준으로 분석합니다. 실시간 진입 판단은 개장 후 확인하세요."
+        elif age_seconds is None:
             status, label, message = "unknown", "시간 미확인", "토스 가격 시간이 없어 실시간 판단에 사용하지 않습니다."
         elif age_seconds <= SIGNAL_LIVE_PRICE_FRESH_SECONDS:
             status, label, message = "live", "실시간", "토스 현재가를 실시간 판단에 사용합니다."
@@ -2973,6 +3057,9 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "")
         "isDelayed": status == "delayed",
         "isStale": status in {"stale", "snapshot", "unknown", "missing"},
         "usableForReaction": status == "live",
+        "usableForBaseline": status in {"live", "closed-baseline", "delayed"},
+        "isClosedBaseline": status == "closed-baseline",
+        "session": session,
         "message": message,
     }
 
@@ -2982,22 +3069,30 @@ def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at
     live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
     item["livePrice"] = {
         **live_price,
-        "freshness": live_price_freshness(live_price, fallback_updated_at),
+        "freshness": live_price_freshness(live_price, fallback_updated_at, str(item.get("market", ""))),
     }
     return item
 
 
 def candidate_has_fresh_live_price(candidate: dict) -> bool:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-    freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     return str(live_price.get("source", "")) == "toss" and bool(freshness.get("usableForReaction"))
+
+
+def candidate_has_usable_price_basis(candidate: dict) -> bool:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
+    if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice"):
+        return bool(freshness.get("usableForBaseline") or freshness.get("usableForReaction"))
+    return display_number_to_decimal(candidate.get("price")) is not None
 
 
 def live_price_freshness_counts(candidates: list[dict]) -> dict:
     counts = {"live": 0, "delayed": 0, "stale": 0, "snapshot": 0, "missing": 0, "unknown": 0}
     for candidate in candidates:
         live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-        freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+        freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
         status = str(freshness.get("status") or "unknown")
         if status not in counts:
             counts[status] = 0
@@ -3019,7 +3114,7 @@ def retained_toss_live_price(candidate: dict, now_text: str) -> dict | None:
         "missedInLastFetch": True,
         "message": "이번 토스 응답에 종목이 없어 직전 토스 현재가를 유지합니다.",
     })
-    retained["freshness"] = live_price_freshness(retained, now_text)
+    retained["freshness"] = live_price_freshness(retained, now_text, str(candidate.get("market", "")))
     return retained
 
 
@@ -3072,7 +3167,7 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                 "updatedAt": now_text,
                 "source": "toss",
             }
-            item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
+            item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text, str(item.get("market", "")))
             change = change_from_toss_price_row(price)
             if change:
                 item["change"] = change
@@ -3101,7 +3196,7 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                     "updatedAt": now_text,
                     "message": "토스 현재가 응답에 종목이 없습니다.",
                 }
-                item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
+                item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text, str(item.get("market", "")))
                 missing_count += 1
         enriched.append(item)
 
@@ -3966,18 +4061,19 @@ def candidate_data_completeness(candidate: dict) -> dict:
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
     news_count = len(news_items) or bounded_int(trend.get("newsCount", 0), 0, 999999)
     disclosure_count = len(disclosure_items)
-    price_ok = candidate_has_fresh_live_price(candidate)
+    live_price_ok = candidate_has_fresh_live_price(candidate)
+    price_ok = candidate_has_usable_price_basis(candidate)
     change_ok = price_ok and candidate_data_has_change(candidate)
     candle_ok = candidate_data_source_ok(live_candles)
     orderbook_ok = candidate_data_source_ok(live_orderbook)
     trade_ok = candidate_data_source_ok(live_trades)
     material_ok = news_count > 0 or disclosure_count > 0
-    reaction_ready = price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
+    reaction_ready = live_price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
     display_ready = price_ok and change_ok and material_ok
     entry_ready = display_ready and reaction_ready
     missing = []
     if not price_ok:
-        missing.append("현재가")
+        missing.append("가격 기준")
     if not change_ok:
         missing.append("등락률")
     if not material_ok:
@@ -4005,7 +4101,7 @@ def candidate_data_completeness(candidate: dict) -> dict:
         "disclosureCount": disclosure_count,
         "missing": unique_texts(missing, limit=8),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-        "freshness": live_price_freshness(live_price, str(candidate.get("updated", ""))),
+        "freshness": live_price_freshness(live_price, str(candidate.get("updated", "")), str(candidate.get("market", ""))),
     }
 
 
@@ -5332,10 +5428,15 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
 
     change = display_percent_to_decimal(candidate.get("change"))
     live_price = candidate.get("livePrice", {})
-    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     has_live_price = candidate_has_fresh_live_price(candidate)
+    has_price_basis = candidate_has_usable_price_basis(candidate)
+    closed_baseline = bool(live_freshness.get("isClosedBaseline"))
     if has_live_price:
         sources.append("토스 현재가")
+    elif has_price_basis and closed_baseline:
+        sources.append("토스 마감가")
+        warnings.append(str(live_freshness.get("message") or "마감가 기준으로 분석하고 실시간 진입은 개장 후 확인합니다."))
     elif isinstance(live_price, dict) and live_price.get("source") == "toss":
         warnings.append(str(live_freshness.get("message") or "토스 현재가가 지연되어 실시간 판단 보류"))
     price_reaction_positive = False
@@ -5469,10 +5570,10 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     reaction_gate = "watch"
     entry_block = False
 
-    if not has_live_price:
+    if not has_price_basis:
         reaction_gate = "wait"
         entry_block = True
-        blockers.append("실시간 현재가 미확인")
+        blockers.append("가격 기준 미확인")
     if has_event and not price_reaction_positive:
         score = min(score, 40)
         reaction_gate = "wait"
@@ -5551,12 +5652,12 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     entry_criteria = [
         {
             "key": "live_price",
-            "label": "실시간 가격",
-            "ok": has_live_price,
+            "label": "가격 기준",
+            "ok": has_price_basis,
             "value": (
                 f"{live_freshness.get('label')} · {candidate.get('price', '-')}"
                 if isinstance(live_price, dict) and live_price.get("source") == "toss"
-                else str(live_freshness.get("label") or "토스 가격 대기")
+                else str(live_freshness.get("label") or "가격 기준 대기")
             ),
             "required": True,
         },
@@ -5591,8 +5692,10 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         next_check = "가격·거래량 반응이 확인되었습니다. 매수 구간과 리스크 기준만 점검하세요."
     elif blockers:
         next_check = blockers[0]
-    elif not has_live_price:
-        next_check = str(live_freshness.get("message") or "토스 실시간 현재가 수신을 기다립니다.")
+    elif not has_price_basis:
+        next_check = str(live_freshness.get("message") or "가격 기준 수신을 기다립니다.")
+    elif closed_baseline and not has_live_price:
+        next_check = "직전 정규장 마감가 기준 분석입니다. 실시간 매수 판단은 개장 후 가격·거래량 반응을 확인하세요."
     elif not price_reaction_confirmed:
         next_check = "뉴스 방향과 같은 가격 반응이 확인될 때까지 대기합니다."
     elif not market_response_confirmed:
@@ -5932,9 +6035,10 @@ def candidate_source_reliability(candidate: dict, raw_context: dict | None = Non
     live_price = candidate.get("livePrice", {})
     if isinstance(live_price, dict) and live_price.get("source") == "toss":
         score = 95
-        label = "Toss 현재가"
+        freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
+        label = "Toss 마감가" if freshness.get("isClosedBaseline") else "Toss 현재가"
         status = "verified"
-        reason = "실시간 현재가 출처 확인"
+        reason = "마감가 기준 출처 확인" if freshness.get("isClosedBaseline") else "실시간 현재가 출처 확인"
         if live_price.get("baselineWarning"):
             score -= 18
             warnings.append("샘플 기준가와 실시간 현재가 차이가 큼")
@@ -6188,7 +6292,7 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction_supports_entry = bool(reaction.get("supportsEntry"))
     reaction_entry_ready = bool(reaction.get("entryReady", reaction_supports_entry))
     live_price = candidate.get("livePrice", {})
-    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price)
+    live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     has_live_price = candidate_has_fresh_live_price(candidate)
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
@@ -6208,8 +6312,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         key, label, priority = "exclude", "가격 반응 차단", 4
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
     elif group_key == "action" and not has_live_price:
-        key, label, priority = "defer", "실시간 가격 대기", 3
-        reasons.append(str(live_freshness.get("message") or "토스 실시간 현재가 확인 전까지 진입 판단 보류"))
+        key, label, priority = "defer", "개장 후 확인", 3
+        reasons.append(str(live_freshness.get("message") or "정규장 가격·거래량 확인 전까지 진입 판단 보류"))
     elif reaction_entry_block and reaction.get("hasEvent"):
         key, label, priority = "defer", "반응 검증 대기", 3
         reasons.append(str(reaction.get("nextCheck") or "재료는 있으나 진입 전 가격·거래량 검증 필요"))

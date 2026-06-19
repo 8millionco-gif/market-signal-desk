@@ -207,10 +207,13 @@ function displayChangeText(change) {
 function changeMissingText(item) {
   const livePrice = item?.livePrice ?? {};
   const hasLivePrice = livePrice.source === "toss" && Boolean(livePrice.lastPrice);
+  const freshness = priceFreshnessInfo(item);
   if (livePrice.changeSource === "pending-change" || livePrice.changeSource === "missing") {
+    if (hasLivePrice && freshness.isBaseline) return "마감 등락률 확인중";
     return hasLivePrice ? "등락률 확인중" : "미수신";
   }
   if (livePrice.source === "toss" && (!item?.change || item.change === "-")) {
+    if (hasLivePrice && freshness.isBaseline) return "마감 등락률 확인중";
     return hasLivePrice ? "등락률 확인중" : "미수신";
   }
   return "";
@@ -1089,8 +1092,8 @@ function reactionLiveMetrics(item) {
     {
       label: "현재가",
       value: `${item?.price ?? "-"} ${displayCandidateChangeText(item)}`.trim(),
-      note: freshness.isFresh ? livePriceLabel(item) : freshness.message || "토스 현재가 대기",
-      tone: freshness.isFresh ? "ok" : freshness.isDelayed ? "warn" : "wait"
+      note: freshness.isFresh || freshness.isBaseline ? livePriceLabel(item) : freshness.message || "토스 현재가 대기",
+      tone: freshness.isFresh ? "ok" : freshness.isBaseline || freshness.isDelayed ? "warn" : "wait"
     },
     {
       label: "거래량",
@@ -1526,7 +1529,8 @@ function priceFreshnessInfo(item) {
   const freshSeconds = Number(freshness.freshSeconds ?? 30);
   const delayedSeconds = Number(freshness.delayedSeconds ?? 120);
   let status = freshness.status || (source === "toss" ? "unknown" : "snapshot");
-  if (source === "toss") {
+  const serverBaseline = status === "closed-baseline" || Boolean(freshness.isClosedBaseline || freshness.usableForBaseline && freshness.session?.isClosedOrPreopen);
+  if (source === "toss" && !serverBaseline) {
     if (!Number.isFinite(ageSeconds)) status = "unknown";
     else if (ageSeconds <= freshSeconds) status = "live";
     else if (ageSeconds <= delayedSeconds) status = "delayed";
@@ -1534,15 +1538,18 @@ function priceFreshnessInfo(item) {
   }
   const ageText = timestamp ? elapsedLabel(timestamp) : "";
   const isFresh = status === "live" && source === "toss";
-  const isDelayed = ["delayed", "stale", "unknown"].includes(status) && source === "toss";
+  const isBaseline = status === "closed-baseline" || serverBaseline;
+  const isDelayed = ["delayed", "stale", "unknown"].includes(status) && source === "toss" && !isBaseline;
   const isSnapshot = status === "snapshot" || source !== "toss";
   const fallbackLabel =
     isFresh ? "실시간" :
+    isBaseline ? "마감가 기준" :
     status === "delayed" ? "지연" :
     status === "stale" ? "오래됨" :
     isSnapshot ? "저장값" : "미확인";
   const fallbackMessage =
     isFresh ? "토스 현재가를 실시간 판단에 사용합니다." :
+    isBaseline ? (freshness.message || "미국장 비정규 시간이라 직전 마감가 기준으로 분석합니다. 실시간 진입은 개장 후 확인하세요.") :
     status === "delayed" ? "토스 현재가가 지연되어 신규 진입 판단을 보류합니다." :
     status === "stale" ? "토스 현재가가 오래되어 저장 가격처럼만 참고합니다." :
     freshness.message || livePrice.message || "";
@@ -1553,6 +1560,7 @@ function priceFreshnessInfo(item) {
     timestamp,
     ageText,
     isFresh,
+    isBaseline,
     isDelayed,
     isSnapshot,
     message: fallbackMessage
@@ -1562,6 +1570,7 @@ function priceFreshnessInfo(item) {
 function livePriceLabel(item) {
   const info = priceFreshnessInfo(item);
   if (info.isFresh) return info.ageText ? `실시간 ${info.ageText}` : "실시간";
+  if (info.isBaseline) return info.ageText ? `마감가 ${info.ageText}` : "마감가 기준";
   if (info.isDelayed) return info.ageText ? `${info.label} ${info.ageText}` : info.label;
   if (info.isSnapshot) return "저장가";
   return "실시간 대기";
@@ -1615,7 +1624,7 @@ function liveDataCoverage(item) {
   const candles = item?.liveCandles ?? {};
   const orderbook = item?.liveOrderbook ?? {};
   const trades = item?.liveTrades ?? {};
-  const priceTone = freshness.isFresh ? "ok" : freshness.isDelayed ? "warn" : "wait";
+  const priceTone = freshness.isFresh ? "ok" : freshness.isBaseline || freshness.isDelayed ? "warn" : "wait";
   const retainedPrice = Boolean(item?.livePrice?.retained);
   const candleSource = candles.source || "";
   const orderbookSource = orderbook.source || "";
@@ -1626,7 +1635,7 @@ function liveDataCoverage(item) {
       label: "가격",
       short: "가",
       tone: priceTone,
-      value: retainedPrice ? "직전가" : freshness.isFresh ? "실시간" : freshness.label || "대기",
+      value: retainedPrice ? "직전가" : freshness.isFresh ? "실시간" : freshness.isBaseline ? "마감가" : freshness.label || "대기",
       title: priceMeta(item)
     },
     {
@@ -1771,6 +1780,9 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: reactionDecision.label || "반응 대기", detail: reactionDecision.summary || "가격·거래량 반응을 더 확인합니다." };
   }
   if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
+    if (freshness.isBaseline) {
+      return { key: "wait", label: "개장 후 확인", detail: freshness.message || "마감가 기준 분석입니다. 개장 후 가격·거래량 반응을 확인하세요." };
+    }
     if (!freshness.isFresh) {
       return { key: "wait", label: "가격 확인 필요", detail: freshness.message || "토스 현재가를 다시 확인한 뒤 진입 여부를 판단합니다." };
     }
@@ -5229,6 +5241,15 @@ function tradeNowGuide(item, plan) {
   const freshness = priceFreshnessInfo(item);
 
   if (plan.tone === "buy") {
+    if (freshness.isBaseline) {
+      return {
+        tone: "wait",
+        title: "개장 후 확인",
+        summary: freshness.message || "마감가 기준 분석입니다. 개장 후 가격·거래량 반응을 확인하세요.",
+        current,
+        focus: entry
+      };
+    }
     if (!freshness.isFresh) {
       return {
         tone: "wait",
@@ -5859,8 +5880,8 @@ function priceMeta(item) {
     const warningText = item.livePrice.baselineWarning
       ? ` · 기준가 차이 확인 필요(${item.livePrice.baselineDifferencePercent ?? ""})`
       : "";
-    const sourceText = freshness.isFresh ? "토스 실시간" : `토스 ${freshness.label}`;
-    const holdText = freshness.isFresh ? "" : " · 신규 진입 판단 보류";
+    const sourceText = freshness.isFresh ? "토스 실시간" : freshness.isBaseline ? "토스 마감가 기준" : `토스 ${freshness.label}`;
+    const holdText = freshness.isFresh ? "" : freshness.isBaseline ? " · 개장 후 실시간 반응 확인" : " · 신규 진입 판단 보류";
     return `현재가: ${sourceText}${timestamp}${pollText}${retainedText}${changeText}${warningText}${holdText}${candleText}`;
   }
   return `현재가: ${freshness.label} · ${freshness.message || item.livePrice?.message || "실시간 가격 대기"}${candleText}`;
