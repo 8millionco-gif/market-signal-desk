@@ -10011,6 +10011,108 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     return payload
 
 
+def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
+    data = seed_data()
+    watched = set(watchlist())
+    pool_result = candidate_pool_initial_candidates(data.get("candidates", []), watched, mode)
+    if pool_result is None:
+        return None
+
+    raw_candidates, discovery_status = pool_result
+    if not raw_candidates:
+        return None
+
+    market = copy.deepcopy(data.get("market", {}))
+    candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched)
+    candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
+    candidates = sort_candidates_for_mode(candidates, mode)
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+
+    defaults = dashboard_status_defaults()
+    pool_status = candidate_pool_summary()
+    discovery_status = {
+        **discovery_status,
+        "source": "candidate-pool",
+        "stored": True,
+        "dashboardOnly": True,
+        "message": "저장 후보 풀을 우선 표시합니다. 새 후보 발굴은 스케줄러나 수동 갱신에서만 수행합니다.",
+        "updatedAt": now_text,
+    }
+    selection_status = {
+        **selection_status,
+        "source": "stored-rules",
+        "message": "저장 후보 풀을 외부 API 호출 없이 로컬 판단 규칙으로 재점검했습니다.",
+        "updatedAt": now_text,
+    }
+    context = {
+        "mode": mode,
+        "data": data,
+        "market": market,
+        "watched": watched,
+        "portfolio": {},
+        "candidates": candidates,
+        "selected": candidates[0] if candidates else None,
+        "statuses": {
+            **defaults,
+            "index": {
+                "source": "stored",
+                "enabled": False,
+                "message": "저장 후보 조회에서는 지수 실시간 조회를 생략했습니다.",
+                "updatedAt": now_text,
+            },
+            "fx": {
+                "source": "stored",
+                "enabled": False,
+                "message": "저장 후보 조회에서는 환율 실시간 조회를 생략했습니다.",
+                "updatedAt": now_text,
+            },
+            "discovery": discovery_status,
+            "selection": selection_status,
+            "candidate_pool": pool_status,
+        },
+        "pipeline": [
+            pipeline_step(
+                "cache",
+                "저장 후보 풀 조회",
+                "ok",
+                discovery_status["message"],
+                len(candidates),
+            ),
+            pipeline_step(
+                "scorer",
+                "저장 후보 재점검",
+                "ok",
+                selection_status["message"],
+                len(candidates),
+            ),
+            pipeline_step(
+                "selector",
+                "저장 후보 정렬",
+                "fallback",
+                "실시간 수집 없이 저장된 후보를 정렬했습니다.",
+                len(candidates),
+            ),
+        ],
+    }
+    payload = build_dashboard_payload(context)
+    payload["cache"] = {
+        "cached": True,
+        "source": "candidate_pool",
+        "requestedMode": mode,
+        "mode": mode,
+        "id": f"{now_text}-{mode}-candidate-pool",
+        "createdAt": pool_status.get("updatedAt") or now_text,
+        "fallbackError": fallback_error,
+    }
+    if isinstance(payload.get("summary"), dict):
+        payload["summary"]["dashboardCacheSource"] = "candidate_pool"
+        payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
+        payload["summary"]["dashboardCacheFallbackError"] = fallback_error
+        payload["summary"]["candidateSourceStored"] = True
+    return payload
+
+
 def current_price_lookup(symbols: list[str]) -> tuple[dict[str, dict], dict]:
     unique = unique_symbols(symbols)
     seed_lookup = {
@@ -10949,6 +11051,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 if cached_payload is not None:
                     self.send_json(cached_payload)
                     return
+                stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
+                if stored_pool_payload is not None:
+                    self.send_json(stored_pool_payload)
+                    return
             try:
                 payload = dashboard(mode, force_discovery=force_refresh)
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
@@ -10957,6 +11063,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if cached_payload is not None:
                     self.send_json(cached_payload)
+                    return
+                stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
+                if stored_pool_payload is not None:
+                    self.send_json(stored_pool_payload)
                     return
                 raise
             return
