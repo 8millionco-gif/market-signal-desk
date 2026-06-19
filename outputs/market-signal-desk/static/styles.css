@@ -827,6 +827,24 @@ h3 {
   background: rgba(123, 216, 143, 0.1);
 }
 
+.feed-title .reaction-watch {
+  color: var(--cyan);
+  border-color: rgba(105, 210, 231, 0.32);
+  background: rgba(105, 210, 231, 0.1);
+}
+
+.feed-title .reaction-wait {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.32);
+  background: rgba(244, 201, 93, 0.1);
+}
+
+.feed-title .reaction-blocked {
+  color: var(--red);
+  border-color: rgba(255, 100, 115, 0.34);
+  background: rgba(255, 100, 115, 0.1);
+}
+
 .feed-title .official-badge {
   color: var(--cyan);
   border-color: rgba(105, 210, 231, 0.32);

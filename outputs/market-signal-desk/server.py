@@ -4099,6 +4099,7 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     score = 0
     reasons: list[str] = []
     warnings: list[str] = []
+    blockers: list[str] = []
     sources: list[str] = []
 
     change = display_percent_to_decimal(candidate.get("change"))
@@ -4127,7 +4128,8 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
     volume = display_multiplier_to_decimal(trend.get("volumeSpike"))
     candles = candidate.get("liveCandles", {})
-    if isinstance(candles, dict) and candles.get("source") == "toss":
+    has_live_candles = isinstance(candles, dict) and candles.get("source") == "toss"
+    if has_live_candles:
         sources.append("토스 일봉")
     if volume is None:
         warnings.append("거래량 배수 미확인")
@@ -4145,13 +4147,15 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         warnings.append(f"거래량 {volume.quantize(Decimal('0.1'))}배로 반응 부족")
 
     orderbook = candidate.get("liveOrderbook", {})
-    if isinstance(orderbook, dict) and orderbook.get("source") == "toss":
+    has_orderbook = isinstance(orderbook, dict) and orderbook.get("source") == "toss"
+    orderbook_imbalance = None
+    if has_orderbook:
         sources.append("토스 호가")
-        imbalance = display_percent_to_decimal(orderbook.get("imbalancePercent"))
-        if imbalance is not None and imbalance >= Decimal("15"):
+        orderbook_imbalance = display_percent_to_decimal(orderbook.get("imbalancePercent"))
+        if orderbook_imbalance is not None and orderbook_imbalance >= Decimal("15"):
             score += 15
             reasons.append(f"호가 {orderbook.get('pressure')}({orderbook.get('imbalancePercent')})")
-        elif imbalance is not None and imbalance <= Decimal("-15"):
+        elif orderbook_imbalance is not None and orderbook_imbalance <= Decimal("-15"):
             score -= 8
             warnings.append(f"호가 {orderbook.get('pressure')}({orderbook.get('imbalancePercent')})")
         else:
@@ -4161,19 +4165,21 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         warnings.append("호가 반응 미확인")
 
     trades = candidate.get("liveTrades", {})
-    if isinstance(trades, dict) and trades.get("source") == "toss":
+    has_trades = isinstance(trades, dict) and trades.get("source") == "toss"
+    trade_bias = None
+    if has_trades:
         sources.append("토스 체결")
-        bias = display_percent_to_decimal(trades.get("biasPercent"))
-        if bias is not None and bias >= Decimal("20"):
+        trade_bias = display_percent_to_decimal(trades.get("biasPercent"))
+        if trade_bias is not None and trade_bias >= Decimal("20"):
             score += 20
             reasons.append(f"체결 {trades.get('pressure')}({trades.get('biasPercent')})")
-        elif bias is not None and bias >= Decimal("5"):
+        elif trade_bias is not None and trade_bias >= Decimal("5"):
             score += 12
             reasons.append(f"체결 {trades.get('pressure')}({trades.get('biasPercent')})")
-        elif bias is not None and bias <= Decimal("-20"):
+        elif trade_bias is not None and trade_bias <= Decimal("-20"):
             score -= 10
             warnings.append(f"체결 {trades.get('pressure')}({trades.get('biasPercent')})")
-        elif bias is not None and bias <= Decimal("-5"):
+        elif trade_bias is not None and trade_bias <= Decimal("-5"):
             score -= 4
             warnings.append(f"체결 {trades.get('pressure')}({trades.get('biasPercent')})")
         else:
@@ -4183,11 +4189,52 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
         warnings.append("체결 반응 미확인")
 
     has_event = candidate_event_pressure(candidate, score_detail)
+    volume_weak = volume is None or volume < Decimal("1.2")
+    liquidity_positive = (
+        (orderbook_imbalance is not None and orderbook_imbalance >= Decimal("8"))
+        or (trade_bias is not None and trade_bias >= Decimal("5"))
+    )
+    liquidity_negative = (
+        (orderbook_imbalance is not None and orderbook_imbalance <= Decimal("-15"))
+        or (trade_bias is not None and trade_bias <= Decimal("-15"))
+    )
+    reaction_gate = "watch"
+    entry_block = False
+
+    if not has_live_price:
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("실시간 현재가 미확인")
     if has_event and change is not None and change <= 0 and (volume is None or volume < Decimal("1.2")):
         score = min(score, 38)
         warnings.append("뉴스·공시 재료 대비 가격과 거래량 반응 부족")
+        blockers.append("재료 이후 가격·거래량 반응 부족")
     if has_event and score < 45:
         warnings.append("재료는 있으나 시장 자금 반응 확인 전")
+    if has_event and change is not None and change <= Decimal("-1") and volume_weak:
+        score = min(score, 28)
+        reaction_gate = "blocked"
+        entry_block = True
+        blockers.append("재료 이후 가격이 약세이고 거래량도 부족")
+    elif has_event and change is not None and change <= 0 and volume_weak:
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("재료 대비 가격·거래량 확인 필요")
+    elif has_event and change is not None and change > 0 and volume_weak and not liquidity_positive:
+        score = min(score, 48)
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("가격은 움직였지만 거래량·수급 확인 부족")
+    elif has_event and liquidity_negative:
+        score = min(score, 44)
+        reaction_gate = "wait"
+        entry_block = True
+        blockers.append("호가·체결 수급이 약세")
+    elif change is not None and change >= Decimal("5"):
+        reaction_gate = "wait"
+        entry_block = True
+        warnings.append("단기 급등으로 추격 진입 금지")
+        blockers.append("단기 급등 구간")
 
     score = bounded_int(score, 0, 100)
     if score >= 72:
@@ -4199,16 +4246,39 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     else:
         key, label, priority = "missing", "반응 부족", 3
 
+    if reaction_gate not in {"blocked", "wait"}:
+        if key in {"strong", "confirmed"} and has_live_price:
+            reaction_gate = "confirmed"
+        elif key == "weak":
+            reaction_gate = "watch"
+        else:
+            reaction_gate = "wait"
+            if has_event:
+                entry_block = True
+
     return {
         "key": key,
         "label": label,
         "priority": priority,
         "score": score,
-        "supportsEntry": key in {"strong", "confirmed"},
+        "reactionGate": reaction_gate,
+        "entryBlock": entry_block,
+        "supportsEntry": key in {"strong", "confirmed"} and reaction_gate == "confirmed" and not entry_block,
         "hasEvent": has_event,
+        "metrics": {
+            "priceChange": display_change(change) if change is not None else "",
+            "volumeSpike": f"{volume.quantize(Decimal('0.1'))}배" if volume is not None else "",
+            "hasLivePrice": has_live_price,
+            "hasLiveCandles": has_live_candles,
+            "hasOrderbook": has_orderbook,
+            "hasTrades": has_trades,
+            "orderbookImbalance": display_change(orderbook_imbalance) if orderbook_imbalance is not None else "",
+            "tradeBias": display_change(trade_bias) if trade_bias is not None else "",
+        },
         "sources": unique_texts(sources, limit=4),
         "reasons": unique_texts(reasons, limit=5),
         "warnings": unique_texts(warnings, limit=5),
+        "blockers": unique_texts(blockers, limit=5),
     }
 
 
@@ -4707,6 +4777,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    reaction_entry_block = bool(reaction.get("entryBlock"))
     live_price = candidate.get("livePrice", {})
     has_live_price = isinstance(live_price, dict) and live_price.get("source") == "toss"
     official_signal = candidate.get("officialSignal", {})
@@ -4723,6 +4795,12 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
+    elif reaction_gate == "blocked":
+        key, label, priority = "exclude", "가격 반응 차단", 4
+        reasons.append("재료 이후 가격·거래량 반응이 부정적")
+    elif reaction_entry_block and reaction.get("hasEvent"):
+        key, label, priority = "defer", "반응 검증 대기", 3
+        reasons.append("재료는 있으나 진입 전 가격·거래량 검증 필요")
     elif official_signal.get("riskLevel") == "medium" and group_key == "action":
         key, label, priority = "defer", "공시 확인 대기", 3
         reasons.append("공식 공시 영향 확인 전까지 진입 보류")
@@ -4755,8 +4833,9 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         "confidenceScore": confidence_score,
         "sourceReliabilityScore": reliability_score,
         "reactionScore": reaction_score,
+        "reactionGate": reaction_gate,
         "tradeAllowed": key == "actionable",
-        "reasons": unique_texts([*reasons, *official_signal.get("warnings", []), *reaction.get("warnings", []), *confidence.get("warnings", []), *source_reliability.get("blockers", [])], limit=5),
+        "reasons": unique_texts([*reasons, *official_signal.get("warnings", []), *reaction.get("blockers", []), *reaction.get("warnings", []), *confidence.get("warnings", []), *source_reliability.get("blockers", [])], limit=5),
     }
 
 
@@ -4872,6 +4951,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    reaction_entry_block = bool(reaction.get("entryBlock"))
     official_signal = candidate.get("officialSignal", {})
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
@@ -4917,6 +4998,12 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif official_signal.get("riskLevel") == "medium" and reaction_key not in {"strong", "confirmed"}:
         action_key, action, tone = "verify", "공시 확인 대기", "wait"
         summary = "공식 공시 영향이 아직 가격과 거래량으로 검증되지 않아 진입을 보류합니다."
+    elif reaction_gate == "blocked":
+        action_key, action, tone = "exclude", "가격 반응 부정", "risk"
+        summary = "재료는 있으나 가격과 거래량이 부정적으로 반응해 오늘 신규 진입 대상에서 제외합니다."
+    elif reaction_entry_block and reaction.get("hasEvent"):
+        action_key, action, tone = "verify", "반응 검증 대기", "wait"
+        summary = "뉴스·공시 재료는 있으나 가격·거래량·수급 확인이 부족해 진입을 보류합니다."
     elif gate_key == "exclude" or risk >= 24 or total < 45:
         action_key, action, tone = "exclude", "오늘 제외", "risk"
         summary = "리스크 또는 점수 기준이 부족해 신규 진입 대상에서 제외합니다."
@@ -4999,13 +5086,14 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         "sourceReliabilityLabel": source_reliability.get("label", ""),
         "reactionScore": reaction_score,
         "reactionLabel": reaction.get("label", ""),
+        "reactionGate": reaction_gate,
         "officialSignal": official_signal,
         "portfolioAware": is_held,
         "holdingJudgement": holding_judgement if is_held else "",
         "priceLevels": band or {},
         "signalCards": signal_cards,
         "rows": rows,
-        "reasons": unique_texts([*reasons, *reaction.get("reasons", []), *reaction.get("warnings", [])], limit=6),
+        "reasons": unique_texts([*reasons, *reaction.get("reasons", []), *reaction.get("blockers", []), *reaction.get("warnings", [])], limit=6),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -5023,6 +5111,7 @@ def candidate_compression_score(candidate: dict) -> int:
 
     action_key = str(final_decision.get("actionKey", "verify"))
     gate_key = str(gate.get("key", "defer"))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     base = {
@@ -5037,6 +5126,7 @@ def candidate_compression_score(candidate: dict) -> int:
         "exclude": -36,
     }.get(action_key, 0)
     gate_bonus = {"actionable": 22, "watch": 10, "defer": -8, "exclude": -30}.get(gate_key, -4)
+    reaction_gate_penalty = {"confirmed": 0, "watch": -4, "wait": -12, "blocked": -28}.get(reaction_gate, -8)
     official_bonus = 0
     if official.get("riskLevel") == "high":
         official_bonus -= 30
@@ -5064,6 +5154,7 @@ def candidate_compression_score(candidate: dict) -> int:
         + min(8, material_news * 2)
         + (bounded_int(score_detail.get("volume", 0), 0, 18) * 0.35)
         + (bounded_int(score_detail.get("price", 0), 0, 16) * 0.35)
+        + reaction_gate_penalty
         - (risk * 1.2)
         - (heat * 0.8)
     )
@@ -5083,6 +5174,8 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     evidence_grade = str(evidence.get("grade", discovery.get("evidenceGrade", "weak")))
     evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    reaction_entry_block = bool(reaction.get("entryBlock"))
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
@@ -5091,8 +5184,8 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     gate_key = str(gate.get("key", "defer"))
     has_material_evidence = evidence_grade in {"strong", "qualified"} or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
     strong_evidence = evidence_grade == "strong" or evidence_score >= SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE
-    price_confirmed = reaction_key in {"strong", "confirmed"} and reaction_score >= 56
-    price_weak = reaction_key in {"weak", "missing"} or reaction_score < 56
+    price_confirmed = reaction_key in {"strong", "confirmed"} and reaction_gate == "confirmed" and reaction_score >= 56 and not reaction_entry_block
+    price_weak = reaction_key in {"weak", "missing"} or reaction_score < 56 or reaction_gate in {"wait", "blocked"} or reaction_entry_block
     blockers: list[str] = []
     reasons: list[str] = []
 
@@ -5109,7 +5202,10 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     else:
         blockers.append("데이터 신뢰도 보강 필요")
 
-    if official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or gate_key == "exclude" or risk >= 24:
+    if reaction_gate == "blocked":
+        key, label, priority = "blocked", "가격 반응 차단", 4
+        blockers.append("재료 이후 가격·거래량 반응이 부정적")
+    elif official.get("riskLevel") == "high" or action_key in {"stop", "exclude"} or gate_key == "exclude" or risk >= 24:
         key, label, priority = "blocked", "리스크 차단", 4
         blockers.append("리스크 또는 제외 판단이 우선")
     elif strong_evidence and price_confirmed and confidence_score >= 68 and risk < 18 and heat < 10:
@@ -5148,9 +5244,10 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
         "evidenceGrade": evidence_grade,
         "reactionScore": reaction_score,
         "reactionKey": reaction_key,
+        "reactionGate": reaction_gate,
         "confidenceScore": confidence_score,
         "reasons": unique_texts(reasons, limit=5),
-        "blockers": unique_texts([*blockers, *evidence.get("blockers", []), *reaction.get("warnings", [])], limit=6),
+        "blockers": unique_texts([*blockers, *evidence.get("blockers", []), *reaction.get("blockers", []), *reaction.get("warnings", [])], limit=6),
     }
 
 
@@ -5179,6 +5276,8 @@ def candidate_core_eligible(candidate: dict) -> bool:
     if action_key not in {"buy", "add"} and gate_key != "actionable":
         return False
     if not validation.get("entryReady"):
+        return False
+    if reaction.get("reactionGate") != "confirmed" or reaction.get("entryBlock"):
         return False
     return (
         bounded_int(candidate.get("totalScore", 0), 0, 100) >= 70

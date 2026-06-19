@@ -577,10 +577,25 @@ function signalValidationForDisplay(item) {
     entryReady: Boolean(validation.entryReady),
     evidenceScore: Number(validation.evidenceScore ?? item?.discovery?.evidenceScore ?? 0),
     reactionScore: Number(validation.reactionScore ?? item?.priceReaction?.score ?? 0),
+    reactionGate: validation.reactionGate || item?.priceReaction?.reactionGate || item?.finalDecision?.reactionGate || "",
     confidenceScore: Number(validation.confidenceScore ?? item?.dataConfidence?.score ?? 0),
     reasons: Array.isArray(validation.reasons) ? validation.reasons : [],
-    blockers: Array.isArray(validation.blockers) ? validation.blockers : []
+    blockers: Array.isArray(validation.blockers) ? validation.blockers : [],
+    reactionBlockers: Array.isArray(item?.priceReaction?.blockers) ? item.priceReaction.blockers : []
   };
+}
+
+function reactionGateLabel(value) {
+  if (value === "confirmed") return "반응확인";
+  if (value === "watch") return "반응관찰";
+  if (value === "wait") return "반응대기";
+  if (value === "blocked") return "반응차단";
+  return "반응";
+}
+
+function reactionBadgeText(reaction) {
+  const score = reaction?.score != null ? ` ${reaction.score}` : "";
+  return `${reactionGateLabel(reaction?.reactionGate)}${score}`;
 }
 
 function candidatePoolStateForDisplay(item) {
@@ -2836,7 +2851,7 @@ function renderFeed() {
               ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
               ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
               ${sourceReliability.score != null ? `<span class="feed-badge reliability-badge">원천 ${escapeHtml(sourceReliability.score)}</span>` : ""}
-              ${reaction.score != null ? `<span class="feed-badge reaction-badge">반응 ${escapeHtml(reaction.score)}</span>` : ""}
+              ${reaction.score != null ? `<span class="feed-badge reaction-badge reaction-${escapeHtml(reaction.reactionGate || "watch")}">${escapeHtml(reactionBadgeText(reaction))}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
             </span>
@@ -3652,6 +3667,7 @@ function decisionGroupSection(item) {
         ${confidence.score != null ? statCard("신뢰도", `${confidence.score}/100`) : ""}
         ${sourceReliability.score != null ? statCard("원천 신뢰", `${sourceReliability.label ?? "-"} · ${sourceReliability.score}/100`) : ""}
         ${reaction.score != null ? statCard("가격 반응", `${reaction.label ?? "-"} · ${reaction.score}/100`) : ""}
+        ${reaction.reactionGate ? statCard("반응 게이트", reactionGateLabel(reaction.reactionGate)) : ""}
         ${holding ? statCard("보유 손익", `${holding.profitLossRate ?? "-"} · ${holding.judgement ?? "보유"}`) : ""}
         ${holding ? statCard("평균단가", holding.averagePurchasePrice ?? "-") : ""}
         ${gate.label ? statCard("게이트", gate.label) : ""}
@@ -3667,6 +3683,7 @@ function decisionGroupSection(item) {
         ${(sourceReliability.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 보강: ${text}`)}</li>`).join("")}
         ${(sourceReliability.blockers ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 차단: ${text}`)}</li>`).join("")}
         ${(reaction.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`가격 반응: ${text}`)}</li>`).join("")}
+        ${(reaction.blockers ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 차단: ${text}`)}</li>`).join("")}
         ${(reaction.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 경고: ${text}`)}</li>`).join("")}
         ${(gate.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`게이트: ${text}`)}</li>`).join("")}
         ${
@@ -3767,7 +3784,7 @@ function signalValidationSection(item) {
   const validation = signalValidationForDisplay(item);
   if (!validation.label && !validation.score) return "";
   const reasons = uniqueTexts(validation.reasons ?? [], 4);
-  const blockers = uniqueTexts(validation.blockers ?? [], 5);
+  const blockers = uniqueTexts([...(validation.blockers ?? []), ...(validation.reactionBlockers ?? [])], 6);
   return `
     <section class="detail-section">
       <div class="section-title">
@@ -3778,6 +3795,7 @@ function signalValidationSection(item) {
         ${statCard("검증 점수", `${validation.score}/100`)}
         ${statCard("발굴 근거", `${validation.evidenceScore}/100`)}
         ${statCard("가격 반응", `${validation.reactionScore}/100`)}
+        ${validation.reactionGate ? statCard("반응 게이트", reactionGateLabel(validation.reactionGate)) : ""}
         ${statCard("데이터 신뢰", `${validation.confidenceScore}/100`)}
       </div>
       ${
