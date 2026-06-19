@@ -205,8 +205,14 @@ function displayChangeText(change) {
 }
 
 function changeMissingText(item) {
-  if (item?.livePrice?.changeSource === "missing") return "미수신";
-  if (item?.livePrice?.source === "toss" && (!item?.change || item.change === "-")) return "미수신";
+  const livePrice = item?.livePrice ?? {};
+  const hasLivePrice = livePrice.source === "toss" && Boolean(livePrice.lastPrice);
+  if (livePrice.changeSource === "pending-change" || livePrice.changeSource === "missing") {
+    return hasLivePrice ? "등락률 확인중" : "미수신";
+  }
+  if (livePrice.source === "toss" && (!item?.change || item.change === "-")) {
+    return hasLivePrice ? "등락률 확인중" : "미수신";
+  }
   return "";
 }
 
@@ -216,7 +222,10 @@ function displayCandidateChangeText(item) {
 }
 
 function candidateChangeClass(item) {
-  return displayCandidateChangeText(item) === "미수신" ? "change-missing" : changeClass(item?.change);
+  const text = displayCandidateChangeText(item);
+  if (text === "미수신") return "change-missing";
+  if (text.includes("확인")) return "change-wait";
+  return changeClass(item?.change);
 }
 
 function initials(name) {
@@ -825,7 +834,7 @@ function currentChangeStillUsable(current) {
 
 function incomingChangeMissing(incoming) {
   const livePrice = incoming?.livePrice ?? {};
-  if (livePrice.changeSource === "missing") return true;
+  if (livePrice.changeSource === "missing" || livePrice.changeSource === "pending-change") return true;
   return !incoming?.change || displayChangeText(incoming.change) === "-";
 }
 
@@ -5815,8 +5824,12 @@ function priceMeta(item) {
         : item.livePrice.changeSource === "toss-candles"
           ? " · 전일 대비는 일봉 기준 추정"
           : item.livePrice.changeSource === "missing"
-            ? " · 등락률 미수신"
-            : "";
+            ? " · 현재가 수신 · 등락률 확인중"
+            : item.livePrice.changeSource === "pending-change"
+              ? " · 현재가 수신 · 등락률 확인중"
+              : item.livePrice.changeSource === "retained-change" || item.livePrice.changeSource === "stored-candidate-data"
+                ? " · 저장 등락률 유지"
+                : "";
     const warningText = item.livePrice.baselineWarning
       ? ` · 기준가 차이 확인 필요(${item.livePrice.baselineDifferencePercent ?? ""})`
       : "";

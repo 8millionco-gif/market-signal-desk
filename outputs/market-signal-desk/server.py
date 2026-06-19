@@ -2715,9 +2715,12 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
             if change:
                 item["change"] = change
                 item["livePrice"]["changeSource"] = "toss-prices"
+            elif candidate_change_text_usable(item.get("change")):
+                item["livePrice"]["changeSource"] = "retained-change"
+                item["livePrice"]["changeMessage"] = "토스 현재가 응답에 등락률이 없어 서버에 저장된 직전 등락률을 유지합니다."
             else:
-                item["livePrice"]["changeSource"] = "missing"
-                item["livePrice"]["changeMessage"] = "토스 현재가 응답에 등락률 필드가 없어 전일 대비를 표시하지 못했습니다."
+                item["livePrice"]["changeSource"] = "pending-change"
+                item["livePrice"]["changeMessage"] = "현재가는 수신했지만 등락률 기준가를 서버에서 추가 확인 중입니다."
             if baseline_warning and baseline_difference is not None:
                 item["livePrice"].update({
                     "baselineWarning": True,
@@ -3546,11 +3549,17 @@ def candidate_data_source_ok(value: object) -> bool:
     return bool(source and source not in {"-", "none", "missing"})
 
 
-def candidate_data_has_change(candidate: dict) -> bool:
-    change = str(candidate.get("change", "")).strip()
-    if not change or change in {"-", "미수신", "확인 대기"}:
+def candidate_change_text_usable(change: object) -> bool:
+    text = str(change or "").strip()
+    if not text or text in {"-", "미수신", "확인 대기"}:
         return False
-    if change.lower() in {"n/a", "na", "none"}:
+    if text.lower() in {"n/a", "na", "none"}:
+        return False
+    return True
+
+
+def candidate_data_has_change(candidate: dict) -> bool:
+    if not candidate_change_text_usable(candidate.get("change")):
         return False
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     if str(live_price.get("changeSource", "")).lower() == "missing":
@@ -3754,6 +3763,125 @@ def candidate_data_snapshot_status() -> dict:
         "missingCounts": summary.get("missingCounts", {}),
         "latestAt": data.get("updatedAt", ""),
         "message": "후보별 최신 수신 데이터 묶음을 저장합니다.",
+    }
+
+
+def candidate_data_record_timestamp(record: dict) -> str:
+    if not isinstance(record, dict):
+        return ""
+    live_price = record.get("livePrice", {}) if isinstance(record.get("livePrice"), dict) else {}
+    return str(
+        live_price.get("timestamp")
+        or live_price.get("updatedAt")
+        or record.get("collectedAt")
+        or ""
+    )
+
+
+def candidate_data_record_age_seconds(record: dict) -> int | None:
+    parsed = parse_iso_datetime(candidate_data_record_timestamp(record))
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def candidate_has_toss_last_price(candidate: dict) -> bool:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    return str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+
+
+def stored_candidate_data_latest_records() -> dict[str, dict]:
+    data = candidate_data_snapshot_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    records: dict[str, dict] = {}
+    for symbol, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        latest = item.get("latest", {}) if isinstance(item.get("latest"), dict) else {}
+        if not latest:
+            continue
+        normalized = str(latest.get("symbol") or symbol).strip().upper()
+        if normalized:
+            records[normalized] = latest
+    return records
+
+
+def merge_candidate_data_snapshots_into_candidates(candidates: list[dict], mode: str = "") -> tuple[list[dict], dict]:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
+        return candidates, {"enabled": False, "mergedCount": 0, "message": "후보 데이터 저장이 꺼져 있습니다."}
+    records = stored_candidate_data_latest_records()
+    if not records:
+        return candidates, {"enabled": True, "mergedCount": 0, "message": "저장된 후보 데이터가 아직 없습니다."}
+
+    merged: list[dict] = []
+    merged_count = 0
+    price_merged_count = 0
+    change_merged_count = 0
+    depth_merged_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            merged.append(candidate)
+            continue
+        item = copy.deepcopy(candidate)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        record = records.get(symbol)
+        if not record:
+            merged.append(item)
+            continue
+
+        has_current_price = candidate_has_toss_last_price(item)
+        record_live_price = record.get("livePrice", {}) if isinstance(record.get("livePrice"), dict) else {}
+        has_record_price = str(record_live_price.get("source", "")) == "toss" and bool(record_live_price.get("lastPrice"))
+        if has_record_price and not has_current_price:
+            for key in ("price", "updated", "livePrice"):
+                if key in record:
+                    item[key] = copy.deepcopy(record[key])
+            price_merged_count += 1
+
+        if not candidate_data_has_change(item) and candidate_data_has_change(record):
+            item["change"] = record.get("change", item.get("change", ""))
+            if isinstance(item.get("livePrice"), dict) and isinstance(record_live_price, dict):
+                item["livePrice"] = {
+                    **item["livePrice"],
+                    "changeSource": record_live_price.get("changeSource") or "stored-candidate-data",
+                    "changeMessage": record_live_price.get("changeMessage") or "저장된 후보 데이터의 등락률을 유지합니다.",
+                }
+            change_merged_count += 1
+
+        for key in ("liveCandles", "liveOrderbook", "liveTrades"):
+            current_value = item.get(key, {}) if isinstance(item.get(key), dict) else {}
+            record_value = record.get(key, {}) if isinstance(record.get(key), dict) else {}
+            if not candidate_data_source_ok(current_value) and candidate_data_source_ok(record_value):
+                item[key] = copy.deepcopy(record_value)
+                depth_merged_count += 1
+
+        for key in ("trend", "priceReaction", "qualityGate", "finalDecision", "signalValidation", "candidateCompression", "sourceReliability", "dataConfidence", "dataCompleteness"):
+            if key not in item and key in record:
+                item[key] = copy.deepcopy(record[key])
+        for key in ("liveNews", "liveDisclosures"):
+            if not item.get(key) and record.get(key):
+                item[key] = copy.deepcopy(record[key])
+
+        item["candidateDataSnapshot"] = {
+            "source": "candidate_data_snapshots",
+            "mode": record.get("mode", ""),
+            "stage": record.get("stage", ""),
+            "collectedAt": record.get("collectedAt", ""),
+            "ageSeconds": candidate_data_record_age_seconds(record),
+            "message": "서버에 저장된 후보별 최종 수신값을 우선 반영했습니다.",
+        }
+        merged_count += 1
+        merged.append(item)
+
+    return merged, {
+        "enabled": True,
+        "source": "candidate_data_snapshots",
+        "mergedCount": merged_count,
+        "priceMergedCount": price_merged_count,
+        "changeMergedCount": change_merged_count,
+        "depthMergedCount": depth_merged_count,
+        "retainedCount": len(records),
+        "message": f"저장된 후보 데이터 {merged_count}개를 후보 판단에 반영했습니다.",
     }
 
 
@@ -10840,17 +10968,34 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     payload = copy.deepcopy(dashboard_payload)
     candidates = payload.get("candidates", [])
     if isinstance(candidates, list):
+        merged_candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(
+            [item for item in candidates if isinstance(item, dict)],
+            mode,
+        )
+        merge_by_symbol = {
+            str(item.get("symbol", "")).strip().upper(): item
+            for item in merged_candidates
+            if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+        }
         payload["candidates"] = [
-            annotate_candidate_live_price_freshness(candidate, payload.get("generatedAt", ""))
+            annotate_candidate_live_price_freshness(
+                merge_by_symbol.get(str(candidate.get("symbol", "")).strip().upper(), candidate),
+                payload.get("generatedAt", ""),
+            )
             if isinstance(candidate, dict)
             else candidate
             for candidate in candidates
         ]
         if isinstance(payload.get("selected"), dict):
-            payload["selected"] = annotate_candidate_live_price_freshness(payload["selected"], payload.get("generatedAt", ""))
+            selected_symbol = str(payload["selected"].get("symbol", "")).strip().upper()
+            payload["selected"] = annotate_candidate_live_price_freshness(
+                merge_by_symbol.get(selected_symbol, payload["selected"]),
+                payload.get("generatedAt", ""),
+            )
         freshness_counts = live_price_freshness_counts([item for item in payload["candidates"] if isinstance(item, dict)])
     else:
         freshness_counts = {}
+        candidate_data_merge = {"mergedCount": 0}
     payload["cache"] = {
         "cached": True,
         "source": detail.get("source", "snapshot"),
@@ -10865,6 +11010,10 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
         payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
         payload["summary"]["livePriceFreshnessCounts"] = freshness_counts
+        payload["summary"]["candidateDataMergedCount"] = candidate_data_merge.get("mergedCount", 0)
+    integrations = payload.get("integrations", {}) if isinstance(payload.get("integrations"), dict) else {}
+    integrations["candidateDataMerge"] = candidate_data_merge
+    payload["integrations"] = integrations
     return payload
 
 
@@ -10881,6 +11030,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
 
     market = copy.deepcopy(data.get("market", {}))
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
+    candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
     candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
     candidates = sort_candidates_for_mode(candidates, mode)
@@ -10927,6 +11077,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
             "discovery": discovery_status,
             "selection": selection_status,
             "candidate_pool": pool_status,
+            "candidate_data_merge": candidate_data_merge,
         },
         "pipeline": [
             pipeline_step(
@@ -10935,6 +11086,13 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
                 "ok",
                 discovery_status["message"],
                 len(candidates),
+            ),
+            pipeline_step(
+                "storage",
+                "저장 후보 데이터 반영",
+                "ok" if candidate_data_merge.get("mergedCount", 0) else "fallback",
+                candidate_data_merge.get("message", "저장된 후보별 토스 데이터를 확인했습니다."),
+                candidate_data_merge.get("mergedCount", 0),
             ),
             pipeline_step(
                 "scorer",
@@ -11094,6 +11252,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         for item in base_payload.get("candidates", [])
         if isinstance(item, dict) and str(item.get("symbol", "")).strip()
     ]
+    base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode)
     base_candidates, live_state_status = merge_live_state_into_candidates(base_candidates, mode)
     requested = unique_symbols(symbols)
     has_requested_symbols = bool(requested)
@@ -11162,6 +11321,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "livePriceRequestedCount": len(requested),
         "livePriceRefreshedCount": len(candidates),
         "liveStateMergedCount": live_state_status.get("mergedCount", 0),
+        "candidateDataMergedCount": candidate_data_merge_status.get("mergedCount", 0),
         "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
@@ -11177,6 +11337,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "requestedCount": len(requested),
         "refreshedCount": len(candidates),
         "freshnessCounts": freshness_counts,
+        "candidateDataRead": candidate_data_merge_status,
         "stateRead": live_state_status,
         "stateWrite": live_state_write_status,
         "candidateData": candidate_data_status,

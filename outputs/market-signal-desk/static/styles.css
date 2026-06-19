@@ -1330,6 +1330,11 @@ h3 {
   font-weight: 900;
 }
 
+.change-wait {
+  color: var(--amber);
+  font-weight: 900;
+}
+
 .sr-only {
   position: absolute;
   overflow: hidden;
