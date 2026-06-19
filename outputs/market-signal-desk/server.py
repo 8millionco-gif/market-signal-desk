@@ -173,7 +173,7 @@ SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SEC
 SIGNAL_DISCOVERY_BOT_ENABLED = os.getenv("SIGNAL_DISCOVERY_BOT_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS", "600"))
 SIGNAL_DISCOVERY_BOT_MODE = os.getenv("SIGNAL_DISCOVERY_BOT_MODE", "intraday").strip().lower() or "intraday"
-SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST = os.getenv("SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST = os.getenv("SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
 SIGNAL_CLOSE_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_CLOSE_RUN_WINDOW_MINUTES", "360"))
 SIGNAL_PREOPEN_RUN_TIME = os.getenv("SIGNAL_PREOPEN_RUN_TIME", "08:40")
@@ -12031,15 +12031,38 @@ def stored_discovery_initial_candidates(mode: str, watched: set[str]) -> tuple[l
     if not candidates:
         return None
 
+    candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
+    candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
+    ready_candidates = []
+    skipped_count = 0
+    for candidate in candidates:
+        completeness = (
+            candidate.get("dataCompleteness", {})
+            if isinstance(candidate.get("dataCompleteness"), dict)
+            else candidate_data_completeness(candidate)
+        )
+        if completeness.get("displayReady"):
+            ready_candidates.append(candidate)
+        else:
+            skipped_count += 1
+    candidates = ready_candidates
+    if not candidates:
+        return None
+
     stored_mode = str(record.get("mode") or dashboard_payload.get("mode") or "")
     summary = dashboard_payload.get("summary", {}) if isinstance(dashboard_payload.get("summary"), dict) else {}
     status = {
         "source": "stored-discovery",
         "enabled": True,
         "stored": True,
-        "message": "저장된 최신 발굴 후보를 사용합니다. 새 후보 발굴은 봇/스케줄러/수동 실행에서만 수행합니다.",
+        "message": "저장된 최신 발굴 후보 중 가격과 등락률이 확인된 후보만 사용합니다.",
         "candidateCount": len(candidates),
         "storedCandidateCount": len(candidates),
+        "storedCandidateSkippedCount": skipped_count,
+        "candidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge.get("mergedCount", 0),
+        "liveStateMergedCount": live_state_merge.get("mergedCount", 0),
         "storedRunId": record.get("id", ""),
         "storedMode": stored_mode,
         "requestedMode": mode,
@@ -12188,6 +12211,7 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
     if not records:
         return None
     fresh_records = []
+    skipped_incomplete = 0
     max_age = max(SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS, 60 * 60 * 24)
     for record in records.values():
         if not isinstance(record, dict):
@@ -12195,8 +12219,13 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
         age = candidate_data_record_age_seconds(record)
         if age is not None and age > max_age:
             continue
-        completeness = record.get("dataCompleteness", {}) if isinstance(record.get("dataCompleteness"), dict) else {}
-        if not completeness.get("displayReady") and not candidate_has_toss_last_price(record):
+        completeness = (
+            record.get("dataCompleteness", {})
+            if isinstance(record.get("dataCompleteness"), dict)
+            else candidate_data_completeness(record)
+        )
+        if not completeness.get("displayReady"):
+            skipped_incomplete += 1
             continue
         fresh_records.append(record)
     if not fresh_records:
@@ -12216,6 +12245,7 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
         "message": "저장된 후보별 수집 데이터를 우선 사용합니다. 새 후보 발굴은 봇/스케줄러/수동 실행에서 수행합니다.",
         "candidateCount": len(candidates),
         "storedCandidateDataCount": len(fresh_records),
+        "storedCandidateIncompleteCount": skipped_incomplete,
         "candidateDataSelectedSymbols": [item.get("symbol", "") for item in candidates],
         "requestedMode": mode,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -12234,12 +12264,12 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         }
 
     if not force_discovery:
-        stored_result = stored_discovery_initial_candidates(mode, watched)
-        if stored_result is not None:
-            return stored_result
         candidate_data_result = stored_candidate_data_initial_candidates(mode, watched)
         if candidate_data_result is not None:
             return candidate_data_result
+        stored_result = stored_discovery_initial_candidates(mode, watched)
+        if stored_result is not None:
+            return stored_result
         pool_result = candidate_pool_initial_candidates(seed_candidates, watched, mode)
         if pool_result is not None:
             return pool_result
