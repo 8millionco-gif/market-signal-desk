@@ -705,7 +705,16 @@ function candidateNeedsMarketDepth(item) {
   const candles = item.liveCandles ?? {};
   const orderbook = item.liveOrderbook ?? {};
   const trades = item.liveTrades ?? {};
+  const livePrice = item.livePrice ?? {};
+  const changePending =
+    livePrice.source === "toss" &&
+    livePrice.lastPrice &&
+    (livePrice.changeSource === "pending-change" ||
+      livePrice.changeSource === "missing" ||
+      !item.change ||
+      displayChangeText(item.change) === "-");
   return (
+    changePending ||
     candles.source !== "toss" ||
     orderbook.source !== "toss" ||
     trades.source !== "toss"
@@ -715,7 +724,11 @@ function candidateNeedsMarketDepth(item) {
 function livePriceRefreshDetail(symbols) {
   const selected = selectedCandidate();
   const topCandidate = filteredCandidates()[0] || (state.dashboard?.candidates ?? [])[0];
+  const visibleNeedsChange = filteredCandidates()
+    .slice(0, Math.min(10, symbols.length || 10))
+    .some(candidateNeedsMarketDepth);
   const needsDepth =
+    visibleNeedsChange ||
     candidateNeedsMarketDepth(selected) ||
     candidateNeedsMarketDepth(topCandidate);
   const nextCount = Number(state.livePrice.refreshCount || 0) + 1;

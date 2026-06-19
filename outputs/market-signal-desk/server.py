@@ -3137,14 +3137,33 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
             "message": "토스증권 API 환경변수가 없어 샘플 차트를 사용합니다.",
         }
 
-    enriched = []
+    def candle_fetch_priority(pair: tuple[int, dict]) -> tuple[int, int, int]:
+        index, candidate = pair
+        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+        has_live_price = str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+        change_missing = not candidate_data_has_change(candidate)
+        has_candles = candidate_data_source_ok(candidate.get("liveCandles", {}))
+        selected_boost = 0 if index == 0 else 1
+        if has_live_price and change_missing:
+            return (0, selected_boost, index)
+        if has_live_price and not has_candles:
+            return (1, selected_boost, index)
+        if change_missing:
+            return (2, selected_boost, index)
+        return (3, selected_boost, index)
+
+    priority_pairs = sorted(list(enumerate(candidates)), key=candle_fetch_priority)
+    fetch_indexes = {
+        index for index, _candidate in priority_pairs[: max(0, TOSS_CANDLE_MAX_CANDIDATES)]
+    }
+    enriched_by_index: dict[int, dict] = {}
     candle_count = 0
     stale_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
-        if index >= TOSS_CANDLE_MAX_CANDIDATES:
+        if index not in fetch_indexes:
             item["liveCandles"] = {"source": "skipped", "message": "캔들 조회 후보 수 제한으로 샘플 차트를 사용합니다."}
-            enriched.append(item)
+            enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
         payload = fetch_toss_candles(symbol, interval="1d", count=20)
@@ -3160,7 +3179,7 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
                     "latestTimestamp": latest_timestamp.isoformat(timespec="seconds") if latest_timestamp else candles[-1].get("timestamp"),
                     "message": "토스 일봉이 최신이 아니어서 샘플 차트와 기존 등락률을 유지합니다.",
                 }
-                enriched.append(item)
+                enriched_by_index[index] = item
                 continue
             candle_count += 1
             chart = candle_chart_points(candles)
@@ -3192,14 +3211,16 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
             }
         else:
             item["liveCandles"] = {"source": "sample", "message": "토스 캔들 응답이 비어 있습니다."}
-        enriched.append(item)
+        enriched_by_index[index] = item
 
+    enriched = [enriched_by_index.get(index, dict(candidate)) for index, candidate in enumerate(candidates)]
     return enriched, {
         "source": "toss",
         "enabled": True,
-        "message": "토스증권 일봉 캔들을 반영했습니다.",
+        "message": "토스증권 일봉 캔들을 등락률 미확인 후보 우선으로 반영했습니다.",
         "candleCount": candle_count,
         "staleCount": stale_count,
+        "prioritizedCount": len(fetch_indexes),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
