@@ -11,13 +11,57 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: SIGNAL_SCHEDULER_ENABLED
-        value: "0"
+        value: "1"
+      - key: SIGNAL_DISCOVERY_BOT_ENABLED
+        value: "1"
       - key: SIGNAL_STORAGE_BACKEND
         value: "auto"
       - key: SIGNAL_DB_AUTO_MIGRATE
         value: "1"
       - key: SIGNAL_DB_MIGRATE_RUN_LIMIT
         value: "200"
+      - key: SIGNAL_RAW_EVENT_STORAGE_ENABLED
+        value: "1"
+      - key: SIGNAL_RAW_EVENT_PAYLOAD_LIMIT
+        value: "40"
+      - key: SIGNAL_RAW_EVENT_FILE_LIMIT
+        value: "500"
+      - key: SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS
+        value: "600"
+      - key: SIGNAL_DISCOVERY_BOT_MODE
+        value: "intraday"
+      - key: SIGNAL_CANDIDATE_POOL_ENABLED
+        value: "1"
+      - key: SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT
+        value: "40"
+      - key: SIGNAL_CANDIDATE_POOL_SCAN_LIMIT
+        value: "200"
+      - key: SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE
+        value: "58"
+      - key: SIGNAL_CANDIDATE_POOL_TOP_LIMIT
+        value: "5"
+      - key: SIGNAL_CANDIDATE_PREFETCH_ENABLED
+        value: "1"
+      - key: SIGNAL_CANDIDATE_PREFETCH_LIMIT
+        value: "80"
+      - key: SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED
+        value: "1"
+      - key: SIGNAL_CANDIDATE_DATA_MAX_ITEMS
+        value: "1000"
+      - key: SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT
+        value: "30"
+      - key: SIGNAL_FINAL_DECISION_STABILITY_ENABLED
+        value: "1"
+      - key: SIGNAL_FINAL_DECISION_STABILITY_SECONDS
+        value: "120"
+      - key: SIGNAL_MARKET_DATA_LATEST_ENABLED
+        value: "1"
+      - key: SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS
+        value: "2000"
+      - key: SIGNAL_LIVE_STATE_STORAGE_ENABLED
+        value: "1"
+      - key: SIGNAL_LIVE_STATE_RETAIN_SECONDS
+        value: "900"
       - key: SIGNAL_PERFORMANCE_AUTO_UPDATE
         value: "1"
       - key: SIGNAL_PERFORMANCE_MIN_AGE_MINUTES
@@ -25,19 +69,29 @@ services:
       - key: SIGNAL_AUTO_CANDIDATES_ENABLED
         value: "1"
       - key: SIGNAL_AUTO_CANDIDATE_LIMIT
-        value: "6"
+        value: "20"
+      - key: SIGNAL_DISCOVERY_SELECTION_LIMIT
+        value: "80"
+      - key: SIGNAL_DOMESTIC_CANDIDATE_LIMIT
+        value: "10"
+      - key: SIGNAL_OVERSEAS_CANDIDATE_LIMIT
+        value: "10"
       - key: SIGNAL_DISCOVERY_MAX_SYMBOLS
-        value: "12"
+        value: "160"
+      - key: SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED
+        value: "1"
+      - key: SIGNAL_LIVE_PRICE_SYMBOL_LIMIT
+        value: "80"
       - key: SIGNAL_DISCOVERY_NEWS_DISPLAY
         value: "3"
       - key: TOSS_LIVE_PRICES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_CANDLES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_ORDERBOOK
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_TRADES
-        value: "0"
+        value: "1"
       - key: TOSS_LIVE_PORTFOLIO
         value: "0"
       - key: DART_LIVE_DISCLOSURES
