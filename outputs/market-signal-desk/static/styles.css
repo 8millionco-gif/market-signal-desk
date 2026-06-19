@@ -33,7 +33,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -89,6 +90,68 @@ h3 {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.mode-status {
+  display: grid;
+  gap: 3px;
+  min-width: 260px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.82);
+}
+
+.mode-status span {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.mode-status strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.mode-status em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-select-label {
+  display: grid;
+  gap: 4px;
+  min-width: 104px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.82);
+}
+
+.mode-select-label span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.mode-select-label select {
+  min-height: 22px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-weight: 900;
+  outline: none;
+}
+
+.mode-select-label option {
+  color: #11151d;
 }
 
 .activity-overlay {
@@ -2466,8 +2529,7 @@ h3 {
     flex-direction: column;
   }
 
-  .topbar-actions,
-  .mode-switch {
+  .topbar-actions {
     width: 100%;
   }
 
@@ -2475,13 +2537,18 @@ h3 {
     flex-wrap: wrap;
   }
 
+  .mode-status {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+
+  .mode-select-label {
+    flex: 0 0 124px;
+  }
+
   .settings-header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .mode-button {
-    flex: 1;
   }
 
   .workspace,
@@ -2525,6 +2592,12 @@ h3 {
 @media (max-width: 520px) {
   h1 {
     font-size: 24px;
+  }
+
+  .mode-status,
+  .mode-select-label {
+    flex-basis: 100%;
+    width: 100%;
   }
 
   .market-strip,

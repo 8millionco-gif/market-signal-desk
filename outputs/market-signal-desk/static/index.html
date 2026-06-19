@@ -10,15 +10,23 @@
     <div class="app-shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">장마감/장전 종목 분석</p>
+          <p class="eyebrow">투자 판단 보조</p>
           <h1>Market Signal Desk</h1>
         </div>
         <div class="topbar-actions">
-          <div class="mode-switch" aria-label="분석 모드">
-            <button class="mode-button active" data-mode="close">장마감</button>
-            <button class="mode-button" data-mode="preopen">장전</button>
-            <button class="mode-button" data-mode="intraday">장중</button>
+          <div class="mode-status" aria-live="polite">
+            <span id="marketSessionLabel">현재 시장 확인 중</span>
+            <strong id="analysisModeLabel">분석 기준 확인 중</strong>
+            <em id="analysisModeDetail">시장 상태에 맞춰 판단 기준을 적용합니다</em>
           </div>
+          <label class="mode-select-label" for="modeSelect">
+            <span>분석 기준</span>
+            <select id="modeSelect" aria-label="분석 기준 변경">
+              <option value="close">장마감</option>
+              <option value="preopen">장전</option>
+              <option value="intraday">장중</option>
+            </select>
+          </label>
           <button class="tool-button" id="performanceButton" type="button">성과</button>
           <button class="icon-button" id="settingsButton" type="button" title="설정" aria-label="설정">
             <svg viewBox="0 0 24 24" aria-hidden="true">

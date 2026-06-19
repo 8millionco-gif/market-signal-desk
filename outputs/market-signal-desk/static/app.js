@@ -22,9 +22,37 @@ function removeStoredValue(key) {
   }
 }
 
+function koreaTimeParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  const hour = Number(get("hour"));
+  return {
+    weekday: get("weekday"),
+    hour: hour === 24 ? 0 : hour,
+    minute: Number(get("minute"))
+  };
+}
+
+function detectedAnalysisMode(date = new Date()) {
+  const { weekday, hour, minute } = koreaTimeParts(date);
+  const minutes = hour * 60 + minute;
+  if (["Sat", "Sun"].includes(weekday)) return "close";
+  if (minutes < 9 * 60) return "preopen";
+  if (minutes <= 15 * 60 + 30) return "intraday";
+  return "close";
+}
+
 const state = {
   view: "signals",
-  mode: "close",
+  mode: detectedAnalysisMode(),
+  autoMode: detectedAnalysisMode(),
+  modeAutoFollow: true,
   filter: "all",
   strategy: "core",
   query: "",
@@ -80,6 +108,10 @@ const els = {
   signalDetail: document.querySelector("#signalDetail"),
   workspaceView: document.querySelector("#workspaceView"),
   settingsView: document.querySelector("#settingsView"),
+  marketSessionLabel: document.querySelector("#marketSessionLabel"),
+  analysisModeLabel: document.querySelector("#analysisModeLabel"),
+  analysisModeDetail: document.querySelector("#analysisModeDetail"),
+  modeSelect: document.querySelector("#modeSelect"),
   candidateCount: document.querySelector("#candidateCount"),
   candidateSource: document.querySelector("#candidateSource"),
   candidateSourceDetail: document.querySelector("#candidateSourceDetail"),
@@ -2008,6 +2040,7 @@ function renderCandidateSourceDetail(rows = null) {
 
 function render() {
   updateShellView();
+  updateModeStatus();
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
@@ -2643,6 +2676,44 @@ function modeLabel(mode) {
   if (mode === "preopen") return "장전";
   if (mode === "intraday") return "장중";
   return "장마감";
+}
+
+function modeSummary(mode) {
+  if (mode === "preopen") {
+    return {
+      label: "장전 분석",
+      detail: "갭·해외시장·전일 재료 기준으로 오늘 후보를 압축합니다"
+    };
+  }
+  if (mode === "intraday") {
+    return {
+      label: "장중 분석",
+      detail: "토스 실시간 가격·호가·체결 반응을 우선 반영합니다"
+    };
+  }
+  return {
+    label: "장마감 분석",
+    detail: "뉴스·공시·성과를 정리해 다음 거래일 후보를 준비합니다"
+  };
+}
+
+function updateModeStatus() {
+  state.autoMode = detectedAnalysisMode();
+  const autoLabel = modeLabel(state.autoMode);
+  const selected = modeSummary(state.mode);
+  const isAuto = state.mode === state.autoMode;
+  if (els.marketSessionLabel) {
+    els.marketSessionLabel.textContent = `현재 ${autoLabel}`;
+  }
+  if (els.analysisModeLabel) {
+    els.analysisModeLabel.textContent = selected.label;
+  }
+  if (els.analysisModeDetail) {
+    els.analysisModeDetail.textContent = isAuto && state.modeAutoFollow ? selected.detail : `수동 기준 · ${selected.detail}`;
+  }
+  if (els.modeSelect && els.modeSelect.value !== state.mode) {
+    els.modeSelect.value = state.mode;
+  }
 }
 
 function triggerLabel(trigger) {
@@ -5529,19 +5600,28 @@ function showDeskView() {
   renderDetail();
 }
 
-document.querySelectorAll(".mode-button").forEach((button) => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll(".mode-button").forEach((target) => target.classList.remove("active"));
-    button.classList.add("active");
-    state.view = "signals";
-    updateViewButtons();
-    updateShellView();
-    state.mode = button.dataset.mode;
-    state.selectedSymbol = null;
-    state.selectedLookup = null;
-    loadDashboard();
+function changeAnalysisMode(mode) {
+  if (!mode || mode === state.mode) {
+    state.modeAutoFollow = mode === detectedAnalysisMode();
+    updateModeStatus();
+    return;
+  }
+  state.view = "signals";
+  updateViewButtons();
+  updateShellView();
+  state.mode = mode;
+  state.modeAutoFollow = mode === detectedAnalysisMode();
+  state.selectedSymbol = null;
+  state.selectedLookup = null;
+  updateModeStatus();
+  loadDashboard();
+}
+
+if (els.modeSelect) {
+  els.modeSelect.addEventListener("change", (event) => {
+    changeAnalysisMode(event.target.value);
   });
-});
+}
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5625,6 +5705,23 @@ els.refreshButton.addEventListener("click", () => {
   loadDashboard();
 });
 
+function refreshAutoAnalysisMode() {
+  const nextAutoMode = detectedAnalysisMode();
+  const changed = nextAutoMode !== state.autoMode;
+  state.autoMode = nextAutoMode;
+  if (changed && state.modeAutoFollow && state.mode !== nextAutoMode) {
+    state.mode = nextAutoMode;
+    state.selectedSymbol = null;
+    state.selectedLookup = null;
+    updateModeStatus();
+    if (state.view === "signals") {
+      loadDashboard();
+    }
+    return;
+  }
+  updateModeStatus();
+}
+
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
   const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
@@ -5645,6 +5742,12 @@ async function refreshSchedulerStatusOnly() {
 window.setInterval(() => {
   refreshSchedulerStatusOnly();
 }, 60000);
+
+window.setInterval(() => {
+  refreshAutoAnalysisMode();
+}, 60000);
+
+updateModeStatus();
 
 loadDashboard().catch(() => {
   els.signalDetail.innerHTML = `
