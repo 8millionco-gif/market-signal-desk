@@ -175,6 +175,8 @@ const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
 const LIVE_PRICE_SYMBOL_LIMIT = 24;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
+const LIVE_PRICE_RETAIN_SECONDS = 90;
+const LIVE_CHANGE_RETAIN_SECONDS = 180;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -782,8 +784,63 @@ function mergeLivePricePayload(payload) {
   return true;
 }
 
+function livePriceTimestampMs(livePrice = {}) {
+  const timestamp = livePrice?.freshness?.timestamp || livePrice?.timestamp || livePrice?.updatedAt || "";
+  const parsed = timestamp ? Date.parse(timestamp) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function livePriceAgeSeconds(livePrice = {}) {
+  const parsed = livePriceTimestampMs(livePrice);
+  if (parsed == null) return null;
+  return Math.max(0, Math.round((Date.now() - parsed) / 1000));
+}
+
+function currentLivePriceStillUsable(current, seconds = LIVE_PRICE_RETAIN_SECONDS) {
+  const livePrice = current?.livePrice ?? {};
+  if (livePrice.source !== "toss" || !livePrice.lastPrice) return false;
+  const ageSeconds = livePriceAgeSeconds(livePrice);
+  if (ageSeconds == null) return false;
+  const pollWindow = Number(state.livePrice?.pollSeconds || 10) * 9;
+  return ageSeconds <= Math.max(seconds, pollWindow);
+}
+
+function incomingLivePriceMissing(incoming) {
+  const livePrice = incoming?.livePrice ?? {};
+  if (!livePrice || !Object.keys(livePrice).length) return true;
+  if (livePrice.source !== "toss") return true;
+  return !livePrice.lastPrice;
+}
+
+function currentChangeStillUsable(current) {
+  if (!currentLivePriceStillUsable(current, LIVE_CHANGE_RETAIN_SECONDS)) return false;
+  return Boolean(current?.change && displayChangeText(current.change) !== "-");
+}
+
+function incomingChangeMissing(incoming) {
+  const livePrice = incoming?.livePrice ?? {};
+  if (livePrice.changeSource === "missing") return true;
+  return !incoming?.change || displayChangeText(incoming.change) === "-";
+}
+
+function retainedLivePrice(current) {
+  return {
+    ...(current?.livePrice ?? {}),
+    retained: true,
+    missedInLastFetch: true,
+    message: "이번 갱신에서 토스 응답이 누락되어 직전 정상 가격을 유지합니다."
+  };
+}
+
 function mergeLiveCandidate(current, incoming) {
   const merged = { ...current };
+  const retainCurrentPrice = currentLivePriceStillUsable(current) && incomingLivePriceMissing(incoming);
+  const retainCurrentChange =
+    !retainCurrentPrice &&
+    currentChangeStillUsable(current) &&
+    incomingChangeMissing(incoming);
+  const priceRetainedFields = new Set(["price", "change", "updated", "livePrice", "priceReaction"]);
+  const changeRetainedFields = new Set(["change", "priceReaction"]);
   const liveFields = [
     "price",
     "change",
@@ -796,20 +853,38 @@ function mergeLiveCandidate(current, incoming) {
     "priceReaction"
   ];
   liveFields.forEach((key) => {
+    if (retainCurrentPrice && priceRetainedFields.has(key)) return;
+    if (retainCurrentChange && changeRetainedFields.has(key)) return;
     if (incoming[key] !== undefined) merged[key] = incoming[key];
   });
+  if (retainCurrentPrice) {
+    merged.livePrice = retainedLivePrice(current);
+    merged.price = current.price;
+    merged.change = current.change;
+    merged.updated = current.updated;
+    merged.priceReaction = current.priceReaction;
+  } else if (retainCurrentChange) {
+    merged.change = current.change;
+    merged.priceReaction = current.priceReaction;
+    merged.livePrice = {
+      ...(merged.livePrice ?? {}),
+      retainedChange: true,
+      changeSource: current.livePrice?.changeSource || "retained-change",
+      changeMessage: "이번 토스 현재가 응답에 등락률이 없어 직전 등락률을 유지합니다."
+    };
+  }
   if (incoming.trend) {
     merged.trend = {
       ...(current.trend ?? {}),
       ...incoming.trend
     };
   }
-  if (incoming.finalDecision) {
+  if (incoming.finalDecision && !retainCurrentPrice && !retainCurrentChange) {
     merged.finalDecision = mergeLiveFinalDecision(current.finalDecision, incoming.finalDecision);
   }
   merged.liveUpdate = {
-    updatedAt: incoming.livePrice?.updatedAt || incoming.updated || new Date().toISOString(),
-    source: incoming.livePrice?.source || "live-price"
+    updatedAt: merged.livePrice?.updatedAt || incoming.livePrice?.updatedAt || incoming.updated || new Date().toISOString(),
+    source: merged.livePrice?.source || incoming.livePrice?.source || "live-price"
   };
   return merged;
 }
