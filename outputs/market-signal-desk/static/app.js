@@ -919,11 +919,7 @@ function mergeLiveCandidate(current, incoming, options = {}) {
     "price",
     "change",
     "updated",
-    "livePrice",
-    "dataCompleteness",
-    "priceReadiness",
-    "evaluationMode",
-    "priceReaction"
+    "livePrice"
   ];
   const analysisFields = [
     "price",
@@ -974,7 +970,7 @@ function mergeLiveCandidate(current, incoming, options = {}) {
       ...incoming.trend
     };
   }
-  if (incoming.finalDecision) {
+  if (!priceOnly && incoming.finalDecision) {
     merged.finalDecision = mergeLiveFinalDecision(current.finalDecision, incoming.finalDecision);
   }
   merged.liveUpdate = {

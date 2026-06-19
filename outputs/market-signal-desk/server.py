@@ -7834,14 +7834,17 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         soft_exclude = action_key == "exclude" or gate_key == "exclude"
 
         if not price_readiness["displayReady"]:
-            tier, label = "wait", "대기"
+            tier, label = "wait", "보강 대기"
             reason = price_readiness["message"]
         elif not price_readiness["entryReady"] and hard_exclude:
             tier, label = "exclude", "제외"
             reason = "가격 반응 데이터가 미완성이고 리스크 기준에 걸려 신규 진입 제외"
         elif not price_readiness["entryReady"]:
-            tier, label = "review", "검토"
-            reason = price_readiness["message"]
+            if price_readiness.get("key") == "closed_baseline":
+                tier, label = "wait", "장마감 관찰"
+            else:
+                tier, label = "wait", "보강 대기"
+            reason = f"{price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
         elif id(item) in core_item_ids:
             tier, label = "core", "핵심"
             if validation_key == "confirmed":
