@@ -175,7 +175,7 @@ const DASHBOARD_BROWSER_CACHE_PREFIX = "marketSignalDashboardCache:";
 const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
 const LIVE_PRICE_SYMBOL_LIMIT = 80;
-const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
+const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
@@ -727,8 +727,11 @@ function candidateNeedsMarketDepth(item) {
 }
 
 function livePriceRefreshDetail(symbols) {
+  const depthInterval = Number(LIVE_MARKET_DEPTH_REFRESH_EVERY || 0);
+  if (depthInterval <= 0) return "price";
+
   const refreshCount = Number(state.livePrice?.refreshCount || 0);
-  const depthDue = refreshCount === 0 || refreshCount % Math.max(1, LIVE_MARKET_DEPTH_REFRESH_EVERY) === 0;
+  const depthDue = refreshCount === 0 || refreshCount % Math.max(1, depthInterval) === 0;
   if (!depthDue) return "price";
 
   const symbolSet = new Set((symbols || []).map(normalizeLiveSymbol).filter(Boolean));

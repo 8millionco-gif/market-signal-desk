@@ -154,9 +154,9 @@ $env:TOSS_TRADES_CACHE_SECONDS="5"
 $env:TOSS_PORTFOLIO_CACHE_SECONDS="30"
 $env:TOSS_STOCK_CACHE_SECONDS="86400"
 $env:TOSS_REQUEST_TIMEOUT_SECONDS="5"
-$env:TOSS_CANDLE_MAX_CANDIDATES="2"
-$env:TOSS_ORDERBOOK_MAX_CANDIDATES="2"
-$env:TOSS_TRADES_MAX_CANDIDATES="2"
+$env:TOSS_CANDLE_MAX_CANDIDATES="20"
+$env:TOSS_ORDERBOOK_MAX_CANDIDATES="20"
+$env:TOSS_TRADES_MAX_CANDIDATES="20"
 $env:TOSS_TRADES_COUNT="30"
 $env:TOSS_CANDLE_MAX_STALENESS_DAYS="7"
 ```
@@ -168,6 +168,8 @@ $env:TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT="50"
 ```
 
 이 옵션을 켜면 샘플 가격과 토스 현재가의 차이가 위 비율보다 큰 종목에 `기준가 차이` 경고를 표시합니다.
+
+웹 화면의 10초 가격 갱신은 판단 결과를 흔들지 않도록 현재가와 등락률만 반영합니다. 차트, 호가, 체결은 서버 후보 풀 보강 봇이 수집해 `candidate-data-snapshots`와 `market-data-latest`에 저장하고, 저장된 값이 후보 판단에 반영됩니다. 운영 기본값은 오늘 후보 20개 전체를 보강하는 것을 기준으로 `TOSS_CANDLE_MAX_CANDIDATES`, `TOSS_ORDERBOOK_MAX_CANDIDATES`, `TOSS_TRADES_MAX_CANDIDATES`를 20으로 둡니다.
 
 라이브 현재가 반영을 잠시 끄려면 다음 값을 설정합니다.
 
