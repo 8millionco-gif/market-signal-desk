@@ -1010,6 +1010,13 @@ function livePriceSummaryPatch(summary) {
     "livePriceRetainedCount",
     "livePriceMissingCount",
     "livePriceMissingSymbols",
+    "tossDataCoverage",
+    "tossPriceCoverageCount",
+    "tossChangeCoverageCount",
+    "tossChartCoverageCount",
+    "tossOrderbookCoverageCount",
+    "tossTradeCoverageCount",
+    "tossEntryDataReadyCount",
     "candidateMarketDataLatestUpdatedCount",
     "candidateMarketDataLatestStored",
     "stableDecisionCount",
@@ -1345,6 +1352,7 @@ async function refreshLivePrices() {
     storedFallbackCount: Number(payload.summary?.livePriceStoredFallbackCount ?? 0),
     retainedCount: Number(payload.summary?.livePriceRetainedCount ?? 0),
     missingCount: Number(payload.summary?.livePriceMissingCount ?? 0),
+    tossDataCoverage: payload.summary?.tossDataCoverage ?? state.livePrice.tossDataCoverage ?? {},
     stableDecisionCount: Number(payload.summary?.stableDecisionCount ?? state.livePrice.stableDecisionCount ?? 0),
     finalDecisionStabilitySeconds: Number(
       payload.summary?.finalDecisionStabilitySeconds ?? state.livePrice.finalDecisionStabilitySeconds ?? 0
@@ -2421,6 +2429,7 @@ function elapsedLabel(value) {
 function livePriceDiagnostics() {
   const live = state.livePrice ?? {};
   const candidates = state.dashboard?.candidates ?? [];
+  const total = candidates.length;
   const freshnessList = candidates.map((item) => priceFreshnessInfo(item));
   const freshCount = freshnessList.filter((item) => item.isFresh).length;
   const delayedCount = freshnessList.filter((item) => item.isDelayed).length;
@@ -2438,6 +2447,17 @@ function livePriceDiagnostics() {
     : Array.isArray(state.dashboard?.summary?.livePriceMissingSymbols)
       ? state.dashboard.summary.livePriceMissingSymbols
       : [];
+  const coverage = live.tossDataCoverage ?? state.dashboard?.summary?.tossDataCoverage ?? {};
+  const coverageTotal = Number(coverage.total ?? total ?? 0);
+  const missingCounts = coverage.missingCounts && typeof coverage.missingCounts === "object"
+    ? coverage.missingCounts
+    : {};
+  const coverageMissingReasonText = Object.keys(missingCounts).length
+    ? Object.entries(missingCounts)
+        .slice(0, 3)
+        .map(([key, count]) => `${key} ${count}`)
+        .join(" · ")
+    : "없음";
   const changedCount = Number(live.changedCount || live.changedSymbols?.length || 0);
   const stableDecisionCount = Number(live.stableDecisionCount || state.dashboard?.summary?.stableDecisionCount || 0);
   const carriedForwardCount = Number(
@@ -2446,7 +2466,6 @@ function livePriceDiagnostics() {
   const finalDecisionStabilitySeconds = Number(
     live.finalDecisionStabilitySeconds || state.dashboard?.summary?.finalDecisionStabilitySeconds || 0
   );
-  const total = candidates.length;
   const priorityCount = priorityLiveSymbols().length;
   const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
   const notFreshCount = Math.max(0, total - freshCount);
@@ -2493,6 +2512,9 @@ function livePriceDiagnostics() {
     missingCount,
     tossRequestedCount,
     tossReceivedCount,
+    coverage,
+    coverageTotal,
+    coverageMissingReasonText,
     batchCount,
     batchErrorCount,
     missingSymbols,
@@ -2527,6 +2549,36 @@ function renderLivePriceStatus() {
       diag.tossRequestedCount ? `${diag.tossReceivedCount}/${diag.tossRequestedCount}` : "-"
     ],
     ["배치 상태", diag.batchErrorCount === 0, diag.batchCount ? `${diag.batchCount}회 · 오류 ${diag.batchErrorCount}` : "-"],
+    [
+      "가격 기준",
+      diag.coverageTotal > 0 && Number(diag.coverage.priceBasisCount ?? 0) >= diag.coverageTotal,
+      `${Number(diag.coverage.priceBasisCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
+    [
+      "등락률",
+      diag.coverageTotal > 0 && Number(diag.coverage.changeCount ?? 0) >= diag.coverageTotal,
+      `${Number(diag.coverage.changeCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
+    [
+      "차트",
+      diag.coverageTotal > 0 && Number(diag.coverage.chartCount ?? 0) >= diag.coverageTotal,
+      `${Number(diag.coverage.chartCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
+    [
+      "호가",
+      diag.coverageTotal > 0 && Number(diag.coverage.orderbookCount ?? 0) >= diag.coverageTotal,
+      `${Number(diag.coverage.orderbookCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
+    [
+      "체결",
+      diag.coverageTotal > 0 && Number(diag.coverage.tradeCount ?? 0) >= diag.coverageTotal,
+      `${Number(diag.coverage.tradeCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
+    [
+      "진입 데이터",
+      diag.coverageTotal > 0 && Number(diag.coverage.entryReadyCount ?? 0) > 0,
+      `${Number(diag.coverage.entryReadyCount ?? 0)}/${diag.coverageTotal || 0}`
+    ],
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
     ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
@@ -2550,6 +2602,7 @@ function renderLivePriceStatus() {
       !diag.missingSymbols.length,
       diag.missingSymbols.length ? shortText(diag.missingSymbols.slice(0, 5).join(", "), 32) : "없음"
     ],
+    ["부족 원인", diag.coverageMissingReasonText === "없음", diag.coverageMissingReasonText],
     ["메시지", !diag.message || diag.ok, diag.message || diag.source]
   ];
   setHtmlIfChanged(els.livePriceStatus, rows

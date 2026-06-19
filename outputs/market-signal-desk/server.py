@@ -4936,6 +4936,92 @@ def candidate_data_completeness(candidate: dict) -> dict:
     }
 
 
+def candidate_toss_data_coverage(candidates: list[dict]) -> dict:
+    total = len([item for item in candidates if isinstance(item, dict)])
+    counts = {
+        "total": total,
+        "tossPriceCount": 0,
+        "priceBasisCount": 0,
+        "changeCount": 0,
+        "chartCount": 0,
+        "orderbookCount": 0,
+        "tradeCount": 0,
+        "materialCount": 0,
+        "displayReadyCount": 0,
+        "reactionReadyCount": 0,
+        "entryReadyCount": 0,
+        "closedBaselineCount": 0,
+        "liveCount": 0,
+        "delayedCount": 0,
+        "staleCount": 0,
+    }
+    missing_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    top_missing_symbols: list[str] = []
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        completeness = (
+            candidate.get("dataCompleteness", {})
+            if isinstance(candidate.get("dataCompleteness"), dict)
+            else candidate_data_completeness(candidate)
+        )
+        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+        source = str(live_price.get("source", "") or "missing").strip().lower()
+        source_counts[source] = source_counts.get(source, 0) + 1
+        freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else live_price_freshness(live_price, str(candidate.get("updated", "")), str(candidate.get("market", "")))
+        freshness_status = str(freshness.get("status", ""))
+        if source == "toss" and live_price.get("lastPrice"):
+            counts["tossPriceCount"] += 1
+        if completeness.get("priceOk"):
+            counts["priceBasisCount"] += 1
+        if completeness.get("changeOk"):
+            counts["changeCount"] += 1
+        if completeness.get("candleOk"):
+            counts["chartCount"] += 1
+        if completeness.get("orderbookOk"):
+            counts["orderbookCount"] += 1
+        if completeness.get("tradeOk"):
+            counts["tradeCount"] += 1
+        if completeness.get("materialOk"):
+            counts["materialCount"] += 1
+        if completeness.get("displayReady"):
+            counts["displayReadyCount"] += 1
+        if completeness.get("reactionReady"):
+            counts["reactionReadyCount"] += 1
+        if completeness.get("entryReady"):
+            counts["entryReadyCount"] += 1
+        if freshness_status == "closed-baseline":
+            counts["closedBaselineCount"] += 1
+        elif freshness_status == "live":
+            counts["liveCount"] += 1
+        elif freshness_status == "delayed":
+            counts["delayedCount"] += 1
+        elif freshness_status == "stale":
+            counts["staleCount"] += 1
+
+        missing = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
+        for label in missing:
+            key = str(label)
+            missing_counts[key] = missing_counts.get(key, 0) + 1
+        if missing and len(top_missing_symbols) < 6:
+            top_missing_symbols.append(str(candidate.get("symbol") or candidate.get("name") or "-"))
+
+    return {
+        **counts,
+        "missingCounts": dict(sorted(missing_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "sourceCounts": dict(sorted(source_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "topMissingSymbols": top_missing_symbols,
+        "message": (
+            f"가격 {counts['priceBasisCount']}/{total} · 등락률 {counts['changeCount']}/{total} · "
+            f"차트 {counts['chartCount']}/{total} · 호가 {counts['orderbookCount']}/{total} · 체결 {counts['tradeCount']}/{total}"
+            if total
+            else "후보 데이터 대기"
+        ),
+    }
+
+
 def candidate_source_wait_reason(source_value: object, data_label: str) -> str:
     value = source_value if isinstance(source_value, dict) else {}
     source = str(value.get("source", "")).strip().lower()
@@ -12680,6 +12766,7 @@ def build_dashboard_payload(context: dict) -> dict:
     market_data_status = context["statuses"].get("market_data_latest", market_data_latest_status())
     candidate_market_data_status = context["statuses"].get("candidate_market_data_latest", {})
     market_data_merge_status = context["statuses"].get("market_data_merge", {})
+    toss_data_coverage = candidate_toss_data_coverage(candidates)
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         "mode": context["mode"],
@@ -12816,6 +12903,13 @@ def build_dashboard_payload(context: dict) -> dict:
             "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),
             "marketDataPriceMergedCount": market_data_merge_status.get("priceMergedCount", 0),
             "marketDataChangeMergedCount": market_data_merge_status.get("changeMergedCount", 0),
+            "tossDataCoverage": toss_data_coverage,
+            "tossPriceCoverageCount": toss_data_coverage.get("priceBasisCount", 0),
+            "tossChangeCoverageCount": toss_data_coverage.get("changeCount", 0),
+            "tossChartCoverageCount": toss_data_coverage.get("chartCount", 0),
+            "tossOrderbookCoverageCount": toss_data_coverage.get("orderbookCount", 0),
+            "tossTradeCoverageCount": toss_data_coverage.get("tradeCount", 0),
+            "tossEntryDataReadyCount": toss_data_coverage.get("entryReadyCount", 0),
             "investableCandidateCount": selection_status.get("investableCandidateCount"),
             "watchCandidateCount": selection_status.get("watchCandidateCount"),
             "deferCandidateCount": selection_status.get("deferCandidateCount"),
@@ -12903,10 +12997,18 @@ def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: st
     refreshed["generatedAt"] = payload.get("generatedAt") or datetime.now(KST).isoformat(timespec="seconds")
 
     freshness_counts = live_price_freshness_counts(candidates)
+    toss_data_coverage = candidate_toss_data_coverage(candidates)
     summary = refreshed.get("summary", {}) if isinstance(refreshed.get("summary"), dict) else {}
     summary.update({
         "candidateCount": len(candidates),
         "livePriceFreshnessCounts": freshness_counts,
+        "tossDataCoverage": toss_data_coverage,
+        "tossPriceCoverageCount": toss_data_coverage.get("priceBasisCount", 0),
+        "tossChangeCoverageCount": toss_data_coverage.get("changeCount", 0),
+        "tossChartCoverageCount": toss_data_coverage.get("chartCount", 0),
+        "tossOrderbookCoverageCount": toss_data_coverage.get("orderbookCount", 0),
+        "tossTradeCoverageCount": toss_data_coverage.get("tradeCount", 0),
+        "tossEntryDataReadyCount": toss_data_coverage.get("entryReadyCount", 0),
         "candidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
         "liveStateMergedCount": live_state_merge.get("mergedCount", 0),
         "marketDataMergedCount": market_data_merge.get("mergedCount", 0),
@@ -13446,6 +13548,13 @@ def dashboard_summary(payload: dict) -> dict:
         "verifyDecisionCount": summary.get("verifyDecisionCount"),
         "portfolioLinkedCandidateCount": summary.get("portfolioLinkedCandidateCount"),
         "portfolioHoldingCount": summary.get("portfolioHoldingCount"),
+        "tossDataCoverage": summary.get("tossDataCoverage", {}),
+        "tossPriceCoverageCount": summary.get("tossPriceCoverageCount"),
+        "tossChangeCoverageCount": summary.get("tossChangeCoverageCount"),
+        "tossChartCoverageCount": summary.get("tossChartCoverageCount"),
+        "tossOrderbookCoverageCount": summary.get("tossOrderbookCoverageCount"),
+        "tossTradeCoverageCount": summary.get("tossTradeCoverageCount"),
+        "tossEntryDataReadyCount": summary.get("tossEntryDataReadyCount"),
         "investableCandidateCount": summary.get("investableCandidateCount"),
         "watchCandidateCount": summary.get("watchCandidateCount"),
         "deferCandidateCount": summary.get("deferCandidateCount"),
@@ -14379,6 +14488,7 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
     summary = copy.deepcopy(base_summary) if isinstance(base_summary, dict) else {}
     compression_counts = selection_status.get("candidateCompressionCounts", {})
     validation_counts = selection_status.get("signalValidationCounts", {})
+    toss_data_coverage = candidate_toss_data_coverage(candidates)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     summary.update({
         "candidateCount": len(candidates),
@@ -14415,6 +14525,13 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
         "priceBasisWaitCount": selection_status.get("priceBasisWaitCount"),
         "changeWaitCount": selection_status.get("changeWaitCount"),
         "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
+        "tossDataCoverage": toss_data_coverage,
+        "tossPriceCoverageCount": toss_data_coverage.get("priceBasisCount", 0),
+        "tossChangeCoverageCount": toss_data_coverage.get("changeCount", 0),
+        "tossChartCoverageCount": toss_data_coverage.get("chartCount", 0),
+        "tossOrderbookCoverageCount": toss_data_coverage.get("orderbookCount", 0),
+        "tossTradeCoverageCount": toss_data_coverage.get("tradeCount", 0),
+        "tossEntryDataReadyCount": toss_data_coverage.get("entryReadyCount", 0),
         "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
         "candidateCompressionCounts": compression_counts,
         "signalValidationCounts": validation_counts,
