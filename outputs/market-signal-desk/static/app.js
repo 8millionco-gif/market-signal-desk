@@ -58,6 +58,8 @@ const state = {
     source: "",
     error: "",
     pollSeconds: 10,
+    refreshCount: 0,
+    lastDepthAt: "",
     timer: null
   },
   viewingSnapshot: null,
@@ -137,6 +139,7 @@ const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
 const LIVE_PRICE_FOCUS_LIMIT = 8;
 const LIVE_PRICE_VISIBLE_LIMIT = 4;
+const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -581,6 +584,29 @@ function livePriceSymbols() {
     .slice(0, LIVE_PRICE_FOCUS_LIMIT + 1);
 }
 
+function candidateNeedsMarketDepth(item) {
+  if (!item) return false;
+  const candles = item.liveCandles ?? {};
+  const orderbook = item.liveOrderbook ?? {};
+  const trades = item.liveTrades ?? {};
+  return (
+    candles.source !== "toss" ||
+    orderbook.source !== "toss" ||
+    trades.source !== "toss"
+  );
+}
+
+function livePriceRefreshDetail(symbols) {
+  const selected = selectedCandidate();
+  const topCandidate = (state.dashboard?.candidates ?? [])[0];
+  const needsDepth =
+    candidateNeedsMarketDepth(selected) ||
+    candidateNeedsMarketDepth(topCandidate);
+  const nextCount = Number(state.livePrice.refreshCount || 0) + 1;
+  const scheduledDepth = nextCount % LIVE_MARKET_DEPTH_REFRESH_EVERY === 0;
+  return needsDepth || scheduledDepth ? "market-depth" : "price";
+}
+
 function livePricePriority(item) {
   const symbol = item?.symbol || "";
   if (state.selectedSymbol && symbol === state.selectedSymbol) return -1000;
@@ -767,7 +793,7 @@ async function refreshLivePrices() {
   const params = new URLSearchParams({
     mode: state.mode,
     symbols: symbols.join(","),
-    detail: "price"
+    detail: livePriceRefreshDetail(symbols)
   });
   const fallback = {
     candidates: [],
@@ -789,6 +815,8 @@ async function refreshLivePrices() {
     source: payload.source || state.livePrice.source,
     error: payload.error || "",
     pollSeconds: Number(payload.pollSeconds || state.livePrice.pollSeconds || 10),
+    refreshCount: Number(state.livePrice.refreshCount || 0) + 1,
+    lastDepthAt: payload.detail === "full" ? (payload.updatedAt || state.livePrice.lastDepthAt) : state.livePrice.lastDepthAt,
     symbols: Array.isArray(payload.symbols) && payload.symbols.length ? payload.symbols : symbols,
     symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length)
   };
@@ -3448,10 +3476,16 @@ function tossSourceLabel(status, liveEnabled, countKey) {
   if (!liveEnabled || status?.enabled === false) return "라이브 꺼짐";
   if (!status) return "확인 중";
   if (status.error) return status.status ? `오류 ${status.status}` : "오류";
-  if (status.source === "skipped") return "제한";
-  if (status.source === "stale") return "오래됨";
+  if (status.source === "retained") return "이전값 유지";
+  if (status.source === "skipped") return "후보 제한";
+  if (status.source === "stale") return "데이터 오래됨";
   if (status.source === "toss") return `토스 ${status[countKey] ?? 0}건`;
-  return "샘플";
+  const message = String(status.message ?? "");
+  if (message.includes("응답이 비어")) return "응답 없음";
+  if (message.includes("환경변수")) return "키 설정 대기";
+  if (message.includes("꺼져")) return "라이브 꺼짐";
+  if (message.includes("제한")) return "후보 제한";
+  return "대체 데이터";
 }
 
 function firstTossIssue(statuses) {
