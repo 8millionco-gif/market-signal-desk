@@ -1114,7 +1114,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             "dataSource": str(live_price.get("dataSource") or "candidate-final"),
             "retained": bool(live_price.get("retained")),
         }
-        change = display_percent_to_decimal(candidate.get("change"))
+        change = candidate_change_decimal(candidate)
         if change is not None:
             row["changeRate"] = str(change)
         for source_key in ("changeSource", "changeMessage", "freshness"):
@@ -3586,9 +3586,17 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
             if change:
                 item["change"] = change
                 item["livePrice"]["changeSource"] = change_source or "toss-prices"
+                change_rate = display_percent_to_decimal(change)
+                if change_rate is not None:
+                    item["livePrice"]["changeRate"] = str(change_rate)
+                    item["livePrice"]["changeDisplay"] = change
             elif candidate_change_text_usable(item.get("change")):
                 item["livePrice"]["changeSource"] = "retained-change"
                 item["livePrice"]["changeMessage"] = "토스 현재가 응답에 등락률이 없어 서버에 저장된 직전 등락률을 유지합니다."
+                change_rate = display_percent_to_decimal(item.get("change"))
+                if change_rate is not None:
+                    item["livePrice"]["changeRate"] = str(change_rate)
+                    item["livePrice"]["changeDisplay"] = display_change(change_rate)
             else:
                 item["livePrice"]["changeSource"] = "pending-change"
                 item["livePrice"]["changeMessage"] = "현재가는 수신했지만 등락률 기준가를 서버에서 추가 확인 중입니다."
@@ -4580,13 +4588,37 @@ def candidate_change_text_usable(change: object) -> bool:
     return True
 
 
-def candidate_data_has_change(candidate: dict) -> bool:
-    if not candidate_change_text_usable(candidate.get("change")):
-        return False
+def candidate_change_decimal(candidate: dict) -> Decimal | None:
+    if not isinstance(candidate, dict):
+        return None
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     if str(live_price.get("changeSource", "")).lower() == "missing":
-        return False
-    return True
+        return None
+    if candidate_change_text_usable(candidate.get("change")):
+        change = display_percent_to_decimal(candidate.get("change"))
+        if change is not None:
+            return change
+    for key in (
+        "changeRate",
+        "changePercent",
+        "changeRatio",
+        "fluctuationRatio",
+        "fluctuationsRatio",
+        "regularMarketChangePercent",
+    ):
+        change = decimal_or_none(live_price.get(key))
+        if change is not None:
+            return change
+    for key in ("changeDisplay", "change"):
+        if candidate_change_text_usable(live_price.get(key)):
+            change = display_percent_to_decimal(live_price.get(key))
+            if change is not None:
+                return change
+    return None
+
+
+def candidate_data_has_change(candidate: dict) -> bool:
+    return candidate_change_decimal(candidate) is not None
 
 
 def candidate_data_completeness(candidate: dict) -> dict:
@@ -4795,6 +4827,57 @@ def candidate_trade_data_gate(candidate: dict) -> dict:
         "reason": reason,
         "missing": missing,
     }
+
+
+def enforce_trade_data_gate_on_candidate(candidate: dict) -> dict:
+    item = dict(candidate)
+    gate = candidate_trade_data_gate(item)
+    item["tradeDataGate"] = gate
+    if gate.get("tradeReady"):
+        return item
+
+    reason = str(gate.get("reason") or "필수 데이터 보강 전까지 진입 후보로 올리지 않습니다.")
+    label = str(gate.get("label") or "반응 검증 대기")
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    decision = copy.deepcopy(item.get("finalDecision", {})) if isinstance(item.get("finalDecision"), dict) else {}
+    if str(decision.get("actionKey", "")) in {"buy", "add"} or bool(decision.get("tradeAllowed")):
+        decision.update({
+            "actionKey": "verify",
+            "action": label,
+            "tone": "wait",
+            "tradeAllowed": False,
+            "gateKey": "defer",
+            "summary": reason,
+            "dataGate": gate,
+            "updatedAt": now_text,
+        })
+        item["finalDecision"] = decision
+
+    validation = copy.deepcopy(item.get("signalValidation", {})) if isinstance(item.get("signalValidation"), dict) else {}
+    if validation and (validation.get("entryReady") or str(validation.get("key", "")) in {"confirmed", "entry_ready"}):
+        validation.update({
+            "key": "evidence_wait" if gate.get("displayReady") else "insufficient",
+            "label": label,
+            "entryReady": False,
+            "tradeReady": False,
+            "updatedAt": now_text,
+        })
+        blockers = validation.get("blockers", []) if isinstance(validation.get("blockers"), list) else []
+        validation["blockers"] = unique_texts([reason, *blockers], limit=8)
+        item["signalValidation"] = validation
+
+    compression = copy.deepcopy(item.get("candidateCompression", {})) if isinstance(item.get("candidateCompression"), dict) else {}
+    if compression and (str(compression.get("tier", "")) in {"core", "entry"} or bool(compression.get("tradeReady"))):
+        compression.update({
+            "tier": "wait",
+            "label": "장마감 관찰" if gate.get("closedBaseline") else "보강 대기",
+            "tradeReady": False,
+            "entryReady": False,
+            "reason": reason,
+            "updatedAt": now_text,
+        })
+        item["candidateCompression"] = compression
+    return item
 
 
 def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_text: str) -> dict | None:
@@ -6121,7 +6204,7 @@ def dynamic_news_score(candidate: dict, base_score: dict, notes: list[str]) -> i
 
 
 def dynamic_price_score(candidate: dict, base_score: dict, notes: list[str]) -> tuple[int, int]:
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     if change is None:
         return bounded_int(base_score.get("price", 0), 0, 16), bounded_int(base_score.get("heatPenalty", 0), 0, 20)
 
@@ -6206,7 +6289,7 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     confirmed_factors: list[str] = []
     missing_factors: list[str] = []
 
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     live_price = candidate.get("livePrice", {})
     live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     has_live_price = candidate_has_fresh_live_price(candidate)
@@ -6622,7 +6705,7 @@ def dynamic_risk_score(candidate: dict, market: dict, base_score: dict, notes: l
     index_change = display_percent_to_decimal(market.get(market_index_key_for_candidate(candidate)))
     if index_change is not None and index_change <= Decimal("-1"):
         risk += 4
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     if change is not None and change < Decimal("-2"):
         risk += 5
     return bounded_int(risk, 0, 30)
@@ -6635,7 +6718,7 @@ def is_hidden_discovery_candidate(candidate: dict) -> bool:
 def hidden_opportunity_score(candidate: dict, score_detail: dict, notes: list[str]) -> tuple[int, list[str]]:
     signals: list[str] = []
     opportunity = bounded_int(score_detail.get("opportunity", 0), 0, 18)
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     trend = candidate.get("trend", {})
     volume = display_multiplier_to_decimal(trend.get("volumeSpike") if isinstance(trend, dict) else "")
     news_items = len(candidate.get("liveNews", {}).get("items", [])) if isinstance(candidate.get("liveNews"), dict) else 0
@@ -7024,7 +7107,7 @@ def candidate_data_confidence(candidate: dict, source_reliability: dict | None =
         if live_price.get("changeSource") == "toss-candles":
             score += 8
             reasons.append("일봉 기준 등락률 확인")
-        elif display_percent_to_decimal(candidate.get("change")) is not None:
+        elif candidate_change_decimal(candidate) is not None:
             score += 4
         if live_price.get("baselineWarning"):
             score -= 10
@@ -7253,7 +7336,7 @@ def final_price_band(candidate: dict, score_detail: dict, total: int, readiness:
     if current is None or current <= 0:
         return None
 
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     opportunity = bounded_int(score_detail.get("opportunity", 0), 0, 18)
     strength = bounded_int((total * 0.45) + (readiness * 0.35) + (opportunity * 1.2), 0, 100)
@@ -7337,7 +7420,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     is_held = bool(portfolio.get("isHeld") or holding)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
-    change = display_percent_to_decimal(candidate.get("change"))
+    change = candidate_change_decimal(candidate)
     has_price = display_number_to_decimal(candidate.get("price")) is not None
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
@@ -9089,7 +9172,6 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
             final_decision, held_stable = decision_stability_merge(previous_final_decision, final_decision, item)
             if held_stable:
                 stable_decision_count += 1
-        final_decision_counts[final_decision["actionKey"]] = final_decision_counts.get(final_decision["actionKey"], 0) + 1
         item["hiddenOpportunity"] = {
             "score": opportunity,
             "maxScore": 18,
@@ -9110,6 +9192,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["priceReaction"] = reaction
         item["qualityGate"] = gate
         item["finalDecision"] = final_decision
+        item = enforce_trade_data_gate_on_candidate(item)
+        final_decision = item.get("finalDecision", {}) if isinstance(item.get("finalDecision"), dict) else {}
+        action_key = str(final_decision.get("actionKey", "verify"))
+        final_decision_counts[action_key] = final_decision_counts.get(action_key, 0) + 1
         enriched.append(item)
 
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
@@ -13654,7 +13740,7 @@ def price_only_candidate_update(candidate: dict) -> dict:
     item["dataCompleteness"] = candidate_data_completeness(item)
     item["priceReadiness"] = candidate_price_readiness(item)
     item["evaluationMode"] = candidate_evaluation_mode(item)
-    return item
+    return enforce_trade_data_gate_on_candidate(item)
 
 
 def price_only_selection_status(candidates: list[dict], base_summary: dict, base_integrations: dict) -> dict:
