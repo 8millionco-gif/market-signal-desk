@@ -38,6 +38,7 @@ DISCOVERY_LATEST_FILE = DATA_DIR / "discovery-latest.json"
 CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard-cache.json"
 RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
+LIVE_STATE_FILE = DATA_DIR / "live-state.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
@@ -77,6 +78,10 @@ SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS",
 SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
 SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
+SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
+SIGNAL_LIVE_STATE_MAX_ITEMS = int(os.getenv("SIGNAL_LIVE_STATE_MAX_ITEMS", "240"))
+LIVE_STATE_KV_KEY = "live_price_state"
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
     TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = (
@@ -225,6 +230,7 @@ CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
 RAW_EVENT_LOCK = threading.Lock()
+LIVE_STATE_LOCK = threading.Lock()
 STOCK_SEARCH_MASTER_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
@@ -3259,6 +3265,211 @@ def candles_are_stale(candles: list[dict]) -> bool:
     if latest is None:
         return True
     return latest < datetime.now(KST) - timedelta(days=TOSS_CANDLE_MAX_STALENESS_DAYS)
+
+
+LIVE_STATE_CANDIDATE_FIELDS = [
+    "symbol",
+    "name",
+    "market",
+    "price",
+    "change",
+    "chart",
+    "livePrice",
+    "liveCandles",
+    "liveOrderbook",
+    "liveTrades",
+    "trend",
+    "priceReaction",
+    "qualityGate",
+    "finalDecision",
+    "signalValidation",
+    "dataConfidence",
+    "sourceReliability",
+    "decisionGroup",
+    "candidateCompression",
+    "score",
+    "totalScore",
+    "triggerReadiness",
+    "preopenPriority",
+]
+
+
+def live_state_empty() -> dict:
+    return {"version": 1, "updatedAt": "", "items": {}}
+
+
+def live_state_json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): live_state_json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [live_state_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [live_state_json_safe(item) for item in value]
+    if isinstance(value, (datetime, Decimal)):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def live_state_data() -> dict:
+    if not SIGNAL_LIVE_STATE_STORAGE_ENABLED:
+        return live_state_empty()
+    stored = db_read_kv(LIVE_STATE_KV_KEY, None) if database_storage_enabled() else None
+    file_data = safe_read_json_file(LIVE_STATE_FILE)
+    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else live_state_empty()
+    if not isinstance(data, dict):
+        return live_state_empty()
+    items = data.get("items", {})
+    if not isinstance(items, dict):
+        data["items"] = {}
+    return data
+
+
+def live_state_write(data: dict) -> bool:
+    if not SIGNAL_LIVE_STATE_STORAGE_ENABLED:
+        return False
+    payload = live_state_json_safe(data)
+    if database_storage_enabled() and db_write_kv(LIVE_STATE_KV_KEY, payload):
+        return True
+    write_json(LIVE_STATE_FILE, payload)
+    return True
+
+
+def live_state_record_timestamp(record: dict) -> str:
+    candidate = record.get("candidate", {}) if isinstance(record.get("candidate"), dict) else {}
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    return str(
+        live_price.get("timestamp")
+        or live_price.get("updatedAt")
+        or record.get("updatedAt")
+        or ""
+    )
+
+
+def live_state_record_age_seconds(record: dict) -> int | None:
+    parsed = parse_iso_datetime(live_state_record_timestamp(record))
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def live_state_record_usable(record: dict) -> bool:
+    if not isinstance(record, dict):
+        return False
+    candidate = record.get("candidate", {}) if isinstance(record.get("candidate"), dict) else {}
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    if str(live_price.get("source", "")) != "toss" or not live_price.get("lastPrice"):
+        return False
+    age = live_state_record_age_seconds(record)
+    return age is not None and age <= SIGNAL_LIVE_STATE_RETAIN_SECONDS
+
+
+def live_state_record_from_candidate(candidate: dict, mode: str, now_text: str, previous: dict | None = None) -> dict | None:
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    if str(live_price.get("source", "")) != "toss" or not live_price.get("lastPrice"):
+        return None
+    previous = previous if isinstance(previous, dict) else {}
+    candidate_payload = {
+        key: copy.deepcopy(candidate[key])
+        for key in LIVE_STATE_CANDIDATE_FIELDS
+        if key in candidate
+    }
+    return {
+        "symbol": symbol,
+        "mode": mode,
+        "updatedAt": now_text,
+        "firstSeenAt": previous.get("firstSeenAt") or now_text,
+        "observations": int(previous.get("observations", 0) or 0) + 1,
+        "candidate": live_state_json_safe(candidate_payload),
+    }
+
+
+def trim_live_state_items(items: dict) -> dict:
+    usable_items = {
+        symbol: record
+        for symbol, record in items.items()
+        if isinstance(record, dict) and live_state_record_usable(record)
+    }
+    if len(usable_items) <= SIGNAL_LIVE_STATE_MAX_ITEMS:
+        return usable_items
+    ranked = sorted(
+        usable_items.items(),
+        key=lambda pair: str(pair[1].get("updatedAt", "")),
+        reverse=True,
+    )
+    return dict(ranked[: max(1, SIGNAL_LIVE_STATE_MAX_ITEMS)])
+
+
+def update_live_state_from_candidates(candidates: list[dict], mode: str) -> dict:
+    if not SIGNAL_LIVE_STATE_STORAGE_ENABLED:
+        return {"enabled": False, "storedCount": 0, "storage": "disabled"}
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    with LIVE_STATE_LOCK:
+        data = live_state_data()
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        stored_count = 0
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            symbol = str(candidate.get("symbol", "")).strip().upper()
+            record = live_state_record_from_candidate(candidate, mode, now_text, items.get(symbol))
+            if record is None:
+                continue
+            items[symbol] = record
+            stored_count += 1
+        data["items"] = trim_live_state_items(items)
+        data["updatedAt"] = now_text
+        ok = live_state_write(data)
+    return {
+        "enabled": True,
+        "stored": ok,
+        "storedCount": stored_count,
+        "retainedCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
+        "storage": "postgres" if database_storage_enabled() else "filesystem",
+        "updatedAt": now_text,
+    }
+
+
+def merge_live_state_into_candidates(candidates: list[dict], mode: str) -> tuple[list[dict], dict]:
+    if not SIGNAL_LIVE_STATE_STORAGE_ENABLED:
+        return candidates, {"enabled": False, "mergedCount": 0}
+    data = live_state_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    merged: list[dict] = []
+    merged_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            merged.append(candidate)
+            continue
+        item = copy.deepcopy(candidate)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        record = items.get(symbol)
+        if live_state_record_usable(record):
+            state_candidate = record.get("candidate", {}) if isinstance(record.get("candidate"), dict) else {}
+            for key in LIVE_STATE_CANDIDATE_FIELDS:
+                if key in state_candidate:
+                    item[key] = copy.deepcopy(state_candidate[key])
+            item["liveState"] = {
+                "source": "stored-live-state",
+                "mode": record.get("mode", ""),
+                "updatedAt": record.get("updatedAt", ""),
+                "ageSeconds": live_state_record_age_seconds(record),
+                "message": "직전 토스 확정 상태를 먼저 반영했습니다.",
+            }
+            merged_count += 1
+        merged.append(item)
+    return merged, {
+        "enabled": True,
+        "source": "live_price_state",
+        "mergedCount": merged_count,
+        "retainedCount": len(items),
+        "updatedAt": data.get("updatedAt", ""),
+        "retainSeconds": SIGNAL_LIVE_STATE_RETAIN_SECONDS,
+    }
 
 
 def fetch_naver_news(query: str, display: int | None = None, start: int = 1, sort: str = "date") -> dict:
@@ -10554,6 +10765,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         for item in base_payload.get("candidates", [])
         if isinstance(item, dict) and str(item.get("symbol", "")).strip()
     ]
+    base_candidates, live_state_status = merge_live_state_into_candidates(base_candidates, mode)
     requested = unique_symbols(symbols)
     has_requested_symbols = bool(requested)
     if not has_requested_symbols:
@@ -10612,12 +10824,15 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     market = copy.deepcopy(base_payload.get("market", seed_data().get("market", {})))
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
     candidates = sort_candidates_for_mode(candidates, mode)
+    live_state_write_status = update_live_state_from_candidates(candidates, mode)
     freshness_counts = live_price_freshness_counts(candidates)
     summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
     summary.update({
         "livePriceFreshnessCounts": freshness_counts,
         "livePriceRequestedCount": len(requested),
         "livePriceRefreshedCount": len(candidates),
+        "liveStateMergedCount": live_state_status.get("mergedCount", 0),
+        "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
     })
     integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     integrations["selection"] = selection_status
@@ -10629,6 +10844,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "requestedCount": len(requested),
         "refreshedCount": len(candidates),
         "freshnessCounts": freshness_counts,
+        "stateRead": live_state_status,
+        "stateWrite": live_state_write_status,
         "updatedAt": summary["livePriceUpdatedAt"],
     }
     toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}

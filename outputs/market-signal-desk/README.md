@@ -342,6 +342,7 @@ DB에 저장되는 핵심 데이터는 다음과 같습니다.
 
 - 후보 풀: `candidate_pool`
 - 상시 발굴 봇 최신 결과: `discovery_latest`
+- 토스 최신 수신 상태: `live_price_state`
 - 장전/장마감/장중 스냅샷: `signal_snapshots`
 - 시세·공시·뉴스 원천 이벤트: `signal_raw_events`
 
@@ -355,9 +356,13 @@ $env:SIGNAL_DB_MIGRATE_RUN_LIMIT="200"
 $env:SIGNAL_RAW_EVENT_STORAGE_ENABLED="1"
 $env:SIGNAL_RAW_EVENT_PAYLOAD_LIMIT="40"
 $env:SIGNAL_RAW_EVENT_FILE_LIMIT="500"
+$env:SIGNAL_LIVE_STATE_STORAGE_ENABLED="1"
+$env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="180"
 ```
 
 앱은 시작 후 첫 저장/조회 시 `signal_kv`, `signal_snapshots`, `signal_raw_events` 테이블을 자동 생성합니다. `SIGNAL_DB_AUTO_MIGRATE=1`이면 기존 `data/candidate-pool.json`, `data/discovery-latest.json`, `data/runs/*.json` 기록을 DB에 한 번 자동 이관합니다. 운영에서는 이 값을 연결해야 후보 풀과 성과 검증 기록이 재배포 후에도 유지됩니다.
+
+토스 현재가·호가·체결 원천 응답은 `signal_raw_events`에 감사 로그로 저장되고, 화면 판단에 바로 쓰는 후보별 최신 가격·등락률·가격 반응·최종 판단은 `live_price_state`에 별도로 저장됩니다. 10초 폴링 중 일부 종목이 미수신되면 이 최신 상태를 먼저 병합한 뒤 재계산하므로, 일시적인 누락 때문에 핵심 후보가 바로 사라지는 현상을 줄입니다.
 
 `signal_raw_events`에는 Toss 시세/캔들/호가/체결, OpenDART 공시, 네이버/GDELT 뉴스 응답이 저장됩니다. 원천 payload는 `SIGNAL_RAW_EVENT_PAYLOAD_LIMIT` 범위로 잘라 저장하므로, 판단 근거 추적은 가능하게 두면서 DB가 불필요하게 커지는 것을 막습니다.
 
