@@ -132,6 +132,8 @@ const QUICK_SEARCH_PRESETS = [
   { label: "배당", query: "배당" }
 ];
 
+const DASHBOARD_BROWSER_CACHE_PREFIX = "marketSignalDashboardCache:";
+const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
 const LIVE_PRICE_FOCUS_LIMIT = 8;
 const LIVE_PRICE_VISIBLE_LIMIT = 4;
@@ -162,6 +164,72 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function dashboardBrowserCacheKey(mode) {
+  return `${DASHBOARD_BROWSER_CACHE_PREFIX}${mode || state.mode || "close"}`;
+}
+
+function saveDashboardToBrowserCache(dashboard) {
+  if (!dashboard || !Array.isArray(dashboard.candidates) || !dashboard.candidates.length) return;
+  const mode = dashboard.mode || state.mode || "close";
+  const record = {
+    mode,
+    savedAt: new Date().toISOString(),
+    dashboard
+  };
+  try {
+    const text = JSON.stringify(record);
+    writeStoredValue(dashboardBrowserCacheKey(mode), text);
+    writeStoredValue(DASHBOARD_BROWSER_CACHE_LAST, text);
+  } catch (error) {
+    // 대시보드가 브라우저 저장 한도를 넘으면 서버 저장본만 사용합니다.
+  }
+}
+
+function readDashboardFromBrowserCache(mode) {
+  const candidates = [
+    readStoredValue(dashboardBrowserCacheKey(mode), ""),
+    readStoredValue(DASHBOARD_BROWSER_CACHE_LAST, "")
+  ];
+  for (const text of candidates) {
+    if (!text) continue;
+    try {
+      const record = JSON.parse(text);
+      const dashboard = record?.dashboard;
+      if (dashboard && Array.isArray(dashboard.candidates) && dashboard.candidates.length) {
+        return { ...record, dashboard };
+      }
+    } catch (error) {
+      // 손상된 브라우저 캐시는 무시하고 다음 후보를 확인합니다.
+    }
+  }
+  return null;
+}
+
+function browserCachedDashboardPayload(mode, error) {
+  const record = readDashboardFromBrowserCache(mode);
+  if (!record) return null;
+  const dashboard = JSON.parse(JSON.stringify(record.dashboard));
+  const fallbackError = error?.name === "AbortError" ? "응답 지연" : "서버 연결 실패";
+  const createdAt = record.savedAt || dashboard.generatedAt || "";
+  dashboard.cache = {
+    ...(dashboard.cache ?? {}),
+    cached: true,
+    source: "browser_cache",
+    requestedMode: mode,
+    mode: record.mode || dashboard.mode || mode,
+    createdAt,
+    fallbackError
+  };
+  dashboard.summary = {
+    ...(dashboard.summary ?? {}),
+    dashboardCacheSource: "browser_cache",
+    dashboardCacheCreatedAt: createdAt,
+    dashboardCacheFallbackError: fallbackError,
+    candidateSourceStored: true
+  };
+  return dashboard;
 }
 
 function uniqueTexts(values = [], limit = 8) {
@@ -429,6 +497,7 @@ async function loadDashboard(options = {}) {
     const dashboard = await fetchJson(`/api/dashboard?${params.toString()}`, forceRefresh ? 45000 : 15000);
     await statusPromise;
     state.dashboard = dashboard;
+    saveDashboardToBrowserCache(dashboard);
     if (!state.selectedSymbol) {
       const defaultCandidate = bestCandidate(state.dashboard.candidates ?? []);
       state.selectedSymbol = defaultCandidate?.symbol ?? state.dashboard.selected?.symbol ?? null;
@@ -439,15 +508,32 @@ async function loadDashboard(options = {}) {
     startLivePricePolling();
   } catch (error) {
     await statusPromise;
-    state.dashboard = null;
     stopLivePricePolling();
     finishActivity();
     if (isAuthError(error)) {
+      state.dashboard = null;
       renderAuthGate();
       return;
     }
+    if (restoreDashboardFromBrowserCache(error)) return;
+    state.dashboard = null;
     renderLoadError(error);
   }
+}
+
+function restoreDashboardFromBrowserCache(error) {
+  const dashboard = browserCachedDashboardPayload(state.mode, error);
+  if (!dashboard) return false;
+  state.dashboard = dashboard;
+  const candidates = state.dashboard.candidates ?? [];
+  if (!candidates.some((item) => item.symbol === state.selectedSymbol)) {
+    const defaultCandidate = bestCandidate(candidates);
+    state.selectedSymbol = defaultCandidate?.symbol ?? state.dashboard.selected?.symbol ?? null;
+  }
+  render();
+  renderCandidateSourceDetail();
+  startLivePricePolling();
+  return true;
 }
 
 function livePriceSymbols() {
@@ -1459,6 +1545,7 @@ function renderCandidatePoolStatus() {
 
 function candidateSourceLabel(summary = {}) {
   const cache = state.dashboard?.cache ?? {};
+  if (cache.cached && cache.source === "browser_cache") return "브라우저 저장본";
   if (cache.cached && cache.source === "dashboard_cache") return "저장 대시보드";
   if (cache.cached && cache.source === "discovery_latest") return "저장 발굴본";
   if (cache.cached) return "저장 스냅샷";
@@ -1478,13 +1565,16 @@ function candidateSourceDetailRows(summary = {}) {
   const stockMaster = state.stockMasterStatus ?? {};
   const generated = stockMaster.generated ?? {};
   const activeMaster = stockMaster.active ?? {};
+  const browserRecovered = Boolean(cache.cached && cache.source === "browser_cache");
   const storageLabel =
-    storage.implementation === "database" || storage.mode === "database"
+    browserRecovered
+      ? "브라우저"
+      : storage.implementation === "database" || storage.mode === "database"
       ? "DB"
       : storage.implementation === "filesystem" || storage.mode === "filesystem"
         ? "파일"
         : "미확인";
-  const storageOk = Boolean(storage.persistent || storage.implementation === "database" || storage.mode === "database" || storage.recentRunCount);
+  const storageOk = Boolean(browserRecovered || storage.persistent || storage.implementation === "database" || storage.mode === "database" || storage.recentRunCount);
   const sourceLabel = candidateSourceLabel(summary);
   const cachedAt = cache.createdAt || summary.dashboardCacheCreatedAt || summary.storedDiscoveryCreatedAt || state.dashboard?.generatedAt || "";
   const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
@@ -1509,7 +1599,7 @@ function candidateSourceDetailRows(summary = {}) {
     ["갱신 방식", cache.cached || summary.candidateSourceStored, refreshPolicy],
     ["장중 가격", Boolean(live.updatedAt && !live.error), liveText],
     ["발굴 근거", scanned > 0, `${scanned}종목 · 재료뉴스 ${materialNews}건 · 제외 ${filtered}건`],
-    ["저장 상태", storageOk, `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
+    ["저장 상태", storageOk, browserRecovered ? "브라우저 마지막 성공본으로 복구" : `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
     ["검색 마스터", masterCount > 0, `${masterCount}개 · ${masterStorage}${masterGeneratedAt}`]
   ];
 }
