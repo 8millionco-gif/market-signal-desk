@@ -146,6 +146,7 @@ SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SEC
 SIGNAL_DISCOVERY_BOT_ENABLED = os.getenv("SIGNAL_DISCOVERY_BOT_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS", "600"))
 SIGNAL_DISCOVERY_BOT_MODE = os.getenv("SIGNAL_DISCOVERY_BOT_MODE", "intraday").strip().lower() or "intraday"
+SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST = os.getenv("SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
 SIGNAL_CLOSE_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_CLOSE_RUN_WINDOW_MINUTES", "360"))
 SIGNAL_PREOPEN_RUN_TIME = os.getenv("SIGNAL_PREOPEN_RUN_TIME", "08:40")
@@ -8355,7 +8356,140 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
     }
 
 
-def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[list[dict], dict]:
+DISCOVERY_STATUS_SUMMARY_KEYS = [
+    "universeCount",
+    "scannedCount",
+    "domesticSelected",
+    "overseasSelected",
+    "domesticLimit",
+    "overseasLimit",
+    "qualityPrimaryCount",
+    "qualityReserveCount",
+    "qualityRejectedCount",
+    "qualitySelectedPrimary",
+    "qualitySelectedReserve",
+    "qualitySelectedFallback",
+    "qualityFallbackCount",
+    "evidenceStrongCount",
+    "evidenceQualifiedCount",
+    "evidenceThinCount",
+    "evidenceRiskCount",
+    "evidenceWeakCount",
+    "averageEvidenceScore",
+    "targetCandidateCount",
+    "domesticShortfall",
+    "overseasShortfall",
+    "discoveryNewsCount",
+    "materialNewsCount",
+    "selectedMaterialNewsCount",
+    "filteredNewsCount",
+    "candidatePoolRetainLimit",
+    "candidatePoolRetainMinScore",
+    "candidatePoolRetainedInputCount",
+    "candidatePoolRetainedScanCount",
+    "candidatePoolMemoryAppliedCount",
+    "candidatePoolSelectedCount",
+    "candidatePoolSelectedSymbols",
+]
+
+
+def stored_discovery_initial_candidates(mode: str, watched: set[str]) -> tuple[list[dict], dict] | None:
+    if not SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST:
+        return None
+    record = discovery_latest_record(include_dashboard=True)
+    if not isinstance(record, dict) or not record:
+        return None
+    dashboard_payload = record.get("dashboard", {})
+    if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+        return None
+    raw_candidates = dashboard_payload.get("candidates", [])
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        return None
+    candidates = []
+    for candidate in raw_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        item = copy.deepcopy(candidate)
+        discovery = dict(item.get("discovery", {})) if isinstance(item.get("discovery"), dict) else {}
+        discovery["storedDiscovery"] = True
+        discovery["storedRunId"] = record.get("id", "")
+        discovery["storedMode"] = record.get("mode") or dashboard_payload.get("mode", "")
+        discovery["storedCreatedAt"] = record.get("createdAt", dashboard_payload.get("generatedAt", ""))
+        item["discovery"] = discovery
+        item["candidateSource"] = "stored-discovery"
+        candidates.append(item)
+    if not candidates:
+        return None
+
+    stored_mode = str(record.get("mode") or dashboard_payload.get("mode") or "")
+    summary = dashboard_payload.get("summary", {}) if isinstance(dashboard_payload.get("summary"), dict) else {}
+    status = {
+        "source": "stored-discovery",
+        "enabled": True,
+        "stored": True,
+        "message": "저장된 최신 발굴 후보를 사용합니다. 새 후보 발굴은 봇/스케줄러/수동 실행에서만 수행합니다.",
+        "candidateCount": len(candidates),
+        "storedCandidateCount": len(candidates),
+        "storedRunId": record.get("id", ""),
+        "storedMode": stored_mode,
+        "requestedMode": mode,
+        "modeMatched": not stored_mode or stored_mode == mode,
+        "storedCreatedAt": record.get("createdAt", dashboard_payload.get("generatedAt", "")),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    for key in DISCOVERY_STATUS_SUMMARY_KEYS:
+        if key in summary:
+            status[key] = summary.get(key)
+    return candidates, status
+
+
+def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[str], mode: str) -> tuple[list[dict], dict] | None:
+    pool_records = candidate_pool_retainable_records(limit=SIGNAL_AUTO_CANDIDATE_LIMIT)
+    if not pool_records:
+        return None
+    candidates = []
+    for record in pool_records:
+        entry = candidate_pool_entry_from_record(record)
+        candidate = default_candidate_for_entry(entry, [], {"source": "candidate_pool", "total": 0, "relevanceSummary": {}})
+        memory = candidate_pool_memory_payload(record)
+        discovery = dict(candidate.get("discovery", {})) if isinstance(candidate.get("discovery"), dict) else {}
+        evidence = dict(discovery.get("evidenceProfile", {})) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+        evidence["score"] = bounded_int(record.get("evidenceScore", memory.get("evidenceScore", 0)), 0, 100)
+        evidence["grade"] = record.get("evidenceGrade", memory.get("evidenceGrade", "pool"))
+        evidence["reasons"] = unique_texts([record.get("stateReason", ""), memory.get("reason", ""), "저장 후보 풀에서 재검토"], limit=5)
+        discovery.update({
+            "source": "candidate_pool",
+            "poolRetained": True,
+            "poolMemory": memory,
+            "poolScore": bounded_int(memory.get("score", record.get("retainScore", 0)), 0, 100),
+            "score": bounded_int(record.get("retainScore", candidate.get("totalScore", 0)), 0, 100),
+            "evidenceProfile": evidence,
+            "qualityTier": record.get("qualityTier", ""),
+        })
+        candidate["discovery"] = discovery
+        candidate["candidateSource"] = "candidate-pool"
+        candidate["updated"] = record.get("lastSeenAt", "후보 풀")
+        candidate["price"] = record.get("price", candidate.get("price", "-"))
+        candidate["change"] = record.get("change", candidate.get("change", ""))
+        candidates.append(candidate)
+
+    status = {
+        "source": "candidate-pool",
+        "enabled": True,
+        "stored": True,
+        "message": "저장된 후보 풀을 사용합니다. 새 발굴 결과가 저장되기 전까지 상시 관찰 대상을 우선 표시합니다.",
+        "candidateCount": len(candidates),
+        "candidatePoolRetainedInputCount": len(pool_records),
+        "candidatePoolRetainedScanCount": len(pool_records),
+        "candidatePoolSelectedCount": len(candidates),
+        "candidatePoolSelectedSymbols": [item.get("symbol", "") for item in candidates],
+        "requestedMode": mode,
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    return candidates, status
+
+
+def initial_candidates(data: dict, watched: set[str], mode: str = "", force_discovery: bool = False) -> tuple[list[dict], dict]:
     seed_candidates = data.get("candidates", [])
     if not SIGNAL_AUTO_CANDIDATES_ENABLED:
         return seed_candidates, {
@@ -8364,6 +8498,14 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "") -> tuple[l
             "message": "자동 후보 생성이 꺼져 있어 샘플 후보를 사용합니다.",
             "candidateCount": len(seed_candidates),
         }
+
+    if not force_discovery:
+        stored_result = stored_discovery_initial_candidates(mode, watched)
+        if stored_result is not None:
+            return stored_result
+        pool_result = candidate_pool_initial_candidates(seed_candidates, watched, mode)
+        if pool_result is not None:
+            return pool_result
 
     cache_key = auto_candidate_cache_key(watched)
     expires_at = DISCOVERY_CACHE.get("expires_at")
@@ -8557,13 +8699,13 @@ def integration_failure_status(fallback: dict, error: Exception, message: str) -
     return status
 
 
-def collect_signal_inputs(mode: str) -> dict:
+def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
     watched = set(watchlist())
     portfolio = safe_portfolio_status()
-    raw_candidates, discovery_status = initial_candidates(data, watched, mode)
+    raw_candidates, discovery_status = initial_candidates(data, watched, mode, force_discovery=force_discovery)
     candidates = [decorate_candidate(item, watched) for item in raw_candidates]
     defaults = dashboard_status_defaults()
     return {
@@ -8797,6 +8939,11 @@ def build_dashboard_payload(context: dict) -> dict:
             "readyCount": len([item for item in candidates if item["triggerReadiness"] >= 70]),
             "selectionSource": selection_status.get("source"),
             "candidateSource": discovery_status.get("source"),
+            "candidateSourceStored": bool(discovery_status.get("stored")),
+            "storedDiscoveryRunId": discovery_status.get("storedRunId", ""),
+            "storedDiscoveryMode": discovery_status.get("storedMode", ""),
+            "storedDiscoveryCreatedAt": discovery_status.get("storedCreatedAt", ""),
+            "storedDiscoveryModeMatched": discovery_status.get("modeMatched"),
             "universeCount": discovery_status.get("universeCount"),
             "scannedCount": discovery_status.get("scannedCount"),
             "domesticSelected": discovery_status.get("domesticSelected"),
@@ -8942,8 +9089,8 @@ def build_dashboard_payload(context: dict) -> dict:
     }
 
 
-def dashboard(mode: str) -> dict:
-    context = collect_signal_inputs(mode)
+def dashboard(mode: str, force_discovery: bool = False) -> dict:
+    context = collect_signal_inputs(mode, force_discovery=force_discovery)
     context = analyze_signal_context(context)
     context = score_signal_context(context)
     context = select_signal_context(context)
@@ -9180,6 +9327,7 @@ def discovery_bot_config_status() -> dict:
         "enabled": SIGNAL_DISCOVERY_BOT_ENABLED,
         "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
         "mode": discovery_bot_mode(),
+        "dashboardStoredDiscoveryFirst": SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST,
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
@@ -9232,7 +9380,7 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
 
     try:
         now = datetime.now(KST)
-        payload = dashboard(selected_mode)
+        payload = dashboard(selected_mode, force_discovery=True)
         run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{selected_mode}-discovery-{trigger}"
         record = {
             "id": run_id,
@@ -10031,7 +10179,7 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
     if mode not in {"close", "preopen", "intraday"}:
         raise ValueError("mode는 close, preopen, intraday 중 하나여야 합니다.")
     now = datetime.now(KST)
-    payload = dashboard(mode)
+    payload = dashboard(mode, force_discovery=True)
     run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{mode}-{trigger}"
     file_name = f"{now.date().isoformat()}_{mode}_{trigger}_{now.strftime('%H%M%S')}.json"
     path = RUNS_DIR / file_name
@@ -10406,7 +10554,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json(cached_payload)
                     return
             try:
-                self.send_json(dashboard(mode))
+                self.send_json(dashboard(mode, force_discovery=force_refresh))
             except Exception as error:
                 cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if cached_payload is not None:

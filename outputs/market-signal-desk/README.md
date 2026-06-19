@@ -137,6 +137,7 @@ Render 배포 환경에서는 오른쪽 `Render 외부 IP` 카드 또는 `GET /a
 환경변수가 설정되어 있으면 대시보드는 후보 종목의 현재가를 `GET /api/v1/prices`로 조회해 샘플 가격을 덮어씁니다. 또한 `GET /api/v1/candles` 일봉 데이터를 이용해 미니 차트와 전일 대비 등락률을 보강합니다.
 검색창은 오늘 후보와 감시 유니버스, `data/stock-search-master.json`, OpenDART 종목코드 캐시, 주요 ETF 수동 마스터를 합친 저장 검색 마스터를 우선 사용합니다. `삼성`, `하닉`, `엔비`, `ㅅㅈ`, `AAPL`, `005930`, `tiger200`, `코덱스레버리지`, `미국반도체ETF`처럼 종목명 일부, 별칭, 초성, 코드, 티커로 찾을 수 있고, 방향키와 Enter로 바로 선택할 수 있습니다. `005930`, `AAPL`처럼 후보 밖 종목코드나 티커를 입력하면 `GET /api/v1/stocks`로 종목 기본정보를 직접 조회합니다. 토스 Open API는 키워드 기반 전체 종목 검색이 아니라 `symbols` 기반 조회를 제공하므로, 시장 전체 종목명 자동완성은 별도 종목 마스터 데이터가 필요합니다.
 검색 마스터는 `GET /api/stocks/master/status`로 저장 상태를 확인하고, `POST /api/stocks/master/refresh`로 수동 재생성할 수 있습니다. DB가 설정되어 있으면 `signal_kv.stock_search_master`에 저장하고, DB가 없으면 `data/stock-search-generated.json` 파일로 fallback합니다. 기본값으로 하루 1회 백그라운드 갱신을 시도하며, `SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH=0`으로 끌 수 있습니다.
+대시보드 조회는 기본적으로 저장된 최신 발굴 결과와 후보 풀을 먼저 사용합니다. 페이지 새로고침은 후보 재발굴이 아니라 저장 결과 조회로 동작하고, 새 후보 수집은 스케줄러, 발굴 봇, `POST /api/discovery/run`, 또는 `/api/dashboard?refresh=1`에서만 수행됩니다. 이 정책은 `SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST=0`으로 끌 수 있습니다.
 
 호가와 최근 체결은 주문 API가 아니라 시장 데이터 API입니다. 화면은 `GET /api/v1/orderbook`과 `GET /api/v1/trades`를 이용해 호가 잔량, 스프레드, 최근 체결 방향을 수급 참고 지표로만 사용합니다. 주문 생성이나 매매 실행과는 연결하지 않습니다.
 보유 자산 판단은 `TOSS_LIVE_PORTFOLIO=1`을 켠 뒤 계좌 목록, 보유 주식, 매수 가능 금액을 읽기 전용으로 조회합니다. 여러 계좌가 있으면 `TOSS_ACCOUNT_SEQ`를 지정하고, 지정하지 않으면 첫 계좌를 조회합니다. 이 기능도 주문 생성이나 자동 매매와 연결하지 않습니다.
