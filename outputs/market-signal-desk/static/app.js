@@ -775,20 +775,50 @@ function livePricePriority(item) {
   return priority;
 }
 
+function candidateLiveRenderSignature(item = {}) {
+  const plan = tradePlan(item);
+  const primary = primaryDecisionForDisplay(item, plan);
+  const livePrice = item.livePrice ?? {};
+  const freshness = livePrice.freshness ?? {};
+  const finalDecision = item.finalDecision ?? {};
+  return JSON.stringify({
+    price: item.price || "",
+    change: displayCandidateChangeText(item),
+    updated: item.updated || "",
+    livePrice: livePrice.lastPrice || "",
+    liveChange: livePrice.changePercent ?? livePrice.changeRate ?? "",
+    liveSource: livePrice.source || "",
+    liveTimestamp: freshness.timestamp || livePrice.timestamp || livePrice.updatedAt || "",
+    retained: Boolean(livePrice.retained),
+    retainedChange: Boolean(livePrice.retainedChange),
+    action: plan.action,
+    tone: plan.tone,
+    decision: primary.key || primary.label || "",
+    score: item.totalScore ?? "",
+    stabilityHeld: Boolean(finalDecision.stability?.held)
+  });
+}
+
 function mergeLivePricePayload(payload) {
   const incoming = Array.isArray(payload?.candidates) ? payload.candidates : [];
   if (!state.dashboard || !incoming.length) return false;
   const existing = state.dashboard.candidates ?? [];
   const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
+  const previousSignatures = new Map(existing.map((item) => [item.symbol, candidateLiveRenderSignature(item)]));
   const incomingBySymbol = new Map(incoming.map((item) => [item.symbol, item]));
   const incomingSymbols = new Set(incomingBySymbol.keys());
   const merged = existing.map((item) => {
     const next = incomingBySymbol.get(item.symbol);
     return next ? mergeLiveCandidate(item, next) : item;
   });
-  incoming.forEach((item) => {
-    if (!existingBySymbol.has(item.symbol)) merged.push(item);
-  });
+  if (payload?.allowCandidateAppend) {
+    incoming.forEach((item) => {
+      if (!existingBySymbol.has(item.symbol)) merged.push(item);
+    });
+  }
+  const changedSymbols = merged
+    .filter((item) => previousSignatures.get(item.symbol) !== candidateLiveRenderSignature(item))
+    .map((item) => item.symbol);
   state.dashboard = {
     ...state.dashboard,
     generatedAt: payload.updatedAt || state.dashboard.generatedAt,
@@ -802,6 +832,11 @@ function mergeLivePricePayload(payload) {
     },
     candidates: merged,
     selected: merged.find((item) => item.symbol === state.selectedSymbol) || payload.selected || state.dashboard.selected
+  };
+  state.livePrice = {
+    ...state.livePrice,
+    changedSymbols,
+    changedCount: changedSymbols.length
   };
   if (state.selectedLookup && incomingSymbols.has(state.selectedLookup.symbol)) {
     state.selectedLookup = merged.find((item) => item.symbol === state.selectedLookup.symbol) || null;
@@ -910,7 +945,7 @@ function mergeLiveCandidate(current, incoming) {
       ...incoming.trend
     };
   }
-  if (incoming.finalDecision && !retainCurrentPrice && !retainCurrentChange) {
+  if (incoming.finalDecision) {
     merged.finalDecision = mergeLiveFinalDecision(current.finalDecision, incoming.finalDecision);
   }
   merged.liveUpdate = {
@@ -921,14 +956,11 @@ function mergeLiveCandidate(current, incoming) {
 }
 
 function mergeLiveFinalDecision(current = {}, incoming = {}) {
-  if (!current || !Object.keys(current).length) return incoming;
-  const merged = { ...current };
-  ["priceLevels", "rows", "signalCards"].forEach((key) => {
-    if (incoming[key] !== undefined) merged[key] = incoming[key];
-  });
-  if (incoming.reactionGate !== undefined) merged.reactionGate = incoming.reactionGate;
-  if (incoming.tradeAllowed !== undefined) merged.tradeAllowed = incoming.tradeAllowed;
-  return merged;
+  if (!incoming || !Object.keys(incoming).length) return current || {};
+  return {
+    ...(current ?? {}),
+    ...incoming
+  };
 }
 
 function livePriceSummaryPatch(summary) {
@@ -941,7 +973,9 @@ function livePriceSummaryPatch(summary) {
     "livePriceRefreshedCount",
     "livePriceStoredFallbackCount",
     "livePriceRetainedCount",
-    "livePriceMissingCount"
+    "livePriceMissingCount",
+    "stableDecisionCount",
+    "finalDecisionStabilitySeconds"
   ];
   return allowedKeys.reduce((patch, key) => {
     if (source[key] !== undefined) patch[key] = source[key];
@@ -963,10 +997,12 @@ function livePriceIntegrationsPatch(integrations) {
 }
 
 function renderLivePriceUpdate(payload = {}) {
-  renderTradeDecisionStatus();
+  const changedSymbols = new Set(state.livePrice?.changedSymbols || []);
+  const selectedChanged = state.selectedSymbol && changedSymbols.has(state.selectedSymbol);
+  if (selectedChanged || payload.detail !== "price") {
+    renderTradeDecisionStatus();
+  }
   renderLivePriceStatus();
-  renderCandidateSourceDetail();
-  renderTossStatus();
   updateLivePriceFragments({ detail: payload.detail || "price" });
 }
 
@@ -1209,7 +1245,6 @@ async function refreshLivePrices() {
     symbolCount: symbols.length
   };
   renderLivePriceStatus();
-  renderCandidateSourceDetail();
   const params = new URLSearchParams({
     mode: state.mode,
     symbols: symbols.join(","),
@@ -1241,13 +1276,16 @@ async function refreshLivePrices() {
     symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length),
     storedFallbackCount: Number(payload.summary?.livePriceStoredFallbackCount ?? 0),
     retainedCount: Number(payload.summary?.livePriceRetainedCount ?? 0),
-    missingCount: Number(payload.summary?.livePriceMissingCount ?? 0)
+    missingCount: Number(payload.summary?.livePriceMissingCount ?? 0),
+    stableDecisionCount: Number(payload.summary?.stableDecisionCount ?? state.livePrice.stableDecisionCount ?? 0),
+    finalDecisionStabilitySeconds: Number(
+      payload.summary?.finalDecisionStabilitySeconds ?? state.livePrice.finalDecisionStabilitySeconds ?? 0
+    )
   };
   if (merged) {
     renderLivePriceUpdate(payload);
   } else {
     renderLivePriceStatus();
-    renderCandidateSourceDetail();
   }
 }
 
@@ -2165,6 +2203,11 @@ function livePriceDiagnostics() {
   const retainedCount = candidates.filter((item) => item?.livePrice?.retained).length;
   const storedFallbackCount = Number(live.storedFallbackCount || state.dashboard?.summary?.livePriceStoredFallbackCount || 0);
   const missingCount = Number(live.missingCount || state.dashboard?.summary?.livePriceMissingCount || 0);
+  const changedCount = Number(live.changedCount || live.changedSymbols?.length || 0);
+  const stableDecisionCount = Number(live.stableDecisionCount || state.dashboard?.summary?.stableDecisionCount || 0);
+  const finalDecisionStabilitySeconds = Number(
+    live.finalDecisionStabilitySeconds || state.dashboard?.summary?.finalDecisionStabilitySeconds || 0
+  );
   const total = candidates.length;
   const priorityCount = priorityLiveSymbols().length;
   const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
@@ -2204,6 +2247,9 @@ function livePriceDiagnostics() {
     retainedCount,
     storedFallbackCount,
     missingCount,
+    changedCount,
+    stableDecisionCount,
+    finalDecisionStabilitySeconds,
     total,
     priorityCount,
     notFreshCount,
@@ -2228,6 +2274,14 @@ function renderLivePriceStatus() {
     ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
     ["최종 미수신", diag.missingCount === 0, diag.missingCount ? `${diag.missingCount}개` : "없음"],
     ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
+    ["부분 갱신", true, diag.changedCount ? `${diag.changedCount}개 변경` : "변경 없음"],
+    [
+      "판단 유지",
+      true,
+      diag.stableDecisionCount
+        ? `${diag.stableDecisionCount}개 · ${diag.finalDecisionStabilitySeconds || 120}초`
+        : "없음"
+    ],
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
     ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
     ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
