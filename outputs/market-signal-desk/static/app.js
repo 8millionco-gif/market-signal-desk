@@ -1043,9 +1043,11 @@ function candidateSourceDetailRows(summary = {}) {
   const masterStorage = stockMasterStorageLabel(stockMaster.storage);
   const masterGeneratedAt = generated.generatedAt ? ` · ${timeLabel(generated.generatedAt)}` : "";
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
+  const refreshPolicy = cache.cached || summary.candidateSourceStored ? "저장 우선 · 수동 실행만 재분석" : "저장 없음 · 필요 시 실시간 생성";
   return [
     ["후보 출처", sourceLabel !== "샘플 후보", `${sourceLabel}${cacheSuffix}`],
     ["기준 시각", Boolean(cachedAt), cachedAt ? timeLabel(cachedAt) : "-"],
+    ["갱신 방식", cache.cached || summary.candidateSourceStored, refreshPolicy],
     ["발굴 근거", scanned > 0, `${scanned}종목 · 재료뉴스 ${materialNews}건 · 제외 ${filtered}건`],
     ["저장 상태", storageOk, `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
     ["검색 마스터", masterCount > 0, `${masterCount}개 · ${masterStorage}${masterGeneratedAt}`]
@@ -4410,7 +4412,7 @@ els.refreshButton.addEventListener("click", () => {
     loadPerformance();
     return;
   }
-  loadDashboard({ refresh: true });
+  loadDashboard();
 });
 
 async function refreshSchedulerStatusOnly() {
