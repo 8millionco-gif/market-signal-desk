@@ -2606,6 +2606,22 @@ def live_price_freshness_counts(candidates: list[dict]) -> dict:
     return counts
 
 
+def retained_toss_live_price(candidate: dict, now_text: str) -> dict | None:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    if str(live_price.get("source", "")) != "toss":
+        return None
+    if not live_price.get("lastPrice"):
+        return None
+    retained = dict(live_price)
+    retained.update({
+        "retained": True,
+        "missedInLastFetch": True,
+        "message": "이번 토스 응답에 종목이 없어 직전 토스 현재가를 유지합니다.",
+    })
+    retained["freshness"] = live_price_freshness(retained, now_text)
+    return retained
+
+
 def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dict], dict]:
     if not TOSS_LIVE_PRICES:
         return candidates, {
@@ -2626,6 +2642,8 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
     prices = price_by_symbol(payload)
     enriched = []
     baseline_drift_count = 0
+    retained_count = 0
+    missing_count = 0
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     for candidate in candidates:
         item = dict(candidate)
@@ -2666,12 +2684,18 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                     "message": "초기 샘플 기준가와 차이가 커서 기준 데이터 갱신 여부를 확인하세요.",
                 })
         else:
-            item["livePrice"] = {
-                "source": "sample",
-                "updatedAt": now_text,
-                "message": "토스 현재가 응답에 종목이 없습니다.",
-            }
-            item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
+            retained_live_price = retained_toss_live_price(candidate, now_text)
+            if retained_live_price:
+                item["livePrice"] = retained_live_price
+                retained_count += 1
+            else:
+                item["livePrice"] = {
+                    "source": "sample",
+                    "updatedAt": now_text,
+                    "message": "토스 현재가 응답에 종목이 없습니다.",
+                }
+                item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text)
+                missing_count += 1
         enriched.append(item)
 
     return enriched, {
@@ -2679,6 +2703,8 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
         "enabled": True,
         "message": "토스증권 현재가를 반영했습니다.",
         "priceCount": len(prices),
+        "retainedCount": retained_count,
+        "missingCount": missing_count,
         "baselineDriftCount": baseline_drift_count,
         "sampleDriftThresholdPercent": (
             display_percent_abs(TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT)

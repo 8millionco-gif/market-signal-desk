@@ -1309,6 +1309,7 @@ function liveDataCoverage(item) {
   const orderbook = item?.liveOrderbook ?? {};
   const trades = item?.liveTrades ?? {};
   const priceTone = freshness.isFresh ? "ok" : freshness.isDelayed ? "warn" : "wait";
+  const retainedPrice = Boolean(item?.livePrice?.retained);
   const candleSource = candles.source || "";
   const orderbookSource = orderbook.source || "";
   const tradesSource = trades.source || "";
@@ -1318,7 +1319,7 @@ function liveDataCoverage(item) {
       label: "가격",
       short: "가",
       tone: priceTone,
-      value: freshness.isFresh ? "실시간" : freshness.label || "대기",
+      value: retainedPrice ? "직전가" : freshness.isFresh ? "실시간" : freshness.label || "대기",
       title: priceMeta(item)
     },
     {
@@ -1839,6 +1840,7 @@ function livePriceDiagnostics() {
   const delayedCount = freshnessList.filter((item) => item.isDelayed).length;
   const snapshotCount = freshnessList.filter((item) => item.isSnapshot).length;
   const tossCount = freshnessList.filter((item) => item.source === "toss").length;
+  const retainedCount = candidates.filter((item) => item?.livePrice?.retained).length;
   const total = candidates.length;
   const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
   const notFreshCount = Math.max(0, total - freshCount);
@@ -1874,6 +1876,7 @@ function livePriceDiagnostics() {
     delayedCount,
     snapshotCount,
     tossCount,
+    retainedCount,
     total,
     notFreshCount,
     pollSeconds,
@@ -1893,6 +1896,7 @@ function renderLivePriceStatus() {
     ["요청 대상", diag.symbolCount >= diag.total && diag.total > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
+    ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
     ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
     ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
@@ -5473,6 +5477,7 @@ function priceMeta(item) {
   if (item.livePrice?.source === "toss") {
     const timestamp = freshness.ageText ? ` · ${freshness.ageText}` : "";
     const pollText = state.livePrice?.pollSeconds ? ` · ${state.livePrice.pollSeconds}초 갱신` : "";
+    const retainedText = item.livePrice.retained ? " · 직전가 유지" : "";
     const changeText =
       item.livePrice.changeSource === "toss-prices"
         ? " · 등락률 실시간 반영"
@@ -5484,7 +5489,7 @@ function priceMeta(item) {
       : "";
     const sourceText = freshness.isFresh ? "토스 실시간" : `토스 ${freshness.label}`;
     const holdText = freshness.isFresh ? "" : " · 신규 진입 판단 보류";
-    return `현재가: ${sourceText}${timestamp}${pollText}${changeText}${warningText}${holdText}${candleText}`;
+    return `현재가: ${sourceText}${timestamp}${pollText}${retainedText}${changeText}${warningText}${holdText}${candleText}`;
   }
   return `현재가: ${freshness.label} · ${freshness.message || item.livePrice?.message || "실시간 가격 대기"}${candleText}`;
 }
