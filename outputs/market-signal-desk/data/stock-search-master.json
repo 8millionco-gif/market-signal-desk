@@ -1,0 +1,206 @@
+{
+  "generatedAt": "2026-06-19T10:40:00+09:00",
+  "description": "Search-only stock master for ETFs and overseas symbols that are not covered by OpenDART.",
+  "symbols": [
+    {
+      "symbol": "122630",
+      "name": "KODEX 레버리지",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스레버리지", "KODEX레버리지", "kodex leverage", "레버리지ETF"],
+      "themes": ["ETF", "레버리지", "코스피200"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "252670",
+      "name": "KODEX 200선물인버스2X",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스인버스2X", "KODEX인버스2X", "곱버스", "인버스2X"],
+      "themes": ["ETF", "인버스", "헤지"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "229200",
+      "name": "KODEX 코스닥150",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스코스닥150", "KODEX코스닥150", "kosdaq150"],
+      "themes": ["ETF", "코스닥150"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "233740",
+      "name": "KODEX 코스닥150레버리지",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스코스닥150레버리지", "KODEX코스닥150레버리지", "코스닥레버리지"],
+      "themes": ["ETF", "코스닥150", "레버리지"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "251340",
+      "name": "KODEX 코스닥150선물인버스",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스코스닥인버스", "KODEX코스닥150인버스", "코스닥인버스"],
+      "themes": ["ETF", "코스닥150", "인버스"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "305720",
+      "name": "KODEX 2차전지산업",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["코덱스2차전지", "KODEX2차전지산업", "배터리ETF"],
+      "themes": ["ETF", "2차전지", "배터리"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "364980",
+      "name": "TIGER 2차전지테마",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["타이거2차전지", "TIGER2차전지테마", "배터리ETF"],
+      "themes": ["ETF", "2차전지", "배터리"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "381180",
+      "name": "TIGER 미국필라델피아반도체나스닥",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["타이거미국필라델피아반도체", "TIGER필라델피아반도체", "필라델피아반도체ETF", "SOXETF"],
+      "themes": ["ETF", "미국 반도체", "필라델피아반도체"],
+      "focusWeight": 5
+    },
+    {
+      "symbol": "133690",
+      "name": "TIGER 미국나스닥100",
+      "market": "KR",
+      "category": "domestic",
+      "securityType": "ETF",
+      "aliases": ["타이거나스닥100", "TIGER미국나스닥100", "나스닥100ETF"],
+      "themes": ["ETF", "나스닥100", "미국"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "SPY",
+      "name": "SPDR S&P 500 ETF Trust",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "ETF",
+      "aliases": ["스파이", "S&P500ETF", "sp500"],
+      "themes": ["ETF", "S&P500", "미국"],
+      "focusWeight": 5
+    },
+    {
+      "symbol": "QQQ",
+      "name": "Invesco QQQ Trust",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "ETF",
+      "aliases": ["큐큐큐", "나스닥100ETF", "NASDAQ100"],
+      "themes": ["ETF", "나스닥100", "미국 기술주"],
+      "focusWeight": 5
+    },
+    {
+      "symbol": "SOXX",
+      "name": "iShares Semiconductor ETF",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "ETF",
+      "aliases": ["미국반도체ETF", "필라델피아반도체", "semiconductor ETF"],
+      "themes": ["ETF", "반도체", "미국"],
+      "focusWeight": 5
+    },
+    {
+      "symbol": "NFLX",
+      "name": "Netflix",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["넷플릭스", "netflix"],
+      "themes": ["스트리밍", "콘텐츠", "미국"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "ORCL",
+      "name": "Oracle",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["오라클", "oracle", "클라우드"],
+      "themes": ["클라우드", "소프트웨어", "AI 인프라"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "CRM",
+      "name": "Salesforce",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["세일즈포스", "salesforce"],
+      "themes": ["SaaS", "소프트웨어", "AI"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "MU",
+      "name": "Micron Technology",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["마이크론", "micron", "메모리반도체"],
+      "themes": ["메모리", "반도체", "HBM"],
+      "focusWeight": 5
+    },
+    {
+      "symbol": "INTC",
+      "name": "Intel",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["인텔", "intel", "파운드리"],
+      "themes": ["반도체", "CPU", "파운드리"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "LRCX",
+      "name": "Lam Research",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["램리서치", "lam research", "반도체장비"],
+      "themes": ["반도체 장비", "식각", "미국"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "AMAT",
+      "name": "Applied Materials",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["어플라이드머티어리얼즈", "amat", "반도체장비"],
+      "themes": ["반도체 장비", "디스플레이", "미국"],
+      "focusWeight": 4
+    },
+    {
+      "symbol": "COIN",
+      "name": "Coinbase",
+      "market": "US",
+      "category": "overseas",
+      "securityType": "STOCK",
+      "aliases": ["코인베이스", "coinbase", "crypto"],
+      "themes": ["암호화폐", "거래소", "미국"],
+      "focusWeight": 3
+    }
+  ]
+}

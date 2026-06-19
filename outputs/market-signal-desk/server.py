@@ -29,6 +29,7 @@ STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 SEED_FILE = DATA_DIR / "seed.json"
 UNIVERSE_FILE = DATA_DIR / "candidate-universe.json"
+STOCK_SEARCH_MASTER_FILE = DATA_DIR / "stock-search-master.json"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DART_CORP_CODE_FILE = DATA_DIR / "dart-corp-codes.json"
 RUNS_DIR = DATA_DIR / "runs"
@@ -1089,6 +1090,10 @@ def seed_data() -> dict:
 
 def universe_data() -> dict:
     return read_json(UNIVERSE_FILE, {"symbols": []})
+
+
+def stock_search_master_data() -> dict:
+    return read_json(STOCK_SEARCH_MASTER_FILE, {"symbols": []})
 
 
 def watchlist() -> list[str]:
@@ -6901,6 +6906,34 @@ def dart_stock_search_entries() -> list[dict]:
     return entries
 
 
+def stock_search_master_entries() -> list[dict]:
+    payload = stock_search_master_data()
+    raw_entries = payload.get("symbols", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+    entries = []
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        name = str(entry.get("name") or symbol).strip()
+        if not symbol or not name:
+            continue
+        item = dict(entry)
+        item["symbol"] = symbol
+        item["name"] = name
+        item["market"] = item.get("market", "US" if re.fullmatch(r"[A-Z.\-]{1,6}", symbol) else "KR")
+        item["category"] = item.get("category", "overseas" if item.get("market") == "US" else "domestic")
+        item["securityType"] = item.get("securityType", "STOCK")
+        item["aliases"] = expanded_stock_aliases(symbol, text_list(item.get("aliases", []), limit=16))
+        item["themes"] = text_list(item.get("themes", []), limit=8)
+        item["focusWeight"] = bounded_int(item.get("focusWeight", 3), 0, 15)
+        item["source"] = item.get("source", "stock-search-master")
+        item["sourceLabel"] = item.get("sourceLabel", "검색 확장 마스터")
+        entries.append(item)
+    return entries
+
+
 def stock_search_universe_entries() -> list[dict]:
     global STOCK_SEARCH_UNIVERSE_CACHE
     if STOCK_SEARCH_UNIVERSE_CACHE is not None:
@@ -6909,6 +6942,7 @@ def stock_search_universe_entries() -> list[dict]:
     seen: set[str] = set()
     for source_entries in [
         candidate_universe_entries(),
+        stock_search_master_entries(),
         STOCK_SEARCH_MANUAL_UNIVERSE,
         dart_stock_search_entries(),
     ]:
@@ -7068,7 +7102,7 @@ def stock_search(query: str, limit: int = 8) -> dict:
         "status": {
             **toss_status,
             "searchMasterCount": search_master_count,
-            "searchMasterSources": ["candidate-universe", "manual-etf", "opendart-corp-code"],
+            "searchMasterSources": ["candidate-universe", "stock-search-master", "manual-etf", "opendart-corp-code"],
         },
         "message": " ".join(unique_texts(messages, limit=3)),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),

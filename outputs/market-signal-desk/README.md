@@ -377,7 +377,7 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 
 웹 화면의 기본 `/api/dashboard` 조회는 DB의 최신 발굴 결과 또는 스냅샷을 먼저 사용합니다. 외부 API 지연으로 화면이 비는 것을 줄이기 위한 읽기 전용 경로이며, 새 후보 분석을 강제로 실행하려면 `/api/dashboard?mode=close&refresh=1` 또는 화면의 새로고침 버튼을 사용합니다.
 
-종목 검색 자동완성은 후보/감시 유니버스뿐 아니라 OpenDART 기업코드 캐시와 주요 ETF 보조 마스터를 함께 사용합니다. 따라서 국내 일반 종목명, 종목코드, 한글 별칭, `TIGER200` 같은 붙여쓴 ETF 별칭을 검색할 수 있습니다.
+종목 검색 자동완성은 후보/감시 유니버스뿐 아니라 `data/stock-search-master.json`, OpenDART 기업코드 캐시, 주요 ETF 보조 마스터를 함께 사용합니다. 따라서 국내 일반 종목명, 종목코드, 한글 별칭, `TIGER200` 같은 붙여쓴 ETF 별칭을 검색할 수 있습니다. OpenDART에 없는 ETF/해외 종목은 `stock-search-master.json`에 항목을 추가하면 코드 변경 없이 자동완성에 반영됩니다.
 
 ```powershell
 $env:SIGNAL_CANDIDATE_POOL_ENABLED="1"
