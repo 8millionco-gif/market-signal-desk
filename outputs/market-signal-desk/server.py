@@ -14561,12 +14561,21 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     preselection_live_state_write_status = {"stored": False, "storedCount": 0, "storage": ""}
     preselection_candidate_data_status = {"stored": False, "storedCount": 0, "storage": ""}
     preselection_candidate_latest_status = {"stored": False, "updatedCount": 0, "storage": ""}
+    preselection_candidate_data_merge_status = {"enabled": False, "mergedCount": 0}
+    preselection_market_data_merge_status = {"enabled": False, "mergedCount": 0}
+    preselection_live_state_merge_status = {"enabled": False, "mergedCount": 0}
     try:
         refresh_candidates, price_status = enrich_candidates_with_toss_prices(refresh_candidates)
         if include_depth:
             refresh_candidates, candle_status = enrich_candidates_with_toss_candles(refresh_candidates)
             refresh_candidates, orderbook_status = enrich_candidates_with_toss_orderbook(refresh_candidates)
             refresh_candidates, trade_status = enrich_candidates_with_toss_trades(refresh_candidates)
+        refresh_candidates, preselection_candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(
+            refresh_candidates,
+            mode,
+        )
+        refresh_candidates, preselection_market_data_merge_status = merge_market_data_latest_into_candidates(refresh_candidates)
+        refresh_candidates, preselection_live_state_merge_status = merge_live_state_into_candidates(refresh_candidates, mode)
         preselection_live_state_write_status = update_live_state_from_candidates(refresh_candidates, mode)
         preselection_candidate_data_status = update_candidate_data_snapshots(
             refresh_candidates,
@@ -14651,6 +14660,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "preselectionLiveStateStoredCount": preselection_live_state_write_status.get("storedCount", 0),
         "preselectionCandidateDataStoredCount": preselection_candidate_data_status.get("storedCount", 0),
         "preselectionCandidateMarketDataLatestUpdatedCount": preselection_candidate_latest_status.get("updatedCount", 0),
+        "preselectionCandidateDataMergedCount": preselection_candidate_data_merge_status.get("mergedCount", 0),
+        "preselectionMarketDataMergedCount": preselection_market_data_merge_status.get("mergedCount", 0),
+        "preselectionLiveStateMergedCount": preselection_live_state_merge_status.get("mergedCount", 0),
         "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
@@ -14675,6 +14687,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "candidateDataRead": candidate_data_merge_status,
         "marketDataRead": market_data_merge_status,
         "stateRead": live_state_status,
+        "preselectionCandidateDataRead": preselection_candidate_data_merge_status,
+        "preselectionMarketDataRead": preselection_market_data_merge_status,
+        "preselectionStateRead": preselection_live_state_merge_status,
         "preselectionStateWrite": preselection_live_state_write_status,
         "preselectionCandidateData": preselection_candidate_data_status,
         "preselectionCandidateMarketDataLatest": preselection_candidate_latest_status,
