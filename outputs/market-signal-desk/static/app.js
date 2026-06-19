@@ -813,8 +813,14 @@ function incomingLivePriceMissing(incoming) {
 }
 
 function currentChangeStillUsable(current) {
-  if (!currentLivePriceStillUsable(current, LIVE_CHANGE_RETAIN_SECONDS)) return false;
-  return Boolean(current?.change && displayChangeText(current.change) !== "-");
+  const display = displayChangeText(current?.change);
+  if (!current?.change || !display || display === "-" || display === "미수신") return false;
+  const livePrice = current?.livePrice ?? {};
+  if (livePrice.source !== "toss") return true;
+  const ageSeconds = livePriceAgeSeconds(livePrice);
+  if (ageSeconds == null) return true;
+  const pollWindow = Number(state.livePrice?.pollSeconds || 10) * 18;
+  return ageSeconds <= Math.max(LIVE_CHANGE_RETAIN_SECONDS, pollWindow);
 }
 
 function incomingChangeMissing(incoming) {
