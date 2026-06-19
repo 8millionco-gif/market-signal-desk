@@ -3717,10 +3717,16 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
     enriched_by_index: dict[int, dict] = {}
     candle_count = 0
     stale_count = 0
+    retained_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index not in fetch_indexes:
-            item["liveCandles"] = {"source": "skipped", "message": "캔들 조회 후보 수 제한으로 샘플 차트를 사용합니다."}
+            retained = retained_depth_payload(item, "liveCandles", "캔들 조회 후보 수 제한으로 직전 Toss 일봉을 유지합니다.")
+            if retained:
+                retained_count += 1
+                item["liveCandles"] = retained
+            else:
+                item["liveCandles"] = {"source": "skipped", "message": "캔들 조회 후보 수 제한으로 샘플 차트를 사용합니다."}
             enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
@@ -3778,9 +3784,21 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
         "message": "토스증권 일봉 캔들을 등락률 미확인 후보 우선으로 반영했습니다.",
         "candleCount": candle_count,
         "staleCount": stale_count,
+        "retainedCount": retained_count,
         "prioritizedCount": len(fetch_indexes),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
+
+
+def retained_depth_payload(candidate: dict, key: str, message: str) -> dict | None:
+    value = candidate.get(key, {}) if isinstance(candidate.get(key), dict) else {}
+    if not candidate_data_source_ok(value):
+        return None
+    retained = dict(value)
+    retained["retained"] = True
+    retained["retainedReason"] = "fetch-limit"
+    retained["message"] = message
+    return retained
 
 
 def candidate_depth_fetch_priority(pair: tuple[int, dict], target_key: str) -> tuple[int, int, int, int, int]:
@@ -3839,11 +3857,17 @@ def enrich_candidates_with_toss_orderbook(candidates: list[dict]) -> tuple[list[
     enriched_by_index: dict[int, dict] = {}
     orderbook_count = 0
     skipped_count = 0
+    retained_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index not in fetch_indexes:
             skipped_count += 1
-            item["liveOrderbook"] = {"source": "skipped", "message": "호가 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
+            retained = retained_depth_payload(item, "liveOrderbook", "호가 조회 후보 수 제한으로 직전 Toss 호가를 유지합니다.")
+            if retained:
+                retained_count += 1
+                item["liveOrderbook"] = retained
+            else:
+                item["liveOrderbook"] = {"source": "skipped", "message": "호가 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
             enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
@@ -3867,6 +3891,7 @@ def enrich_candidates_with_toss_orderbook(candidates: list[dict]) -> tuple[list[
         "message": "토스증권 호가를 미수신/진입 후보 우선으로 반영했습니다.",
         "orderbookCount": orderbook_count,
         "skippedCount": skipped_count,
+        "retainedCount": retained_count,
         "prioritizedCount": len(fetch_indexes),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
@@ -3894,11 +3919,17 @@ def enrich_candidates_with_toss_trades(candidates: list[dict]) -> tuple[list[dic
     enriched_by_index: dict[int, dict] = {}
     trade_count = 0
     skipped_count = 0
+    retained_count = 0
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index not in fetch_indexes:
             skipped_count += 1
-            item["liveTrades"] = {"source": "skipped", "message": "체결 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
+            retained = retained_depth_payload(item, "liveTrades", "체결 조회 후보 수 제한으로 직전 Toss 체결을 유지합니다.")
+            if retained:
+                retained_count += 1
+                item["liveTrades"] = retained
+            else:
+                item["liveTrades"] = {"source": "skipped", "message": "체결 조회 후보 수 제한으로 샘플 지표를 사용합니다."}
             enriched_by_index[index] = item
             continue
         symbol = str(item.get("symbol", ""))
@@ -3922,6 +3953,7 @@ def enrich_candidates_with_toss_trades(candidates: list[dict]) -> tuple[list[dic
         "message": "토스증권 최근 체결을 미수신/진입 후보 우선으로 반영했습니다.",
         "tradeCount": trade_count,
         "skippedCount": skipped_count,
+        "retainedCount": retained_count,
         "prioritizedCount": len(fetch_indexes),
         "requestCount": TOSS_TRADES_COUNT,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
