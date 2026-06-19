@@ -4262,6 +4262,40 @@ def candidate_data_completeness(candidate: dict) -> dict:
     }
 
 
+def candidate_price_readiness(candidate: dict) -> dict:
+    completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else {}
+    missing = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
+    price_ok = bool(completeness.get("priceOk"))
+    change_ok = bool(completeness.get("changeOk"))
+    display_ready = bool(completeness.get("displayReady"))
+    entry_ready = bool(completeness.get("entryReady"))
+    status = str(freshness.get("status", "missing"))
+    if entry_ready:
+        key, label, message = "entry_ready", "진입 데이터 준비", "가격·등락률·거래 반응 데이터가 모두 확인되었습니다."
+    elif display_ready and status == "closed-baseline":
+        key, label, message = "closed_baseline", "마감가 기준", "직전 정규장 가격 기준은 확보됐지만 실시간 진입은 개장 후 확인합니다."
+    elif display_ready:
+        key, label, message = "display_ready", "분석 데이터 준비", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
+    elif price_ok and not change_ok:
+        key, label, message = "change_wait", "등락률 확인 중", "현재가는 있으나 등락률이 없어 가격 반응 판단을 보류합니다."
+    elif not price_ok:
+        key, label, message = "price_wait", "가격 기준 대기", "현재가 또는 마감가 기준이 없어 후보 평가를 보류합니다."
+    else:
+        key, label, message = "collecting", "데이터 수집 중", "가격·뉴스·공시 데이터를 수집한 뒤 판단합니다."
+    return {
+        "key": key,
+        "label": label,
+        "message": message,
+        "priceOk": price_ok,
+        "changeOk": change_ok,
+        "displayReady": display_ready,
+        "entryReady": entry_ready,
+        "freshnessStatus": status,
+        "missing": unique_texts(missing, limit=8),
+    }
+
+
 def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_text: str) -> dict | None:
     symbol = str(candidate.get("symbol", "")).strip().upper()
     if not symbol:
@@ -4283,6 +4317,7 @@ def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_t
         "triggerReadiness": candidate.get("triggerReadiness", 0),
         "preopenPriority": candidate.get("preopenPriority", 0),
         "score": compact_raw_payload(candidate.get("score", {}), list_limit=20),
+        "priceReadiness": compact_raw_payload(candidate_price_readiness(candidate), list_limit=20),
         "livePrice": compact_raw_payload(candidate.get("livePrice", {}), list_limit=20),
         "liveCandles": compact_raw_payload(candidate.get("liveCandles", {}), list_limit=20),
         "liveOrderbook": compact_raw_payload(candidate.get("liveOrderbook", {}), list_limit=20),
@@ -6518,6 +6553,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     live_freshness = live_price.get("freshness") if isinstance(live_price, dict) and isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     has_live_price = candidate_has_fresh_live_price(candidate)
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    price_readiness = candidate_price_readiness(candidate)
+    display_data_ready = bool(completeness.get("displayReady"))
     entry_data_ready = bool(completeness.get("entryReady"))
     missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
     official_signal = candidate.get("officialSignal", {})
@@ -6534,12 +6571,18 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     elif reliability_score < 58 and group_key == "action":
         key, label, priority = "defer", "근거 보강 대기", 3
         reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
+    elif not display_data_ready:
+        key, label, priority = "defer", price_readiness["label"], 3
+        reasons.append(price_readiness["message"])
     elif group_key == "action" and not entry_data_ready:
         key, label, priority = "defer", "데이터 보강 대기", 3
         if missing_data:
             reasons.append(f"진입 필수 데이터 미완성: {', '.join(str(item) for item in missing_data[:4])}")
         else:
             reasons.append("진입 판단 전 가격·등락률·거래 반응 데이터 보강 필요")
+    elif group_key in {"hidden", "momentum"} and not entry_data_ready:
+        key, label, priority = "defer", price_readiness["label"], 3
+        reasons.append(price_readiness["message"])
     elif reaction_gate == "blocked":
         key, label, priority = "exclude", "가격 반응 차단", 4
         reasons.append("재료 이후 가격·거래량 반응이 부정적")
@@ -6718,6 +6761,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     if not isinstance(official_signal, dict) or official_signal.get("count") is None:
         official_signal = official_event_signal(candidate)
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
+    price_readiness = candidate_price_readiness(candidate)
     display_data_ready = bool(completeness.get("displayReady"))
     entry_data_ready = bool(completeness.get("entryReady"))
     missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
@@ -6756,6 +6800,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         action_key, action, tone = "verify", "데이터 보강 대기", "wait"
         missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "필수 데이터"
         summary = f"{missing_text} 확인 전까지 신규 진입 판단을 확정하지 않습니다."
+    elif not entry_data_ready:
+        action_key, action, tone = "verify", price_readiness["label"], "wait"
+        summary = price_readiness["message"]
     elif gate_key == "actionable" and not entry_data_ready:
         action_key, action, tone = "verify", "반응 데이터 대기", "wait"
         missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "가격·거래 반응"
@@ -6976,6 +7023,7 @@ def candidate_compression_score(candidate: dict) -> int:
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
+    price_readiness = candidate_price_readiness(candidate)
 
     action_key = str(final_decision.get("actionKey", "verify"))
     gate_key = str(gate.get("key", "defer"))
@@ -7009,6 +7057,11 @@ def candidate_compression_score(candidate: dict) -> int:
         20,
     )
     pool_bonus = candidate_pool_decision_bonus(candidate)
+    readiness_penalty = 0
+    if not price_readiness["displayReady"]:
+        readiness_penalty = 42
+    elif not price_readiness["entryReady"]:
+        readiness_penalty = 20
     score = (
         base
         + gate_bonus
@@ -7025,6 +7078,7 @@ def candidate_compression_score(candidate: dict) -> int:
         + reaction_gate_penalty
         - (risk * 1.2)
         - (heat * 0.8)
+        - readiness_penalty
     )
     return bounded_int(round(score), 0, 100)
 
@@ -7038,6 +7092,8 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
     gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
     official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    price_readiness = candidate_price_readiness(candidate)
+    evidence_strength = candidate_discovery_evidence_strength(candidate)
 
     evidence_grade = str(evidence.get("grade", discovery.get("evidenceGrade", "weak")))
     evidence_score = bounded_int(evidence.get("score", discovery.get("evidenceScore", 0)), 0, 100)
@@ -7050,12 +7106,25 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     action_key = str(final_decision.get("actionKey", "verify"))
     gate_key = str(gate.get("key", "defer"))
-    has_material_evidence = evidence_grade in {"strong", "qualified"} or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
-    strong_evidence = evidence_grade == "strong" or evidence_score >= SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE
+    material_news = bounded_int(evidence_strength.get("materialNews", 0), 0, 100)
+    official_positive = bounded_int(official.get("positiveCount", 0), 0, 100)
+    if material_news >= 2 or official_positive > 0:
+        evidence_score = max(evidence_score, SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE)
+    if material_news >= 3 or official_positive >= 2:
+        evidence_score = max(evidence_score, SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE)
+    has_material_evidence = evidence_strength["qualified"] or evidence_grade in {"strong", "qualified"} or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
+    strong_evidence = evidence_strength["strong"] or evidence_grade == "strong" or evidence_score >= SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE
     price_confirmed = reaction_key in {"strong", "confirmed"} and reaction_gate == "confirmed" and reaction_score >= 56 and not reaction_entry_block
     price_weak = reaction_key in {"weak", "missing"} or reaction_score < 56 or reaction_gate in {"wait", "blocked"} or reaction_entry_block
     blockers: list[str] = []
     reasons: list[str] = []
+
+    if not price_readiness["displayReady"]:
+        blockers.append(price_readiness["message"])
+        price_confirmed = False
+        price_weak = True
+    elif not price_readiness["entryReady"]:
+        blockers.append(price_readiness["message"])
 
     if has_material_evidence:
         reasons.append(f"발굴 근거 {evidence_score}/100")
@@ -7076,6 +7145,13 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     elif official.get("riskLevel") == "high" or action_key == "stop" or risk >= 24:
         key, label, priority = "blocked", "리스크 차단", 4
         blockers.append("리스크 또는 제외 판단이 우선")
+    elif not price_readiness["displayReady"]:
+        key, label, priority = "insufficient", price_readiness["label"], 3
+    elif not price_readiness["entryReady"] and has_material_evidence:
+        key, label, priority = "evidence_wait", price_readiness["label"], 2
+        blockers.append("실시간 가격·거래량·수급 반응 확인 전")
+    elif not price_readiness["entryReady"]:
+        key, label, priority = "insufficient", price_readiness["label"], 3
     elif strong_evidence and price_confirmed and confidence_score >= 68 and risk < 18 and heat < 10:
         key, label, priority = "confirmed", "근거+가격 확인", 0
         reasons.append("강한 근거와 가격 반응이 동시에 확인")
@@ -7166,6 +7242,7 @@ def candidate_core_eligible(candidate: dict) -> bool:
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else candidate_signal_validation_profile(candidate)
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
     evidence = candidate_discovery_evidence_strength(candidate)
+    price_readiness = candidate_price_readiness(candidate)
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     action_key = str(final_decision.get("actionKey", ""))
@@ -7177,6 +7254,8 @@ def candidate_core_eligible(candidate: dict) -> bool:
     readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     if candidate_is_portfolio_linked(candidate):
+        return False
+    if not price_readiness["entryReady"]:
         return False
     if official.get("riskLevel") in {"medium", "high"}:
         return False
@@ -7225,6 +7304,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         confidence = item.get("dataConfidence", {}) if isinstance(item.get("dataConfidence"), dict) else {}
         score_detail = item.get("score", {}) if isinstance(item.get("score"), dict) else {}
         official = item.get("officialSignal", {}) if isinstance(item.get("officialSignal"), dict) else {}
+        price_readiness = candidate_price_readiness(item)
         action_key = str(final_decision.get("actionKey", "verify"))
         gate_key = str(gate.get("key", "defer"))
         reaction_gate = str(reaction.get("reactionGate", "wait"))
@@ -7243,7 +7323,16 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         )
         soft_exclude = action_key == "exclude" or gate_key == "exclude"
 
-        if id(item) in core_item_ids:
+        if not price_readiness["displayReady"]:
+            tier, label = "wait", "대기"
+            reason = price_readiness["message"]
+        elif not price_readiness["entryReady"] and hard_exclude:
+            tier, label = "exclude", "제외"
+            reason = "가격 반응 데이터가 미완성이고 리스크 기준에 걸려 신규 진입 제외"
+        elif not price_readiness["entryReady"]:
+            tier, label = "review", "검토"
+            reason = price_readiness["message"]
+        elif id(item) in core_item_ids:
             tier, label = "core", "핵심"
             if validation_key == "confirmed":
                 reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
@@ -8241,6 +8330,14 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     reaction_counts = {"strong": 0, "confirmed": 0, "weak": 0, "missing": 0}
     reaction_gate_counts = {"confirmed": 0, "watch": 0, "wait": 0, "blocked": 0}
+    price_readiness_counts = {
+        "entry_ready": 0,
+        "closed_baseline": 0,
+        "display_ready": 0,
+        "change_wait": 0,
+        "price_wait": 0,
+        "collecting": 0,
+    }
     final_decision_counts = {
         "buy": 0,
         "add": 0,
@@ -8318,6 +8415,9 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["triggerReadiness"] = readiness
         item["preopenPriority"] = preopen_priority
         item["dataCompleteness"] = candidate_data_completeness(item)
+        item["priceReadiness"] = candidate_price_readiness(item)
+        readiness_key = str(item["priceReadiness"].get("key", "collecting"))
+        price_readiness_counts[readiness_key] = price_readiness_counts.get(readiness_key, 0) + 1
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
         source_reliability = candidate_source_reliability(item)
@@ -8407,6 +8507,16 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "qualityGateCounts": gate_counts,
         "priceReactionCounts": reaction_counts,
         "priceReactionGateCounts": reaction_gate_counts,
+        "priceReadinessCounts": price_readiness_counts,
+        "entryDataReadyCount": price_readiness_counts.get("entry_ready", 0),
+        "closedBaselineCandidateCount": price_readiness_counts.get("closed_baseline", 0),
+        "displayDataReadyCount": (
+            price_readiness_counts.get("entry_ready", 0)
+            + price_readiness_counts.get("closed_baseline", 0)
+            + price_readiness_counts.get("display_ready", 0)
+        ),
+        "priceBasisWaitCount": price_readiness_counts.get("price_wait", 0),
+        "changeWaitCount": price_readiness_counts.get("change_wait", 0),
         "priceReactionEntryBlockedCount": len([item for item in enriched if item.get("priceReaction", {}).get("entryBlock")]),
         "finalDecisionCounts": final_decision_counts,
         "stableDecisionCount": stable_decision_count,
@@ -11159,6 +11269,12 @@ def build_dashboard_payload(context: dict) -> dict:
             "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
             "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
             "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+            "priceReadinessCounts": selection_status.get("priceReadinessCounts", {}),
+            "entryDataReadyCount": selection_status.get("entryDataReadyCount"),
+            "closedBaselineCandidateCount": selection_status.get("closedBaselineCandidateCount"),
+            "displayDataReadyCount": selection_status.get("displayDataReadyCount"),
+            "priceBasisWaitCount": selection_status.get("priceBasisWaitCount"),
+            "changeWaitCount": selection_status.get("changeWaitCount"),
             "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
             "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
             "candidateCompressionCounts": selection_status.get("candidateCompressionCounts", {}),
@@ -11610,6 +11726,12 @@ def dashboard_summary(payload: dict) -> dict:
         "qualityGateCounts": summary.get("qualityGateCounts", {}),
         "priceReactionCounts": summary.get("priceReactionCounts", {}),
         "priceReactionGateCounts": summary.get("priceReactionGateCounts", {}),
+        "priceReadinessCounts": summary.get("priceReadinessCounts", {}),
+        "entryDataReadyCount": summary.get("entryDataReadyCount"),
+        "closedBaselineCandidateCount": summary.get("closedBaselineCandidateCount"),
+        "displayDataReadyCount": summary.get("displayDataReadyCount"),
+        "priceBasisWaitCount": summary.get("priceBasisWaitCount"),
+        "changeWaitCount": summary.get("changeWaitCount"),
         "priceReactionEntryBlockedCount": summary.get("priceReactionEntryBlockedCount"),
         "finalDecisionCounts": summary.get("finalDecisionCounts", {}),
         "candidateCompressionCounts": summary.get("candidateCompressionCounts", {}),
@@ -12368,6 +12490,12 @@ def live_price_summary_from_selection(candidates: list[dict], selection_status: 
         "qualityGateCounts": selection_status.get("qualityGateCounts", {}),
         "priceReactionCounts": selection_status.get("priceReactionCounts", {}),
         "priceReactionGateCounts": selection_status.get("priceReactionGateCounts", {}),
+        "priceReadinessCounts": selection_status.get("priceReadinessCounts", {}),
+        "entryDataReadyCount": selection_status.get("entryDataReadyCount"),
+        "closedBaselineCandidateCount": selection_status.get("closedBaselineCandidateCount"),
+        "displayDataReadyCount": selection_status.get("displayDataReadyCount"),
+        "priceBasisWaitCount": selection_status.get("priceBasisWaitCount"),
+        "changeWaitCount": selection_status.get("changeWaitCount"),
         "priceReactionEntryBlockedCount": selection_status.get("priceReactionEntryBlockedCount"),
         "finalDecisionCounts": selection_status.get("finalDecisionCounts", {}),
         "candidateCompressionCounts": compression_counts,

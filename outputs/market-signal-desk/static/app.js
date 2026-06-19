@@ -2990,6 +2990,16 @@ function renderMetrics() {
       reactionGates.confirmed || reactionGates.watch || reactionGates.wait || reactionGates.blocked || summary.priceReactionEntryBlockedCount
         ? ` · 반응게이트 확인 ${reactionGates.confirmed ?? 0} · 관찰 ${reactionGates.watch ?? 0} · 대기 ${reactionGates.wait ?? 0} · 차단 ${reactionGates.blocked ?? 0} · 진입차단 ${summary.priceReactionEntryBlockedCount ?? 0}`
         : "";
+    const priceReadiness = summary.priceReadinessCounts ?? {};
+    const entryDataReady = Number(summary.entryDataReadyCount ?? priceReadiness.entry_ready ?? 0);
+    const closedBaselineCount = Number(summary.closedBaselineCandidateCount ?? priceReadiness.closed_baseline ?? 0);
+    const displayDataReady = Number(summary.displayDataReadyCount ?? 0);
+    const priceWaitCount = Number(summary.priceBasisWaitCount ?? priceReadiness.price_wait ?? 0);
+    const changeWaitCount = Number(summary.changeWaitCount ?? priceReadiness.change_wait ?? 0);
+    const priceReadyText =
+      entryDataReady || closedBaselineCount || displayDataReady || priceWaitCount || changeWaitCount
+        ? ` · 가격준비 진입 ${entryDataReady} · 마감가 ${closedBaselineCount} · 표시 ${displayDataReady} · 가격대기 ${priceWaitCount} · 등락대기 ${changeWaitCount}`
+        : "";
     const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
     const portfolioLinked = Number(summary.portfolioLinkedCandidateCount ?? 0);
     const portfolioText = portfolioLinked
@@ -3037,7 +3047,7 @@ function renderMetrics() {
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${sourceReliabilityText}${reactionText}${reactionGateText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${priceReadyText}${confidenceText}${sourceReliabilityText}${reactionText}${reactionGateText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     const cache = state.dashboard?.cache ?? {};
     const cacheText = cache.cached
