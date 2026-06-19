@@ -10175,6 +10175,19 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
         return None
     record = detail.get("record", {}) if isinstance(detail.get("record"), dict) else {}
     payload = copy.deepcopy(dashboard_payload)
+    candidates = payload.get("candidates", [])
+    if isinstance(candidates, list):
+        payload["candidates"] = [
+            annotate_candidate_live_price_freshness(candidate, payload.get("generatedAt", ""))
+            if isinstance(candidate, dict)
+            else candidate
+            for candidate in candidates
+        ]
+        if isinstance(payload.get("selected"), dict):
+            payload["selected"] = annotate_candidate_live_price_freshness(payload["selected"], payload.get("generatedAt", ""))
+        freshness_counts = live_price_freshness_counts([item for item in payload["candidates"] if isinstance(item, dict)])
+    else:
+        freshness_counts = {}
     payload["cache"] = {
         "cached": True,
         "source": detail.get("source", "snapshot"),
@@ -10188,6 +10201,7 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
         payload["summary"]["dashboardCacheSource"] = payload["cache"]["source"]
         payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
+        payload["summary"]["livePriceFreshnessCounts"] = freshness_counts
     return payload
 
 

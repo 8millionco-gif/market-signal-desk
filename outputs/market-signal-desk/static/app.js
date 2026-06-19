@@ -962,23 +962,43 @@ function reactionBadgeText(reaction) {
 function priceFreshnessInfo(item) {
   const livePrice = item?.livePrice ?? {};
   const freshness = livePrice.freshness ?? {};
-  const status = freshness.status || (livePrice.source === "toss" ? "unknown" : "snapshot");
   const timestamp = freshness.timestamp || livePrice.timestamp || livePrice.updatedAt || state.livePrice.updatedAt || "";
-  const ageText = timestamp ? elapsedLabel(timestamp) : "";
   const source = livePrice.source || "";
+  const ageMs = timestamp ? Date.now() - Date.parse(timestamp) : NaN;
+  const ageSeconds = Number.isFinite(ageMs) ? Math.max(0, Math.round(ageMs / 1000)) : Number(freshness.ageSeconds ?? NaN);
+  const freshSeconds = Number(freshness.freshSeconds ?? 30);
+  const delayedSeconds = Number(freshness.delayedSeconds ?? 120);
+  let status = freshness.status || (source === "toss" ? "unknown" : "snapshot");
+  if (source === "toss") {
+    if (!Number.isFinite(ageSeconds)) status = "unknown";
+    else if (ageSeconds <= freshSeconds) status = "live";
+    else if (ageSeconds <= delayedSeconds) status = "delayed";
+    else status = "stale";
+  }
+  const ageText = timestamp ? elapsedLabel(timestamp) : "";
   const isFresh = status === "live" && source === "toss";
   const isDelayed = ["delayed", "stale", "unknown"].includes(status) && source === "toss";
   const isSnapshot = status === "snapshot" || source !== "toss";
+  const fallbackLabel =
+    isFresh ? "실시간" :
+    status === "delayed" ? "지연" :
+    status === "stale" ? "오래됨" :
+    isSnapshot ? "저장값" : "미확인";
+  const fallbackMessage =
+    isFresh ? "토스 현재가를 실시간 판단에 사용합니다." :
+    status === "delayed" ? "토스 현재가가 지연되어 신규 진입 판단을 보류합니다." :
+    status === "stale" ? "토스 현재가가 오래되어 저장 가격처럼만 참고합니다." :
+    freshness.message || livePrice.message || "";
   return {
     status,
-    label: freshness.label || (isFresh ? "실시간" : isDelayed ? "지연" : isSnapshot ? "저장값" : "미확인"),
+    label: fallbackLabel,
     source,
     timestamp,
     ageText,
     isFresh,
     isDelayed,
     isSnapshot,
-    message: freshness.message || livePrice.message || ""
+    message: fallbackMessage
   };
 }
 
@@ -1065,6 +1085,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   const decision = item?.finalDecision ?? {};
   const gate = item?.qualityGate ?? {};
   const reaction = item?.priceReaction ?? {};
+  const freshness = priceFreshnessInfo(item);
   if (plan.tone === "sell") {
     return { key: "sell", label: "분할매도 점검", detail: plan.summary || "보유 수익을 점검합니다." };
   }
@@ -1072,6 +1093,9 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "avoid", label: "오늘 제외", detail: plan.summary || "신규 진입하지 않습니다." };
   }
   if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
+    if (!freshness.isFresh) {
+      return { key: "wait", label: "가격 확인 필요", detail: freshness.message || "토스 현재가를 다시 확인한 뒤 진입 여부를 판단합니다." };
+    }
     return { key: "buy", label: "매수 가능", detail: plan.summary || "조건 충족 시 관찰 매수 후보입니다." };
   }
   if (decision.actionKey === "hold" || decision.portfolioAware || selectedHoldingFor(item)) {
@@ -4383,8 +4407,18 @@ function tradeNowGuide(item, plan) {
   const rebound = rowValue(plan, "반등 확인");
   const stop = rowValue(plan, "손절 점검");
   const trim = rowValue(plan, "분할매도");
+  const freshness = priceFreshnessInfo(item);
 
   if (plan.tone === "buy") {
+    if (!freshness.isFresh) {
+      return {
+        tone: "wait",
+        title: "가격 확인 필요",
+        summary: freshness.message || "토스 현재가를 다시 확인한 뒤 매수 가능 여부를 판단합니다.",
+        current,
+        focus: entry
+      };
+    }
     return {
       tone: "buy",
       title: "매수 관찰",
