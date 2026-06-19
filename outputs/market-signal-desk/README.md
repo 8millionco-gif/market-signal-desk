@@ -383,6 +383,8 @@ DB 연결 후 설정 화면의 `스냅샷 저장소` 카드에서 `DB 이관 실
 
 후보 풀은 단순 저장 기록이 아니라 상시 감시 대상입니다. 봇이 발견한 종목은 풀에 누적되고, 상태가 `진입 후보`, `검증중`, `눌림 대기`, `관찰중`으로 관리됩니다. 저장 가능한 풀 크기는 `SIGNAL_CANDIDATE_POOL_MAX_ITEMS`, 다음 스캔에 다시 올릴 재점검 폭은 `SIGNAL_CANDIDATE_POOL_SCAN_LIMIT`, 봇이 한 번에 선별해 저장·재평가하는 폭은 `SIGNAL_DISCOVERY_SELECTION_LIMIT`, 메인 화면의 기본 목표는 `SIGNAL_AUTO_CANDIDATE_LIMIT`으로 분리됩니다. 각 종목에는 근거 점수, 가격 반응, 신뢰도, 후보 풀 성과를 묶은 `재검토 우선도`가 붙고, 이 점수가 높은 종목은 다음 스캔 때 다시 분석됩니다. 최종 후보 압축과 정렬에는 후보 풀 누적 점수, 관측 횟수, 최근 개선/약화 흐름, 사후 성과가 제한 가중치로 반영됩니다. 리스크, 데이터 신뢰도, 가격 반응 기준은 후보 풀 가중치보다 우선합니다.
 
+Toss에서 수신한 최종 가격·등락률·차트·호가·체결 데이터는 후보 데이터 저장소와 원천 최신값 저장소에 누적됩니다. 다음 10초 갱신에서 특정 종목이 응답에서 빠지더라도 서버는 저장된 최신 Toss 원천 가격을 먼저 복구하고, 그 다음 후보 데이터 스냅샷을 사용합니다. 둘 다 없을 때만 `미수신`으로 내려가므로, 후보 리스트가 일시적인 API 누락 때문에 바로 사라지는 현상을 줄입니다.
+
 성과 검증이 실행되면 저장된 스냅샷 후보의 기준가와 현재가를 비교하고, 연결된 후보 풀 종목에는 관측 횟수, 승률, 평균 변화율, 최근 성과가 누적됩니다. 이 값은 같은 종목을 다시 볼지, 더 낮출지 판단하는 보조 신호이며 단독 매수 신호로 쓰지 않습니다.
 
 웹 화면의 기본 `/api/dashboard` 조회와 상단 새로고침 버튼은 DB의 최신 발굴 결과 또는 스냅샷을 먼저 사용하는 읽기 전용 경로입니다. 외부 API 지연으로 화면이 비는 것을 줄이기 위한 동작이며, 새 후보 분석을 강제로 실행하려면 `/api/dashboard?mode=close&refresh=1`, `POST /api/discovery/run`, 또는 화면의 스케줄러/자동 실행 카드에서 수동 실행 버튼을 사용합니다.
@@ -395,6 +397,13 @@ $env:SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT="40"
 $env:SIGNAL_CANDIDATE_POOL_SCAN_LIMIT="200"
 $env:SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE="58"
 $env:SIGNAL_CANDIDATE_POOL_TOP_LIMIT="5"
+$env:SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED="1"
+$env:SIGNAL_CANDIDATE_DATA_MAX_ITEMS="1000"
+$env:SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT="30"
+$env:SIGNAL_MARKET_DATA_LATEST_ENABLED="1"
+$env:SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS="2000"
+$env:SIGNAL_LIVE_STATE_STORAGE_ENABLED="1"
+$env:SIGNAL_LIVE_STATE_RETAIN_SECONDS="900"
 ```
 
 ## 상시 발굴 봇 설정

@@ -938,7 +938,10 @@ function livePriceSummaryPatch(summary) {
     "livePricePollSeconds",
     "livePriceFreshnessCounts",
     "livePriceRequestedCount",
-    "livePriceRefreshedCount"
+    "livePriceRefreshedCount",
+    "livePriceStoredFallbackCount",
+    "livePriceRetainedCount",
+    "livePriceMissingCount"
   ];
   return allowedKeys.reduce((patch, key) => {
     if (source[key] !== undefined) patch[key] = source[key];
@@ -1235,7 +1238,10 @@ async function refreshLivePrices() {
     refreshCount: Number(state.livePrice.refreshCount || 0) + 1,
     lastDepthAt: payload.detail === "full" ? (payload.updatedAt || state.livePrice.lastDepthAt) : state.livePrice.lastDepthAt,
     symbols: Array.isArray(payload.symbols) && payload.symbols.length ? payload.symbols : symbols,
-    symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length)
+    symbolCount: Number(payload.requestedCount || payload.refreshedCount || symbols.length),
+    storedFallbackCount: Number(payload.summary?.livePriceStoredFallbackCount ?? 0),
+    retainedCount: Number(payload.summary?.livePriceRetainedCount ?? 0),
+    missingCount: Number(payload.summary?.livePriceMissingCount ?? 0)
   };
   if (merged) {
     renderLivePriceUpdate(payload);
@@ -2157,6 +2163,8 @@ function livePriceDiagnostics() {
   const snapshotCount = freshnessList.filter((item) => item.isSnapshot).length;
   const tossCount = freshnessList.filter((item) => item.source === "toss").length;
   const retainedCount = candidates.filter((item) => item?.livePrice?.retained).length;
+  const storedFallbackCount = Number(live.storedFallbackCount || state.dashboard?.summary?.livePriceStoredFallbackCount || 0);
+  const missingCount = Number(live.missingCount || state.dashboard?.summary?.livePriceMissingCount || 0);
   const total = candidates.length;
   const priorityCount = priorityLiveSymbols().length;
   const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
@@ -2194,6 +2202,8 @@ function livePriceDiagnostics() {
     snapshotCount,
     tossCount,
     retainedCount,
+    storedFallbackCount,
+    missingCount,
     total,
     priorityCount,
     notFreshCount,
@@ -2215,6 +2225,8 @@ function renderLivePriceStatus() {
     ["요청 대상", diag.symbolCount >= diag.total && diag.total > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
+    ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
+    ["최종 미수신", diag.missingCount === 0, diag.missingCount ? `${diag.missingCount}개` : "없음"],
     ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
     ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
