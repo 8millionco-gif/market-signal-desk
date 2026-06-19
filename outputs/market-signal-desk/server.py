@@ -8960,6 +8960,229 @@ def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
     return records[: max(0, selected_limit)]
 
 
+def market_data_record_has_price(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    row = market_data_record_payload_row(record)
+    return bool(row.get("lastPrice") or row.get("price") or row.get("close"))
+
+
+def market_data_record_has_change(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    row = market_data_record_payload_row(record)
+    for key in ("changeRate", "change", "changeDisplay", "fluctuationRatio", "regularMarketChangePercent"):
+        if row.get(key) not in {None, "", "-"}:
+            return True
+    return False
+
+
+def market_data_record_age_seconds(record: dict | None) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    parsed = parse_iso_datetime(market_data_record_timestamp(record))
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def candidate_prefetch_rotation_bucket(symbol: str, now: datetime | None = None) -> int:
+    interval = max(30, SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS)
+    current = now or datetime.now(KST)
+    window = int(current.timestamp() // interval)
+    digest = hashlib.sha1(f"{str(symbol).strip().upper()}:{window}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def candidate_prefetch_gap_profile(
+    record: dict,
+    candidate_records: dict[str, dict],
+    market_records: dict[str, dict],
+    candle_records: dict[str, dict],
+    orderbook_records: dict[str, dict],
+    trade_records: dict[str, dict],
+) -> dict:
+    symbol = str(record.get("symbol", "")).strip().upper()
+    latest = candidate_records.get(symbol, {}) if symbol else {}
+    price_record = market_records.get(symbol, {}) if symbol else {}
+    candle_record = candle_records.get(symbol, {}) if symbol else {}
+    orderbook_record = orderbook_records.get(symbol, {}) if symbol else {}
+    trade_record = trade_records.get(symbol, {}) if symbol else {}
+
+    latest_completeness = {}
+    if isinstance(latest, dict) and latest:
+        latest_completeness = latest.get("dataCompleteness", {}) if isinstance(latest.get("dataCompleteness"), dict) else candidate_data_completeness(latest)
+
+    has_candidate_price = candidate_has_toss_last_price(latest) if isinstance(latest, dict) else False
+    has_market_price = market_data_record_has_price(price_record)
+    has_price = has_candidate_price or has_market_price
+    has_change = (candidate_data_has_change(latest) if isinstance(latest, dict) else False) or market_data_record_has_change(price_record)
+    has_candles = (
+        candidate_data_source_ok(latest.get("liveCandles", {}) if isinstance(latest, dict) else {})
+        or bool(candle_record)
+    )
+    has_orderbook = (
+        candidate_data_source_ok(latest.get("liveOrderbook", {}) if isinstance(latest, dict) else {})
+        or bool(orderbook_record)
+    )
+    has_trades = (
+        candidate_data_source_ok(latest.get("liveTrades", {}) if isinstance(latest, dict) else {})
+        or bool(trade_record)
+    )
+    has_depth = has_candles or has_orderbook or has_trades
+
+    reasons: list[str] = []
+    gap_score = 0
+    if not latest:
+        reasons.append("후보 저장값 없음")
+        gap_score += 34
+    if not has_price:
+        reasons.append("가격 미수신")
+        gap_score += 42
+    if not has_change:
+        reasons.append("등락률 미수신")
+        gap_score += 30
+    if not has_candles:
+        reasons.append("차트 미수신")
+        gap_score += 14
+    if not has_orderbook:
+        reasons.append("호가 미수신")
+        gap_score += 12
+    if not has_trades:
+        reasons.append("체결 미수신")
+        gap_score += 12
+    if not has_depth:
+        reasons.append("가격 반응 미확인")
+        gap_score += 12
+
+    display_ready = bool(latest_completeness.get("displayReady"))
+    entry_ready = bool(latest_completeness.get("entryReady"))
+    if latest and not display_ready:
+        reasons.append("후보 분석 미완성")
+        gap_score += 12
+    if latest and not entry_ready:
+        reasons.append("진입 검증 미완성")
+        gap_score += 8
+
+    age_values = [
+        value for value in (
+            candidate_data_record_age_seconds(latest) if isinstance(latest, dict) and latest else None,
+            market_data_record_age_seconds(price_record),
+            market_data_record_age_seconds(candle_record),
+            market_data_record_age_seconds(orderbook_record),
+            market_data_record_age_seconds(trade_record),
+        )
+        if value is not None
+    ]
+    freshest_age = min(age_values) if age_values else None
+    stale_after = max(90, SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS * 5)
+    if freshest_age is None:
+        reasons.append("최신 수집 없음")
+        gap_score += 10
+    elif freshest_age > stale_after:
+        reasons.append("저장값 오래됨")
+        gap_score += 8
+
+    state_key = str(record.get("stateKey", ""))
+    if state_key in {"entry_candidate", "pullback_wait", "validating", "watching"} and gap_score > 0:
+        gap_score += 8
+
+    return {
+        "score": bounded_int(gap_score, 0, 160),
+        "reasons": unique_texts(reasons, limit=8),
+        "priceReady": has_price,
+        "changeReady": has_change,
+        "depthReady": has_depth,
+        "freshestAgeSeconds": freshest_age,
+        "displayReady": display_ready,
+        "entryReady": entry_ready,
+    }
+
+
+def candidate_prefetch_queue_records(limit: int) -> tuple[list[dict], dict]:
+    selected_limit = max(0, limit)
+    if selected_limit <= 0:
+        return [], {"enabled": True, "limit": selected_limit, "scanCount": 0, "selectedCount": 0}
+
+    scan_limit = max(selected_limit, min(SIGNAL_CANDIDATE_POOL_SCAN_LIMIT, max(selected_limit * 4, selected_limit)))
+    records = candidate_pool_retainable_records(limit=scan_limit)
+    if not records:
+        return [], {
+            "enabled": True,
+            "limit": selected_limit,
+            "scanLimit": scan_limit,
+            "scanCount": 0,
+            "selectedCount": 0,
+            "message": "보강할 후보 풀 종목이 아직 없습니다.",
+        }
+
+    candidate_records = stored_candidate_data_latest_records()
+    market_records = stored_market_data_latest_records("toss", "prices")
+    candle_records = stored_market_data_latest_records("toss", "candles")
+    orderbook_records = stored_market_data_latest_records("toss", "orderbook")
+    trade_records = stored_market_data_latest_records("toss", "trades")
+    now = datetime.now(KST)
+    ranked: list[dict] = []
+    reason_counts: dict[str, int] = {}
+    missing_priority_count = 0
+
+    for record in records:
+        item = dict(record)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        profile = candidate_prefetch_gap_profile(
+            item,
+            candidate_records,
+            market_records,
+            candle_records,
+            orderbook_records,
+            trade_records,
+        )
+        gap_score = bounded_int(profile.get("score", 0), 0, 160)
+        if gap_score > 0:
+            missing_priority_count += 1
+        for reason in profile.get("reasons", []) if isinstance(profile.get("reasons"), list) else []:
+            text = str(reason)
+            reason_counts[text] = reason_counts.get(text, 0) + 1
+        item["prefetchGapScore"] = gap_score
+        item["prefetchGapReasons"] = profile.get("reasons", [])
+        item["prefetchGapProfile"] = profile
+        item["prefetchRotation"] = candidate_prefetch_rotation_bucket(symbol, now=now)
+        ranked.append(item)
+
+    ranked.sort(
+        key=lambda item: (
+            bounded_int(item.get("prefetchGapScore", 0), 0, 160),
+            bounded_int(item.get("monitorScore", 0), 0, 100),
+            bounded_int(item.get("retainScore", 0), 0, 100),
+            candidate_pool_rank(str(item.get("stateKey", ""))),
+            bounded_int(item.get("peakScore", item.get("totalScore", 0)), 0, 100),
+            bounded_int(item.get("prefetchRotation", 0), 0, 999999999),
+        ),
+        reverse=True,
+    )
+    selected = ranked[:selected_limit]
+    for index, item in enumerate(selected, start=1):
+        item["prefetchQueueRank"] = index
+
+    top_symbols = [
+        str(item.get("symbol", ""))
+        for item in selected[: min(8, len(selected))]
+        if str(item.get("symbol", "")).strip()
+    ]
+    return selected, {
+        "enabled": True,
+        "limit": selected_limit,
+        "scanLimit": scan_limit,
+        "scanCount": len(records),
+        "selectedCount": len(selected),
+        "missingPriorityCount": missing_priority_count,
+        "selectedMissingPriorityCount": len([item for item in selected if bounded_int(item.get("prefetchGapScore", 0), 0, 160) > 0]),
+        "gapReasonCounts": dict(sorted(reason_counts.items(), key=lambda pair: pair[1], reverse=True)[:12]),
+        "topSymbols": top_symbols,
+        "message": "미수신·제한·오래된 후보를 우선 보강하도록 큐를 정렬했습니다.",
+    }
+
+
 def candidate_pool_entry_from_record(record: dict) -> dict:
     symbol = str(record.get("symbol", "")).strip().upper()
     name = str(record.get("name") or symbol)
@@ -12427,6 +12650,13 @@ def candidate_from_pool_record_for_prefetch(record: dict, seed_lookup: dict[str,
     candidate["candidateSource"] = "candidate-pool-prefetch"
     candidate["discoveryTier"] = entry.get("discoveryTier", candidate.get("discoveryTier", "pool"))
     candidate["opportunityType"] = entry.get("opportunityType", candidate.get("opportunityType", "pool-retain"))
+    if record.get("prefetchGapScore") is not None:
+        candidate["prefetchQueue"] = {
+            "rank": bounded_int(record.get("prefetchQueueRank", 0), 0, 100000),
+            "gapScore": bounded_int(record.get("prefetchGapScore", 0), 0, 160),
+            "reasons": unique_texts(record.get("prefetchGapReasons", []), limit=8),
+            "profile": live_state_json_safe(record.get("prefetchGapProfile", {})),
+        }
 
     for key in ("price", "change"):
         value = record.get(key)
@@ -12478,7 +12708,7 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
             "message": "후보 풀 사전 보강이 꺼져 있습니다.",
         }
 
-    records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_PREFETCH_LIMIT)
+    records, queue_status = candidate_prefetch_queue_records(SIGNAL_CANDIDATE_PREFETCH_LIMIT)
     if not records:
         return {
             "enabled": True,
@@ -12486,6 +12716,7 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
             "trigger": trigger,
             "inputCount": 0,
             "prefetchedCount": 0,
+            "queue": queue_status,
             "message": "보강할 후보 풀 종목이 아직 없습니다.",
         }
 
@@ -12558,6 +12789,9 @@ def prefetch_candidate_pool_market_data(mode: str, trigger: str = "bot", market:
         "inputCount": len(records),
         "prefetchedCount": len(candidates),
         "limit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
+        "queue": queue_status,
+        "queueMissingPriorityCount": queue_status.get("selectedMissingPriorityCount", 0),
+        "queueGapReasonCounts": queue_status.get("gapReasonCounts", {}),
         "priceCount": price_status.get("priceCount", 0),
         "requestedPriceCount": price_status.get("requestedCount", len(candidates)),
         "receivedPriceCount": price_status.get("receivedCount", price_status.get("priceCount", 0)),
