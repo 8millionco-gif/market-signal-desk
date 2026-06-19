@@ -12847,6 +12847,91 @@ def dashboard(mode: str, force_discovery: bool = False) -> dict:
     return build_dashboard_payload(context)
 
 
+def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: str) -> tuple[dict, dict]:
+    if not isinstance(payload, dict):
+        return payload, {"enabled": False, "message": "대시보드 payload가 없어 재병합을 생략했습니다."}
+    raw_candidates = payload.get("candidates", [])
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        return payload, {"enabled": True, "candidateCount": 0, "message": "재병합할 후보가 없습니다."}
+
+    watched = set(watchlist())
+    market = payload.get("market", seed_data().get("market", {}))
+    if not isinstance(market, dict):
+        market = seed_data().get("market", {})
+
+    candidates = [copy.deepcopy(item) for item in raw_candidates if isinstance(item, dict)]
+    candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
+    candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
+    candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
+    candidates, selection_status = apply_candidate_selection(candidates, market, watched, stabilize_decisions=True)
+    candidates = [apply_analysis_to_candidate(candidate, local_candidate_analysis(candidate)) for candidate in candidates]
+    candidates = sort_candidates_for_mode(candidates, mode)
+
+    refreshed = copy.deepcopy(payload)
+    refreshed["candidates"] = candidates
+    refreshed["selected"] = candidates[0] if candidates else None
+    refreshed["generatedAt"] = payload.get("generatedAt") or datetime.now(KST).isoformat(timespec="seconds")
+
+    freshness_counts = live_price_freshness_counts(candidates)
+    summary = refreshed.get("summary", {}) if isinstance(refreshed.get("summary"), dict) else {}
+    summary.update({
+        "candidateCount": len(candidates),
+        "livePriceFreshnessCounts": freshness_counts,
+        "candidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
+        "liveStateMergedCount": live_state_merge.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge.get("mergedCount", 0),
+        "marketDataPriceMergedCount": market_data_merge.get("priceMergedCount", 0),
+        "marketDataChangeMergedCount": market_data_merge.get("changeMergedCount", 0),
+        "postPrefetchCandidateRefresh": True,
+        "postPrefetchCandidateRefreshAt": datetime.now(KST).isoformat(timespec="seconds"),
+    })
+    for key in (
+        "priceReadinessCounts",
+        "evaluationModeCounts",
+        "tradeEvaluationReadyCount",
+        "baselineEvaluationCount",
+        "serverCollectingCount",
+        "unavailableEvaluationCount",
+        "entryDataReadyCount",
+        "closedBaselineCandidateCount",
+        "displayDataReadyCount",
+        "priceBasisWaitCount",
+        "changeWaitCount",
+        "finalDecisionCounts",
+        "candidateCompressionCounts",
+        "signalValidationCounts",
+        "decisionGroups",
+        "investableCandidateCount",
+        "watchCandidateCount",
+        "deferCandidateCount",
+        "actionCandidateCount",
+        "waitCandidateCount",
+        "excludeCandidateCount",
+    ):
+        if key in selection_status:
+            summary[key] = selection_status.get(key)
+    refreshed["summary"] = summary
+
+    integrations = refreshed.get("integrations", {}) if isinstance(refreshed.get("integrations"), dict) else {}
+    integrations["selection"] = selection_status
+    integrations["candidateDataMerge"] = candidate_data_merge
+    integrations["liveStateMerge"] = live_state_merge
+    integrations["marketDataMerge"] = market_data_merge
+    integrations["marketDataLatest"] = market_data_latest_status()
+    integrations["postPrefetchCandidateRefresh"] = {
+        "enabled": True,
+        "candidateCount": len(candidates),
+        "candidateDataMergedCount": candidate_data_merge.get("mergedCount", 0),
+        "liveStateMergedCount": live_state_merge.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge.get("mergedCount", 0),
+        "updatedAt": summary["postPrefetchCandidateRefreshAt"],
+        "message": "프리패치로 저장한 후보별 최신 수집값을 스냅샷 저장 전에 다시 반영했습니다.",
+    }
+    refreshed["integrations"] = integrations
+
+    return refreshed, integrations["postPrefetchCandidateRefresh"]
+
+
 def candidate_from_pool_record_for_prefetch(record: dict, seed_lookup: dict[str, dict], watched: set[str]) -> dict:
     entry = candidate_pool_entry_from_record(record)
     symbol = str(entry.get("symbol", "")).strip().upper()
@@ -15175,9 +15260,12 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
         trigger=trigger,
         market=payload.get("market", {}),
     )
+    payload, post_prefetch_refresh = refresh_dashboard_payload_with_latest_candidate_data(payload, mode)
     payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
+    payload.setdefault("integrations", {})["postPrefetchCandidateRefresh"] = post_prefetch_refresh
     summary = dashboard_summary(payload)
     summary["candidatePrefetch"] = prefetch_status
+    summary["postPrefetchCandidateRefresh"] = post_prefetch_refresh
     run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{mode}-{trigger}"
     file_name = f"{now.date().isoformat()}_{mode}_{trigger}_{now.strftime('%H%M%S')}.json"
     path = RUNS_DIR / file_name
@@ -15188,6 +15276,7 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
         "createdAt": now.isoformat(timespec="seconds"),
         "summary": summary,
         "prefetch": prefetch_status,
+        "postPrefetchCandidateRefresh": post_prefetch_refresh,
         "dashboard": payload,
     }
     if db_write_snapshot(snapshot, file_name=file_name):
