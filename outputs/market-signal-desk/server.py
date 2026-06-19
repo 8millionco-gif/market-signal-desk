@@ -10581,7 +10581,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "integrations": integrations,
         "candidates": candidates,
         "selected": candidates[0] if candidates else None,
-        "message": "선택 종목과 상위 후보의 토스 라이브 가격을 갱신했습니다.",
+        "message": "현재 후보 전체의 토스 라이브 가격을 갱신했습니다.",
     }
 
 

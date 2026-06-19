@@ -173,8 +173,7 @@ const QUICK_SEARCH_PRESETS = [
 const DASHBOARD_BROWSER_CACHE_PREFIX = "marketSignalDashboardCache:";
 const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
 const LIVE_PRICE_MIN_POLL_MS = 5000;
-const LIVE_PRICE_FOCUS_LIMIT = 8;
-const LIVE_PRICE_VISIBLE_LIMIT = 4;
+const LIVE_PRICE_SYMBOL_LIMIT = 24;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
 
 function scoreClass(score) {
@@ -615,17 +614,16 @@ function restoreDashboardFromBrowserCache(error) {
 
 function livePriceSymbols() {
   const candidates = state.dashboard?.candidates ?? [];
-  const selected = state.selectedSymbol ? [state.selectedSymbol] : [];
-  const visible = filteredCandidates()
-    .slice(0, LIVE_PRICE_VISIBLE_LIMIT)
-    .map((item) => item?.symbol);
-  const ranked = [...candidates]
+  const selected = selectedCandidate()?.symbol || state.selectedSymbol || "";
+  const candidateSymbols = candidates
+    .filter((item) => item?.symbol)
+    .map((item) => item.symbol);
+  const rankedOverflow = [...candidates]
     .filter((item) => item?.symbol)
     .sort((a, b) => livePricePriority(a) - livePricePriority(b))
-    .slice(0, LIVE_PRICE_FOCUS_LIMIT)
     .map((item) => item.symbol);
-  return [...new Set([...selected, ...visible, ...ranked].filter(Boolean))]
-    .slice(0, LIVE_PRICE_FOCUS_LIMIT + 1);
+  return [...new Set([selected, ...candidateSymbols, ...rankedOverflow].filter(Boolean))]
+    .slice(0, LIVE_PRICE_SYMBOL_LIMIT);
 }
 
 function candidateNeedsMarketDepth(item) {
@@ -1842,6 +1840,8 @@ function livePriceDiagnostics() {
   const snapshotCount = freshnessList.filter((item) => item.isSnapshot).length;
   const tossCount = freshnessList.filter((item) => item.source === "toss").length;
   const total = candidates.length;
+  const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
+  const notFreshCount = Math.max(0, total - freshCount);
   const updatedMs = parseTimeMs(live.updatedAt);
   const ageSeconds = updatedMs ? Math.max(0, Math.round((Date.now() - updatedMs) / 1000)) : null;
   const pollSeconds = Number(live.pollSeconds || 10);
@@ -1875,8 +1875,9 @@ function livePriceDiagnostics() {
     snapshotCount,
     tossCount,
     total,
+    notFreshCount,
     pollSeconds,
-    symbolCount: Number(live.symbolCount || live.symbols?.length || 0),
+    symbolCount,
     updatedAt: live.updatedAt,
     attemptAt: live.attemptAt,
     message: live.error ? live.message || live.error : live.message || "",
@@ -1889,9 +1890,9 @@ function renderLivePriceStatus() {
   const diag = livePriceDiagnostics();
   const rows = [
     ["상태", diag.ok, diag.label],
-    ["폴링 대상", diag.symbolCount > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
-    ["실시간 종목", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
-    ["지연/저장", diag.delayedCount + diag.snapshotCount === 0, `${diag.delayedCount + diag.snapshotCount}/${diag.total || 0}`],
+    ["요청 대상", diag.symbolCount >= diag.total && diag.total > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
+    ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
+    ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
     ["최근 갱신", Boolean(diag.updatedAt && !diag.stale), diag.updatedAt ? elapsedLabel(diag.updatedAt) : "대기"],
     ["갱신 간격", diag.pollSeconds > 0, `${diag.pollSeconds}초`],
     ["최근 시도", Boolean(diag.attemptAt), diag.attemptAt ? elapsedLabel(diag.attemptAt) : "-"],
