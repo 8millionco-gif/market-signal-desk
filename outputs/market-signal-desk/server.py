@@ -52,14 +52,14 @@ SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().low
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "500"))
+SIGNAL_RAW_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_FILE_LIMIT", "300"))
 SIGNAL_RAW_EVENT_PAYLOAD_LIMIT = int(os.getenv("SIGNAL_RAW_EVENT_PAYLOAD_LIMIT", "40"))
 SIGNAL_NEWS_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_NEWS_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_NEWS_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_NEWS_EVENT_FILE_LIMIT", "800"))
-SIGNAL_NEWS_EVENT_MAX_ITEMS = int(os.getenv("SIGNAL_NEWS_EVENT_MAX_ITEMS", "3000"))
+SIGNAL_NEWS_EVENT_FILE_LIMIT = int(os.getenv("SIGNAL_NEWS_EVENT_FILE_LIMIT", "400"))
+SIGNAL_NEWS_EVENT_MAX_ITEMS = int(os.getenv("SIGNAL_NEWS_EVENT_MAX_ITEMS", "1200"))
 NEWS_EVENTS_KV_KEY = "news_events_latest"
 SIGNAL_MARKET_DATA_LATEST_ENABLED = os.getenv("SIGNAL_MARKET_DATA_LATEST_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = int(os.getenv("SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS", "2000"))
+SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = int(os.getenv("SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS", "1000"))
 MARKET_DATA_LATEST_KV_KEY = "market_data_latest"
 SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH = os.getenv("SIGNAL_STOCK_SEARCH_MASTER_AUTO_REFRESH", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS = int(os.getenv("SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS", "86400"))
@@ -85,15 +85,15 @@ TOSS_STOCK_CACHE_SECONDS = int(os.getenv("TOSS_STOCK_CACHE_SECONDS", "86400"))
 TOSS_REQUEST_TIMEOUT_SECONDS = int(os.getenv("TOSS_REQUEST_TIMEOUT_SECONDS", "5"))
 TOSS_PRICE_BATCH_SIZE = max(1, int(os.getenv("TOSS_PRICE_BATCH_SIZE", "20")))
 TOSS_CANDLE_MAX_CANDIDATES = int(os.getenv("TOSS_CANDLE_MAX_CANDIDATES", "20"))
-TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "20"))
-TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "20"))
+TOSS_ORDERBOOK_MAX_CANDIDATES = int(os.getenv("TOSS_ORDERBOOK_MAX_CANDIDATES", "10"))
+TOSS_TRADES_MAX_CANDIDATES = int(os.getenv("TOSS_TRADES_MAX_CANDIDATES", "10"))
 TOSS_TRADES_COUNT = int(os.getenv("TOSS_TRADES_COUNT", "30"))
 TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS", "7"))
 SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "10"))
 SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
 SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS = int(os.getenv("SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 7)))
-SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "80"))
+SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_LIMIT", "30"))
 SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
 SIGNAL_LIVE_STATE_MAX_ITEMS = int(os.getenv("SIGNAL_LIVE_STATE_MAX_ITEMS", "240"))
@@ -153,7 +153,7 @@ NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
 NAVER_LIVE_NEWS = os.getenv("NAVER_LIVE_NEWS", "1").lower() not in {"0", "false", "no", "off"}
 NAVER_NEWS_DISPLAY = int(os.getenv("NAVER_NEWS_DISPLAY", "5"))
 NAVER_NEWS_CACHE_SECONDS = int(os.getenv("NAVER_NEWS_CACHE_SECONDS", "300"))
-NAVER_NEWS_MAX_CANDIDATES = int(os.getenv("NAVER_NEWS_MAX_CANDIDATES", "3"))
+NAVER_NEWS_MAX_CANDIDATES = int(os.getenv("NAVER_NEWS_MAX_CANDIDATES", "2"))
 NAVER_REQUEST_TIMEOUT_SECONDS = int(os.getenv("NAVER_REQUEST_TIMEOUT_SECONDS", "5"))
 GDELT_DOC_BASE_URL = os.getenv("GDELT_DOC_BASE_URL", "https://api.gdeltproject.org/api/v2/doc/doc").rstrip("/")
 GDELT_LIVE_NEWS = os.getenv("GDELT_LIVE_NEWS", "0").lower() not in {"0", "false", "no", "off"}
@@ -163,6 +163,7 @@ GDELT_NEWS_CACHE_SECONDS = int(os.getenv("GDELT_NEWS_CACHE_SECONDS", "300"))
 GDELT_NEWS_MAX_CANDIDATES = int(os.getenv("GDELT_NEWS_MAX_CANDIDATES", "1"))
 GDELT_REQUEST_TIMEOUT_SECONDS = int(os.getenv("GDELT_REQUEST_TIMEOUT_SECONDS", "20"))
 GDELT_REQUEST_SPACING_SECONDS = float(os.getenv("GDELT_REQUEST_SPACING_SECONDS", "5.2"))
+GDELT_BACKOFF_SECONDS = int(os.getenv("GDELT_BACKOFF_SECONDS", "900"))
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -174,7 +175,7 @@ OUTBOUND_IP_CHECK_URL = os.getenv("OUTBOUND_IP_CHECK_URL", "https://api.ipify.or
 OUTBOUND_IP_CACHE_SECONDS = int(os.getenv("OUTBOUND_IP_CACHE_SECONDS", "300"))
 OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("OUTBOUND_IP_REQUEST_TIMEOUT_SECONDS", "5"))
 SIGNAL_SCHEDULER_ENABLED = os.getenv("SIGNAL_SCHEDULER_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SECONDS", "30"))
+SIGNAL_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SIGNAL_SCHEDULER_INTERVAL_SECONDS", "60"))
 SIGNAL_DISCOVERY_BOT_ENABLED = os.getenv("SIGNAL_DISCOVERY_BOT_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS", "600"))
 SIGNAL_DISCOVERY_BOT_MODE = os.getenv("SIGNAL_DISCOVERY_BOT_MODE", "intraday").strip().lower() or "intraday"
@@ -221,10 +222,10 @@ SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIM
 SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 SIGNAL_CANDIDATE_PREFETCH_ENABLED = os.getenv("SIGNAL_CANDIDATE_PREFETCH_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_CANDIDATE_PREFETCH_LIMIT = max(1, int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_LIMIT", "80")))
+SIGNAL_CANDIDATE_PREFETCH_LIMIT = max(1, int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_LIMIT", "30")))
 SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS = max(
-    30,
-    int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS", "60")),
+    60,
+    int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS", "180")),
 )
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
@@ -257,6 +258,7 @@ INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.re
 DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
+GDELT_BACKOFF_UNTIL = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
@@ -6063,17 +6065,28 @@ def fetch_naver_news(query: str, display: int | None = None, start: int = 1, sor
     )
     with urlopen(request, timeout=NAVER_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        payload = {
+            "items": [],
+            "total": 0,
+            "display": 0,
+            "start": start,
+            "message": "네이버 뉴스 응답 형식이 올바르지 않습니다.",
+        }
+    payload_items = payload.get("items", [])
+    if not isinstance(payload_items, list):
+        payload_items = []
     write_raw_event(
         "naver",
         "news",
         payload,
         query=query,
-        metadata={"display": display, "start": start, "sort": sort, "itemCount": len(payload.get("items", []))},
+        metadata={"display": display, "start": start, "sort": sort, "itemCount": len(payload_items)},
     )
     try:
         normalized_items = [
             normalize_news_item(news_item)
-            for news_item in payload.get("items", [])
+            for news_item in payload_items
             if isinstance(news_item, dict)
         ]
         write_news_events(
@@ -6178,8 +6191,24 @@ def parse_gdelt_date(value: str) -> str:
     return parsed.isoformat(timespec="seconds") if parsed else text
 
 
+def gdelt_rate_limited_payload(query: str, display: int, timespan: str, sort: str, reason: str = "rate-limited") -> dict:
+    return {
+        "articles": [],
+        "query": query,
+        "display": 0,
+        "requestedDisplay": display,
+        "timespan": timespan,
+        "sort": sort,
+        "rateLimited": True,
+        "backoffUntil": GDELT_BACKOFF_UNTIL.astimezone(KST).isoformat(timespec="seconds")
+        if GDELT_BACKOFF_UNTIL > datetime.min.replace(tzinfo=timezone.utc)
+        else "",
+        "message": reason,
+    }
+
+
 def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | None = None, sort: str = "datedesc") -> dict:
-    global GDELT_LAST_REQUEST_AT
+    global GDELT_LAST_REQUEST_AT, GDELT_BACKOFF_UNTIL
     query = query.strip()
     if not query:
         return {"articles": [], "query": query}
@@ -6194,6 +6223,10 @@ def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | Non
         expires_at = cached.get("expires_at")
         if isinstance(expires_at, datetime) and expires_at > datetime.now(timezone.utc):
             return cached["payload"]  # type: ignore[return-value]
+
+    now = datetime.now(timezone.utc)
+    if GDELT_BACKOFF_UNTIL > now:
+        return gdelt_rate_limited_payload(query, display, timespan, sort, "GDELT 요청 제한으로 일시 보류")
 
     params = urlencode(
         {
@@ -6214,8 +6247,21 @@ def fetch_gdelt_news(query: str, display: int | None = None, timespan: str | Non
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
             GDELT_LAST_REQUEST_AT = datetime.now(timezone.utc)
-    with urlopen(request, timeout=GDELT_REQUEST_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=GDELT_REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        if error.code == 429:
+            GDELT_BACKOFF_UNTIL = datetime.now(timezone.utc) + timedelta(seconds=max(60, GDELT_BACKOFF_SECONDS))
+            payload = gdelt_rate_limited_payload(query, display, timespan, sort, "HTTP 429 Too Many Requests")
+            GDELT_NEWS_CACHE[cache_key] = {
+                "payload": payload,
+                "expires_at": GDELT_BACKOFF_UNTIL,
+            }
+            return payload
+        raise
+    if not isinstance(payload, dict):
+        payload = {"articles": [], "query": query, "display": 0, "timespan": timespan, "message": "GDELT 응답 형식이 올바르지 않습니다."}
     payload["query"] = query
     payload["display"] = display
     payload["timespan"] = timespan
@@ -6275,6 +6321,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
     filtered_count = 0
     material_count = 0
     queried_count = 0
+    rate_limited_count = 0
+    backoff_until = ""
     stored_news_count = 0
     news_storage_backend = ""
     for index, candidate in enumerate(candidates):
@@ -6287,6 +6335,9 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
         query = gdelt_query_for_candidate(item)
         payload = fetch_gdelt_news(query, display=GDELT_NEWS_DISPLAY, timespan=GDELT_NEWS_TIMESPAN)
         queried_count += 1
+        if payload.get("rateLimited"):
+            rate_limited_count += 1
+            backoff_until = str(payload.get("backoffUntil") or backoff_until)
         articles = payload.get("articles", [])
         if not isinstance(articles, list):
             articles = []
@@ -6344,6 +6395,8 @@ def enrich_candidates_with_gdelt_news(candidates: list[dict]) -> tuple[list[dict
         "newsCount": news_count,
         "filteredNewsCount": filtered_count,
         "materialNewsCount": material_count,
+        "rateLimitedCount": rate_limited_count,
+        "backoffUntil": backoff_until,
         "newsStoredCount": stored_news_count,
         "newsStorage": news_storage_backend,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -6375,7 +6428,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
     for index, candidate in enumerate(candidates):
         item = dict(candidate)
         if index >= NAVER_NEWS_MAX_CANDIDATES:
-            if item.get("liveNews", {}).get("source") != "naver":
+            existing_live_news = item.get("liveNews", {})
+            if not isinstance(existing_live_news, dict) or existing_live_news.get("source") != "naver":
                 item["liveNews"] = {"source": "skipped", "message": "뉴스 조회 후보 수 제한으로 건너뜀"}
             enriched.append(item)
             continue
@@ -6383,7 +6437,8 @@ def enrich_candidates_with_naver_news(candidates: list[dict]) -> tuple[list[dict
         query = naver_query_for_candidate(item)
         payload = fetch_naver_news(query, display=NAVER_NEWS_DISPLAY, sort="date")
         queried_count += 1
-        normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
+        news_items = payload.get("items", []) if isinstance(payload.get("items", []), list) else []
+        normalized = [normalize_news_item(news_item) for news_item in news_items if isinstance(news_item, dict)]
         normalized = [news_item for news_item in normalized if news_item.get("title")]
         relevant = filter_relevant_news_items(item, normalized)
         filtered_out = max(0, len(normalized) - len(relevant))
