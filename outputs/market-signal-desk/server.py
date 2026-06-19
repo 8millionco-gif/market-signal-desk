@@ -14715,14 +14715,14 @@ def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
 
 
 def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
+    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
+    if stored_candidate_data_payload is not None:
+        return stored_candidate_data_payload, "candidate_data_snapshots"
+
     cached_payload = cached_dashboard_payload(mode)
     if cached_payload is not None:
         cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
         return cached_payload, str(cache.get("source") or "dashboard_cache")
-
-    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
-    if stored_candidate_data_payload is not None:
-        return stored_candidate_data_payload, "candidate_data_snapshots"
 
     stored_payload = stored_candidate_pool_dashboard_payload(mode)
     if stored_payload is not None:
@@ -16094,13 +16094,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 mode = "close"
             force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
             if not force_refresh:
-                cached_payload = cached_dashboard_payload(mode)
-                if cached_payload is not None:
-                    self.send_json(cached_payload)
-                    return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
                 if stored_candidate_data_payload is not None:
                     self.send_json(stored_candidate_data_payload)
+                    return
+                cached_payload = cached_dashboard_payload(mode)
+                if cached_payload is not None:
+                    self.send_json(cached_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
                 if stored_pool_payload is not None:
@@ -16111,13 +16111,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
                 self.send_json(payload)
             except Exception as error:
-                cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
-                if cached_payload is not None:
-                    self.send_json(cached_payload)
-                    return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_candidate_data_payload is not None:
                     self.send_json(stored_candidate_data_payload)
+                    return
+                cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
+                if cached_payload is not None:
+                    self.send_json(cached_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_pool_payload is not None:
