@@ -92,6 +92,7 @@ const state = {
   },
   viewingSnapshot: null,
   selectedSymbol: null,
+  candidateDisplayMemory: {},
   notificationsEnabled: readStoredValue("marketSignalNotifications") === "1",
   lastNotifiedKey: readStoredValue("marketSignalLastNotifiedKey", ""),
   lastRunNotifiedId: readStoredValue("marketSignalLastRunNotifiedId", ""),
@@ -177,6 +178,7 @@ const LIVE_PRICE_SYMBOL_LIMIT = 80;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 3;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
+const CANDIDATE_DISPLAY_STICKY_MS = 60000;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1438,9 +1440,79 @@ function renderLoadError(error) {
 
 function filteredCandidates() {
   const base = baseFilteredCandidates();
-  const resolved = resolveCandidateStrategy(base, state.strategy);
-  state.strategy = resolved.strategy;
-  return sortCandidatesForStrategy(resolved.candidates, state.strategy);
+  let strategy = state.strategy;
+  let actualCandidates = candidatesForStrategy(base, strategy);
+  let retainedCandidates = retainedVisibleCandidates(base, actualCandidates, strategy);
+  if (!actualCandidates.length && strategy !== "all" && !retainedCandidates.length) {
+    const resolved = resolveCandidateStrategy(base, strategy);
+    strategy = resolved.strategy;
+    state.strategy = strategy;
+    actualCandidates = resolved.candidates;
+    retainedCandidates = retainedVisibleCandidates(base, actualCandidates, strategy);
+  }
+  rememberVisibleCandidates(strategy, actualCandidates);
+  return sortCandidatesForStrategy([...actualCandidates, ...retainedCandidates], strategy);
+}
+
+function candidateDisplayMemoryKey(strategy = state.strategy) {
+  return [
+    state.mode,
+    state.filter,
+    strategy,
+    state.query.trim().toLowerCase()
+  ].join("|");
+}
+
+function cleanupCandidateDisplayMemory(now = Date.now()) {
+  Object.entries(state.candidateDisplayMemory || {}).forEach(([key, value]) => {
+    const memory = value && typeof value === "object" ? value : {};
+    Object.entries(memory).forEach(([symbol, lastSeenAt]) => {
+      if (now - Number(lastSeenAt || 0) > CANDIDATE_DISPLAY_STICKY_MS) {
+        delete memory[symbol];
+      }
+    });
+    if (!Object.keys(memory).length) {
+      delete state.candidateDisplayMemory[key];
+    }
+  });
+}
+
+function rememberVisibleCandidates(strategy, candidates = []) {
+  if (!Array.isArray(candidates) || !candidates.length || strategy === "all") {
+    cleanupCandidateDisplayMemory();
+    return;
+  }
+  const now = Date.now();
+  const key = candidateDisplayMemoryKey(strategy);
+  const memory = state.candidateDisplayMemory[key] ?? {};
+  candidates.forEach((item) => {
+    if (item?.symbol) memory[item.symbol] = now;
+  });
+  state.candidateDisplayMemory[key] = memory;
+  cleanupCandidateDisplayMemory(now);
+}
+
+function retainedVisibleCandidates(baseCandidates = [], actualCandidates = [], strategy = state.strategy) {
+  if (strategy === "all") return [];
+  const key = candidateDisplayMemoryKey(strategy);
+  const memory = state.candidateDisplayMemory[key];
+  if (!memory || typeof memory !== "object") return [];
+  const now = Date.now();
+  const actualSymbols = new Set(actualCandidates.map((item) => item?.symbol).filter(Boolean));
+  const bySymbol = new Map(baseCandidates.map((item) => [item.symbol, item]));
+  return Object.entries(memory)
+    .filter(([, lastSeenAt]) => now - Number(lastSeenAt || 0) <= CANDIDATE_DISPLAY_STICKY_MS)
+    .map(([symbol]) => {
+      if (actualSymbols.has(symbol)) return null;
+      const item = bySymbol.get(symbol);
+      if (!item) return null;
+      if (strategy !== "exclude" && isExcludeCandidate(item)) return null;
+      return {
+        ...item,
+        displayRetained: true
+      };
+    })
+    .filter(Boolean);
 }
 
 function selectionLockedByLookup() {
@@ -4773,6 +4845,7 @@ function renderFeed() {
   els.candidateFeed.innerHTML = candidates
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
+      const retained = item.displayRetained ? "retained" : "";
       const plan = tradePlan(item);
       const actionLabel = feedActionLabel(item, plan);
       const priceGuide = primaryPriceGuide(plan);
@@ -4780,7 +4853,7 @@ function renderFeed() {
       const liveText = livePriceLabel(item);
       const signalMeta = candidateSignalMeta(item);
       return `
-        <button class="feed-item ${active}" data-symbol="${escapeHtml(item.symbol)}">
+        <button class="feed-item ${active} ${retained}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
           <span>
             <span class="feed-title">

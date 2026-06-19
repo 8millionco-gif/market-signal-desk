@@ -688,6 +688,11 @@ h3 {
   background: var(--panel-2);
 }
 
+.feed-item.retained:not(.active) {
+  border-color: rgba(255, 207, 92, 0.18);
+  background: rgba(255, 207, 92, 0.035);
+}
+
 .logo-mark {
   display: grid;
   place-items: center;
