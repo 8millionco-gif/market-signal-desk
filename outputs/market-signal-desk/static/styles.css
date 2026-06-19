@@ -1234,19 +1234,49 @@ h3 {
   font-weight: 800;
 }
 
+.sr-only {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .watch-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
   min-height: 34px;
-  padding: 0 12px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  color: var(--soft);
-  background: var(--chip);
+  color: #f4f7fb;
+  background: rgba(180, 193, 216, 0.08);
+  font-size: 18px;
   font-weight: 900;
+  line-height: 1;
+}
+
+.watch-button:hover {
+  border-color: rgba(255, 255, 255, 0.38);
+  background: rgba(244, 247, 251, 0.12);
 }
 
 .watch-button.active {
-  color: #11151d;
-  background: var(--green);
+  color: #ff6473;
+  border-color: rgba(255, 100, 115, 0.42);
+  background: rgba(255, 100, 115, 0.12);
+}
+
+.watch-button.active:hover {
+  border-color: rgba(255, 100, 115, 0.62);
+  background: rgba(255, 100, 115, 0.18);
 }
 
 .headline {

@@ -4376,8 +4376,15 @@ function renderDetail() {
           <h2>${escapeHtml(item.name)}</h2>
           <span data-selected-price>${escapeHtml(item.price)}</span>
           <span class="${changeClass(item.change)}" data-selected-change>${escapeHtml(displayChangeText(item.change))}</span>
-          <button class="watch-button ${item.isWatched ? "active" : ""}" id="watchButton">
-            ${item.isWatched ? "관심 해제" : "관심 등록"}
+          <button
+            class="watch-button ${item.isWatched ? "active" : ""}"
+            id="watchButton"
+            type="button"
+            aria-label="${item.isWatched ? "관심 해제" : "관심 등록"}"
+            title="${item.isWatched ? "관심 해제" : "관심 등록"}"
+          >
+            <span aria-hidden="true">♥</span>
+            <span class="sr-only">${item.isWatched ? "관심 해제" : "관심 등록"}</span>
           </button>
         </div>
         <p class="headline">${escapeHtml(item.headline)}</p>
