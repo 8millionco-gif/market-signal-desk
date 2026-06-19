@@ -627,17 +627,44 @@ function restoreDashboardFromBrowserCache(error) {
   return true;
 }
 
+function normalizeLiveSymbol(value) {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function candidateLiveSymbol(item) {
+  return normalizeLiveSymbol(item?.symbol);
+}
+
+function watchedCandidateSymbols() {
+  return (state.dashboard?.candidates ?? [])
+    .filter((item) => item?.isWatched)
+    .map(candidateLiveSymbol)
+    .filter(Boolean);
+}
+
+function portfolioHoldingSymbols() {
+  const items = Array.isArray(state.portfolioStatus?.items) ? state.portfolioStatus.items : [];
+  return items
+    .map((item) => normalizeLiveSymbol(item?.symbol ?? item?.stockCode ?? item?.code ?? item?.ticker))
+    .filter(Boolean);
+}
+
+function priorityLiveSymbols() {
+  return [...new Set([...portfolioHoldingSymbols(), ...watchedCandidateSymbols()].filter(Boolean))];
+}
+
 function livePriceSymbols() {
   const candidates = state.dashboard?.candidates ?? [];
-  const selected = selectedCandidate()?.symbol || state.selectedSymbol || "";
+  const selected = normalizeLiveSymbol(selectedCandidate()?.symbol || state.selectedSymbol || "");
+  const prioritySymbols = priorityLiveSymbols();
   const candidateSymbols = candidates
     .filter((item) => item?.symbol)
-    .map((item) => item.symbol);
+    .map(candidateLiveSymbol);
   const rankedOverflow = [...candidates]
     .filter((item) => item?.symbol)
     .sort((a, b) => livePricePriority(a) - livePricePriority(b))
-    .map((item) => item.symbol);
-  return [...new Set([selected, ...candidateSymbols, ...rankedOverflow].filter(Boolean))]
+    .map(candidateLiveSymbol);
+  return [...new Set([selected, ...prioritySymbols, ...rankedOverflow, ...candidateSymbols].filter(Boolean))]
     .slice(0, LIVE_PRICE_SYMBOL_LIMIT);
 }
 
@@ -680,6 +707,8 @@ function livePricePriority(item) {
   let priority = 100;
 
   if (gate === "actionable") priority -= 40;
+  if (selectedHoldingFor(item)) priority -= 28;
+  if (item?.isWatched) priority -= 22;
   if (group === "action") priority -= 24;
   if (plan.tone === "buy") priority -= 22;
   if (compression === "core") priority -= 18;
@@ -1916,6 +1945,7 @@ function livePriceDiagnostics() {
   const tossCount = freshnessList.filter((item) => item.source === "toss").length;
   const retainedCount = candidates.filter((item) => item?.livePrice?.retained).length;
   const total = candidates.length;
+  const priorityCount = priorityLiveSymbols().length;
   const symbolCount = Number(live.symbolCount || live.symbols?.length || 0);
   const notFreshCount = Math.max(0, total - freshCount);
   const updatedMs = parseTimeMs(live.updatedAt);
@@ -1952,6 +1982,7 @@ function livePriceDiagnostics() {
     tossCount,
     retainedCount,
     total,
+    priorityCount,
     notFreshCount,
     pollSeconds,
     symbolCount,
@@ -1967,6 +1998,7 @@ function renderLivePriceStatus() {
   const diag = livePriceDiagnostics();
   const rows = [
     ["상태", diag.ok, diag.label],
+    ["우선 포함", true, diag.priorityCount ? `보유·관심 ${diag.priorityCount}개` : "없음"],
     ["요청 대상", diag.symbolCount >= diag.total && diag.total > 0, diag.symbolCount ? `${diag.symbolCount}개` : "대기"],
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
