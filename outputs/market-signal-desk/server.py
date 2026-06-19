@@ -39,6 +39,7 @@ CANDIDATE_POOL_FILE = DATA_DIR / "candidate-pool.json"
 DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard-cache.json"
 RAW_EVENTS_FILE = DATA_DIR / "raw-events.json"
 LIVE_STATE_FILE = DATA_DIR / "live-state.json"
+CANDIDATE_DATA_FILE = DATA_DIR / "candidate-data-snapshots.json"
 SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip().lower() or "filesystem"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
@@ -82,6 +83,10 @@ SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED
 SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
 SIGNAL_LIVE_STATE_MAX_ITEMS = int(os.getenv("SIGNAL_LIVE_STATE_MAX_ITEMS", "240"))
 LIVE_STATE_KV_KEY = "live_price_state"
+SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED = os.getenv("SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_CANDIDATE_DATA_MAX_ITEMS = int(os.getenv("SIGNAL_CANDIDATE_DATA_MAX_ITEMS", "1000"))
+SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT", "30"))
+CANDIDATE_DATA_KV_KEY = "candidate_data_snapshots"
 _TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = os.getenv("TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT", "").strip()
 try:
     TOSS_SAMPLE_PRICE_DRIFT_WARN_PERCENT = (
@@ -231,6 +236,7 @@ DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
 RAW_EVENT_LOCK = threading.Lock()
 LIVE_STATE_LOCK = threading.Lock()
+CANDIDATE_DATA_LOCK = threading.Lock()
 STOCK_SEARCH_MASTER_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
@@ -240,6 +246,7 @@ DB_MIGRATION_STATUS: dict[str, object] = {
     "done": False,
     "ran": False,
     "candidatePool": "pending",
+    "candidateData": "pending",
     "discoveryLatest": "pending",
     "snapshotsInserted": 0,
     "snapshotsScanned": 0,
@@ -459,8 +466,16 @@ def db_storage_counts() -> dict:
                 raw_event_count = cur.fetchone()[0]
                 cur.execute("SELECT payload FROM signal_kv WHERE key = 'candidate_pool'")
                 pool_row = cur.fetchone()
+                cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (CANDIDATE_DATA_KV_KEY,))
+                candidate_data_row = cur.fetchone()
         pool_payload = normalize_db_payload(pool_row[0], {}) if pool_row else {}
         pool_items = pool_payload.get("items", {}) if isinstance(pool_payload, dict) and isinstance(pool_payload.get("items"), dict) else {}
+        candidate_data_payload = normalize_db_payload(candidate_data_row[0], {}) if candidate_data_row else {}
+        candidate_data_items = (
+            candidate_data_payload.get("items", {})
+            if isinstance(candidate_data_payload, dict) and isinstance(candidate_data_payload.get("items"), dict)
+            else {}
+        )
         active_pool = len([
             record
             for record in pool_items.values()
@@ -473,6 +488,7 @@ def db_storage_counts() -> dict:
             "rawEventCount": bounded_int(raw_event_count, 0, 10_000_000),
             "candidatePoolCount": len(pool_items),
             "candidatePoolActiveCount": active_pool,
+            "candidateDataCount": len(candidate_data_items),
         }
     except Exception as error:
         set_db_error(error)
@@ -488,6 +504,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "done": True,
             "ran": False,
             "candidatePool": "disabled",
+            "candidateData": "disabled",
             "discoveryLatest": "disabled",
             "error": "",
         }
@@ -512,6 +529,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "done": False,
             "ran": True,
             "candidatePool": "missing",
+            "candidateData": "missing",
             "discoveryLatest": "missing",
             "snapshotsInserted": 0,
             "snapshotsScanned": 0,
@@ -521,6 +539,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
         try:
             psycopg, Jsonb = psycopg_modules()
             candidate_pool = safe_read_json_file(CANDIDATE_POOL_FILE)
+            candidate_data = safe_read_json_file(CANDIDATE_DATA_FILE)
             discovery_latest = safe_read_json_file(DISCOVERY_LATEST_FILE)
             run_paths = []
             if RUNS_DIR.exists() and SIGNAL_DB_MIGRATE_RUN_LIMIT != 0:
@@ -542,6 +561,19 @@ def migrate_files_to_database(force: bool = False) -> dict:
                         status["candidatePool"] = "inserted" if cur.rowcount else "already-present"
                     elif isinstance(candidate_pool, dict):
                         status["candidatePool"] = "empty"
+
+                    if isinstance(candidate_data, dict) and candidate_data.get("items"):
+                        cur.execute(
+                            """
+                            INSERT INTO signal_kv (key, payload, updated_at)
+                            VALUES (%s, %s, NOW())
+                            ON CONFLICT (key) DO NOTHING
+                            """,
+                            (CANDIDATE_DATA_KV_KEY, Jsonb(candidate_data)),
+                        )
+                        status["candidateData"] = "inserted" if cur.rowcount else "already-present"
+                    elif isinstance(candidate_data, dict):
+                        status["candidateData"] = "empty"
 
                     if isinstance(discovery_latest, dict) and discovery_latest:
                         cur.execute(
@@ -3469,6 +3501,259 @@ def merge_live_state_into_candidates(candidates: list[dict], mode: str) -> tuple
         "retainedCount": len(items),
         "updatedAt": data.get("updatedAt", ""),
         "retainSeconds": SIGNAL_LIVE_STATE_RETAIN_SECONDS,
+    }
+
+
+def candidate_data_snapshot_empty() -> dict:
+    return {"version": 1, "updatedAt": "", "items": {}, "summary": {}}
+
+
+def candidate_data_snapshot_data() -> dict:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
+        return candidate_data_snapshot_empty()
+    stored = db_read_kv(CANDIDATE_DATA_KV_KEY, None) if database_storage_enabled() else None
+    file_data = safe_read_json_file(CANDIDATE_DATA_FILE)
+    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else candidate_data_snapshot_empty()
+    if not isinstance(data, dict):
+        return candidate_data_snapshot_empty()
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    if not isinstance(data.get("summary"), dict):
+        data["summary"] = {}
+    return data
+
+
+def candidate_data_snapshot_write(data: dict) -> tuple[bool, str]:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
+        return False, "disabled"
+    payload = live_state_json_safe(data)
+    if database_storage_enabled() and db_write_kv(CANDIDATE_DATA_KV_KEY, payload):
+        return True, "postgres"
+    write_json(CANDIDATE_DATA_FILE, payload)
+    return True, "filesystem-fallback" if database_storage_enabled() else "filesystem"
+
+
+def candidate_data_source_ok(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    source = str(value.get("source", "")).strip().lower()
+    if source in {"toss", "naver", "opendart", "openai"}:
+        return True
+    if source in {"retained", "stored-live-state"}:
+        return True
+    if source in {"sample", "seed", "skipped", "not-applicable", "disabled", "error"}:
+        return False
+    return bool(source and source not in {"-", "none", "missing"})
+
+
+def candidate_data_has_change(candidate: dict) -> bool:
+    change = str(candidate.get("change", "")).strip()
+    if not change or change in {"-", "미수신", "확인 대기"}:
+        return False
+    if change.lower() in {"n/a", "na", "none"}:
+        return False
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    if str(live_price.get("changeSource", "")).lower() == "missing":
+        return False
+    return True
+
+
+def candidate_data_completeness(candidate: dict) -> dict:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    live_candles = candidate.get("liveCandles", {}) if isinstance(candidate.get("liveCandles"), dict) else {}
+    live_orderbook = candidate.get("liveOrderbook", {}) if isinstance(candidate.get("liveOrderbook"), dict) else {}
+    live_trades = candidate.get("liveTrades", {}) if isinstance(candidate.get("liveTrades"), dict) else {}
+    try:
+        news_items = compact_live_news(candidate)
+    except Exception:
+        news_items = []
+    try:
+        disclosure_items = compact_live_disclosures(candidate)
+    except Exception:
+        disclosure_items = []
+    trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+    news_count = len(news_items) or bounded_int(trend.get("newsCount", 0), 0, 999999)
+    disclosure_count = len(disclosure_items)
+    price_ok = candidate_has_fresh_live_price(candidate)
+    change_ok = price_ok and candidate_data_has_change(candidate)
+    candle_ok = candidate_data_source_ok(live_candles)
+    orderbook_ok = candidate_data_source_ok(live_orderbook)
+    trade_ok = candidate_data_source_ok(live_trades)
+    material_ok = news_count > 0 or disclosure_count > 0
+    reaction_ready = price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
+    display_ready = price_ok and change_ok and material_ok
+    entry_ready = display_ready and reaction_ready
+    missing = []
+    if not price_ok:
+        missing.append("현재가")
+    if not change_ok:
+        missing.append("등락률")
+    if not material_ok:
+        missing.append("뉴스/공시")
+    if not (candle_ok or orderbook_ok or trade_ok):
+        missing.append("차트/호가/체결")
+    status = "entry_ready" if entry_ready else "display_ready" if display_ready else "collecting"
+    return {
+        "status": status,
+        "label": {
+            "entry_ready": "진입 데이터 준비",
+            "display_ready": "후보 데이터 준비",
+            "collecting": "수집 중",
+        }[status],
+        "priceOk": price_ok,
+        "changeOk": change_ok,
+        "candleOk": candle_ok,
+        "orderbookOk": orderbook_ok,
+        "tradeOk": trade_ok,
+        "materialOk": material_ok,
+        "reactionReady": reaction_ready,
+        "displayReady": display_ready,
+        "entryReady": entry_ready,
+        "newsCount": news_count,
+        "disclosureCount": disclosure_count,
+        "missing": unique_texts(missing, limit=8),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+        "freshness": live_price_freshness(live_price, str(candidate.get("updated", ""))),
+    }
+
+
+def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_text: str) -> dict | None:
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None
+    completeness = candidate_data_completeness(candidate)
+    candidate["dataCompleteness"] = completeness
+    return {
+        "symbol": symbol,
+        "name": candidate.get("name", ""),
+        "market": candidate.get("market", ""),
+        "category": candidate.get("category", ""),
+        "mode": mode,
+        "stage": stage,
+        "collectedAt": now_text,
+        "price": candidate.get("price", ""),
+        "change": candidate.get("change", ""),
+        "updated": candidate.get("updated", ""),
+        "totalScore": candidate.get("totalScore", 0),
+        "triggerReadiness": candidate.get("triggerReadiness", 0),
+        "preopenPriority": candidate.get("preopenPriority", 0),
+        "score": compact_raw_payload(candidate.get("score", {}), list_limit=20),
+        "livePrice": compact_raw_payload(candidate.get("livePrice", {}), list_limit=20),
+        "liveCandles": compact_raw_payload(candidate.get("liveCandles", {}), list_limit=20),
+        "liveOrderbook": compact_raw_payload(candidate.get("liveOrderbook", {}), list_limit=20),
+        "liveTrades": compact_raw_payload(candidate.get("liveTrades", {}), list_limit=20),
+        "liveNews": compact_live_news(candidate),
+        "liveDisclosures": compact_live_disclosures(candidate),
+        "priceReaction": compact_raw_payload(candidate.get("priceReaction", {}), list_limit=20),
+        "qualityGate": compact_raw_payload(candidate.get("qualityGate", {}), list_limit=20),
+        "finalDecision": compact_raw_payload(candidate.get("finalDecision", {}), list_limit=20),
+        "signalValidation": compact_raw_payload(candidate.get("signalValidation", {}), list_limit=20),
+        "candidateCompression": compact_raw_payload(candidate.get("candidateCompression", {}), list_limit=20),
+        "sourceReliability": compact_raw_payload(candidate.get("sourceReliability", {}), list_limit=20),
+        "dataConfidence": compact_raw_payload(candidate.get("dataConfidence", {}), list_limit=20),
+        "dataCompleteness": completeness,
+    }
+
+
+def trim_candidate_data_items(items: dict) -> dict:
+    if len(items) <= SIGNAL_CANDIDATE_DATA_MAX_ITEMS:
+        return items
+    ranked = sorted(
+        items.items(),
+        key=lambda pair: str(pair[1].get("latestAt", "")) if isinstance(pair[1], dict) else "",
+        reverse=True,
+    )
+    return dict(ranked[: max(1, SIGNAL_CANDIDATE_DATA_MAX_ITEMS)])
+
+
+def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: str = "selected") -> dict:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
+        return {"enabled": False, "storedCount": 0, "storage": "disabled", "message": "후보 데이터 저장이 꺼져 있습니다."}
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    with CANDIDATE_DATA_LOCK:
+        data = candidate_data_snapshot_data()
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        stored_count = 0
+        display_ready_count = 0
+        entry_ready_count = 0
+        missing_counts: dict[str, int] = {}
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            record = candidate_data_snapshot_record(candidate, mode, stage, now_text)
+            if record is None:
+                continue
+            completeness = record.get("dataCompleteness", {}) if isinstance(record.get("dataCompleteness"), dict) else {}
+            if completeness.get("displayReady"):
+                display_ready_count += 1
+            if completeness.get("entryReady"):
+                entry_ready_count += 1
+            for key in (completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []):
+                missing_counts[str(key)] = missing_counts.get(str(key), 0) + 1
+            symbol = str(record["symbol"])
+            previous = items.get(symbol, {}) if isinstance(items.get(symbol), dict) else {}
+            history = previous.get("history", []) if isinstance(previous.get("history"), list) else []
+            history = [*history, record][-max(1, SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT):]
+            items[symbol] = {
+                "symbol": symbol,
+                "name": record.get("name", ""),
+                "market": record.get("market", ""),
+                "mode": mode,
+                "latestAt": now_text,
+                "firstSeenAt": previous.get("firstSeenAt") or now_text,
+                "observations": int(previous.get("observations", 0) or 0) + 1,
+                "latest": record,
+                "history": history,
+            }
+            stored_count += 1
+        data["items"] = trim_candidate_data_items(items)
+        data["updatedAt"] = now_text
+        data["summary"] = {
+            "storedCount": stored_count,
+            "itemCount": len(data["items"]),
+            "displayReadyCount": display_ready_count,
+            "entryReadyCount": entry_ready_count,
+            "missingCounts": missing_counts,
+            "mode": mode,
+            "stage": stage,
+            "updatedAt": now_text,
+        }
+        ok, storage = candidate_data_snapshot_write(data)
+    return {
+        "enabled": True,
+        "stored": ok,
+        "storage": storage,
+        "storedCount": stored_count,
+        "itemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
+        "displayReadyCount": display_ready_count,
+        "entryReadyCount": entry_ready_count,
+        "missingCounts": missing_counts,
+        "updatedAt": now_text,
+        "message": f"후보 {stored_count}개 데이터 묶음을 저장했습니다.",
+    }
+
+
+def candidate_data_snapshot_status() -> dict:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
+        return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "후보 데이터 저장이 꺼져 있습니다."}
+    data = candidate_data_snapshot_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+    storage = "postgres" if database_storage_enabled() else "filesystem"
+    if not database_storage_enabled() and CANDIDATE_DATA_FILE.exists():
+        storage = "filesystem"
+    return {
+        "enabled": True,
+        "storage": storage,
+        "file": display_local_path(CANDIDATE_DATA_FILE),
+        "databaseReady": database_storage_enabled(),
+        "itemCount": len(items),
+        "storedCount": summary.get("storedCount", 0),
+        "displayReadyCount": summary.get("displayReadyCount", 0),
+        "entryReadyCount": summary.get("entryReadyCount", 0),
+        "missingCounts": summary.get("missingCounts", {}),
+        "latestAt": data.get("updatedAt", ""),
+        "message": "후보별 최신 수신 데이터 묶음을 저장합니다.",
     }
 
 
@@ -9508,6 +9793,7 @@ def dashboard_status_defaults() -> dict:
             "message": "기본 후보 점수를 사용합니다.",
         },
         "candidate_pool": candidate_pool_summary(),
+        "candidate_data": candidate_data_snapshot_status(),
     }
 
 
@@ -9657,6 +9943,11 @@ def score_signal_context(context: dict) -> dict:
         mode=context["mode"],
         stage="selected",
     )
+    context["statuses"]["candidate_data"] = update_candidate_data_snapshots(
+        context["candidates"],
+        mode=context["mode"],
+        stage="selected",
+    )
     context["pipeline"].append(
         pipeline_step(
             "scorer",
@@ -9673,6 +9964,15 @@ def score_signal_context(context: dict) -> dict:
             "ok" if context["statuses"]["candidate_pool"].get("enabled", False) else "fallback",
             context["statuses"]["candidate_pool"].get("message", "후보 풀 상태를 갱신했습니다."),
             context["statuses"]["candidate_pool"].get("activeCount", 0),
+        )
+    )
+    context["pipeline"].append(
+        pipeline_step(
+            "storage",
+            "후보 데이터 저장",
+            "ok" if context["statuses"]["candidate_data"].get("stored", False) else "fallback",
+            context["statuses"]["candidate_data"].get("message", "후보별 수신 데이터 묶음을 저장했습니다."),
+            context["statuses"]["candidate_data"].get("storedCount", 0),
         )
     )
     return context
@@ -10269,6 +10569,7 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 def snapshot_storage_status() -> dict:
     db_status = database_status()
     raw_events = raw_event_storage_status()
+    candidate_data = candidate_data_snapshot_status()
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         return {
@@ -10283,6 +10584,7 @@ def snapshot_storage_status() -> dict:
             "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
             "database": db_status,
             "rawEvents": raw_events,
+            "candidateData": candidate_data,
             "message": "Postgres DB에 스냅샷과 후보 풀을 저장합니다.",
             "error": "",
         }
@@ -10312,6 +10614,7 @@ def snapshot_storage_status() -> dict:
         "latestRunCreatedAt": recent_runs[0]["createdAt"] if recent_runs else "",
         "database": db_status,
         "rawEvents": raw_events,
+        "candidateData": candidate_data,
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
@@ -10851,6 +11154,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
     candidates, selection_status = apply_candidate_selection(candidates, market, watched)
     candidates = sort_candidates_for_mode(candidates, mode)
     live_state_write_status = update_live_state_from_candidates(candidates, mode)
+    candidate_data_status = update_candidate_data_snapshots(candidates, mode, stage="live-price")
     freshness_counts = live_price_freshness_counts(candidates)
     summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
     summary.update({
@@ -10859,6 +11163,9 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "livePriceRefreshedCount": len(candidates),
         "liveStateMergedCount": live_state_status.get("mergedCount", 0),
         "liveStateStoredCount": live_state_write_status.get("storedCount", 0),
+        "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
+        "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
+        "candidateDataEntryReadyCount": candidate_data_status.get("entryReadyCount", 0),
     })
     integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     integrations["selection"] = selection_status
@@ -10872,6 +11179,7 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "freshnessCounts": freshness_counts,
         "stateRead": live_state_status,
         "stateWrite": live_state_write_status,
+        "candidateData": candidate_data_status,
         "updatedAt": summary["livePriceUpdatedAt"],
     }
     toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}

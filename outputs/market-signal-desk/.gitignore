@@ -9,3 +9,4 @@ data/watchlist.json
 data/candidate-pool.json
 data/dashboard-cache.json
 data/live-state.json
+data/candidate-data-snapshots.json

@@ -3256,6 +3256,7 @@ function renderStorageStatus() {
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
   const rawEvents = status.rawEvents ?? {};
+  const candidateData = status.candidateData ?? {};
   const persistenceText = status.persistent ? "영구 설정" : "임시 보존";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
@@ -3274,7 +3275,7 @@ function renderStorageStatus() {
       : "대기"
     : "꺼짐";
   const recordText = counts.snapshotCount != null
-    ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0}`
+    ? `스냅샷 ${counts.snapshotCount} · 풀 ${counts.candidatePoolActiveCount ?? 0}/${counts.candidatePoolCount ?? 0} · 데이터 ${counts.candidateDataCount ?? 0}`
     : "-";
   const rawSourceText = rawEvents.bySource && Object.keys(rawEvents.bySource).length
     ? Object.entries(rawEvents.bySource)
@@ -3285,6 +3286,19 @@ function renderStorageStatus() {
   const rawEventText = rawEvents.enabled
     ? `${rawEvents.count ?? 0}건${rawSourceText ? ` · ${rawSourceText}` : ""}`
     : "꺼짐";
+  const candidateDataText = candidateData.enabled
+    ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.storage ?? "-"}`
+    : "꺼짐";
+  const candidateReadyText = candidateData.enabled
+    ? `후보 ${candidateData.displayReadyCount ?? 0} · 진입 ${candidateData.entryReadyCount ?? 0}`
+    : "-";
+  const candidateMissingText = candidateData.missingCounts && Object.keys(candidateData.missingCounts).length
+    ? Object.entries(candidateData.missingCounts)
+        .slice(0, 3)
+        .map(([key, count]) => `${key} ${count}`)
+        .join(" · ")
+    : "누락 없음";
+  const candidateLatestText = candidateData.latestAt ? timeLabel(candidateData.latestAt) : "-";
   const rows = [
     ["저장 방식", Boolean(status.mode), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
@@ -3292,6 +3306,10 @@ function renderStorageStatus() {
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
+    ["후보 데이터", Boolean(candidateData.enabled && Number(candidateData.itemCount ?? 0) > 0), candidateDataText],
+    ["진입 데이터", Boolean(Number(candidateData.entryReadyCount ?? 0) > 0), candidateReadyText],
+    ["누락 항목", candidateMissingText === "누락 없음", candidateMissingText],
+    ["최근 후보 저장", Boolean(candidateData.latestAt), candidateLatestText],
     ["보존성", Boolean(status.persistent), persistenceText],
     ["최근 기록", Number(status.recentRunCount ?? 0) > 0, latestText],
     ["다음", status.persistent && status.writable, nextText]
