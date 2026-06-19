@@ -975,7 +975,9 @@ function livePriceSummaryPatch(summary) {
     "livePriceRetainedCount",
     "livePriceMissingCount",
     "stableDecisionCount",
-    "finalDecisionStabilitySeconds"
+    "finalDecisionStabilitySeconds",
+    "candidateDataCarriedForwardCount",
+    "candidateDataCarriedForwardFields"
   ];
   return allowedKeys.reduce((patch, key) => {
     if (source[key] !== undefined) patch[key] = source[key];
@@ -1280,6 +1282,9 @@ async function refreshLivePrices() {
     stableDecisionCount: Number(payload.summary?.stableDecisionCount ?? state.livePrice.stableDecisionCount ?? 0),
     finalDecisionStabilitySeconds: Number(
       payload.summary?.finalDecisionStabilitySeconds ?? state.livePrice.finalDecisionStabilitySeconds ?? 0
+    ),
+    candidateDataCarriedForwardCount: Number(
+      payload.summary?.candidateDataCarriedForwardCount ?? state.livePrice.candidateDataCarriedForwardCount ?? 0
     )
   };
   if (merged) {
@@ -2205,6 +2210,9 @@ function livePriceDiagnostics() {
   const missingCount = Number(live.missingCount || state.dashboard?.summary?.livePriceMissingCount || 0);
   const changedCount = Number(live.changedCount || live.changedSymbols?.length || 0);
   const stableDecisionCount = Number(live.stableDecisionCount || state.dashboard?.summary?.stableDecisionCount || 0);
+  const carriedForwardCount = Number(
+    live.candidateDataCarriedForwardCount || state.dashboard?.summary?.candidateDataCarriedForwardCount || 0
+  );
   const finalDecisionStabilitySeconds = Number(
     live.finalDecisionStabilitySeconds || state.dashboard?.summary?.finalDecisionStabilitySeconds || 0
   );
@@ -2249,6 +2257,7 @@ function livePriceDiagnostics() {
     missingCount,
     changedCount,
     stableDecisionCount,
+    carriedForwardCount,
     finalDecisionStabilitySeconds,
     total,
     priorityCount,
@@ -2274,6 +2283,7 @@ function renderLivePriceStatus() {
     ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
     ["최종 미수신", diag.missingCount === 0, diag.missingCount ? `${diag.missingCount}개` : "없음"],
     ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
+    ["DB 보강", true, diag.carriedForwardCount ? `${diag.carriedForwardCount}개 유지` : "없음"],
     ["부분 갱신", true, diag.changedCount ? `${diag.changedCount}개 변경` : "변경 없음"],
     [
       "판단 유지",

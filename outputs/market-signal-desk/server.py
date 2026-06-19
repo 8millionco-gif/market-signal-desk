@@ -3078,14 +3078,26 @@ def market_session_context(market: str = "", now: datetime | None = None) -> dic
             "holiday": holiday,
             "timestamp": eastern.isoformat(timespec="seconds"),
         }
+    kst_now = current.astimezone(KST)
+    minutes = kst_now.hour * 60 + kst_now.minute
+    is_weekend = kst_now.weekday() >= 5
+    is_regular = not is_weekend and (9 * 60) <= minutes < (15 * 60 + 30)
+    if is_weekend:
+        phase, label = "closed", "국내장 휴장"
+    elif minutes < 9 * 60:
+        phase, label = "preopen", "국내장 개장 전"
+    elif minutes >= 15 * 60 + 30:
+        phase, label = "after_close", "국내장 마감 후"
+    else:
+        phase, label = "regular", "국내장 정규장"
     return {
         "market": normalized or "KR",
-        "phase": "regular",
-        "label": "정규장 기준",
-        "isRegular": True,
-        "isClosedOrPreopen": False,
+        "phase": phase,
+        "label": label,
+        "isRegular": is_regular,
+        "isClosedOrPreopen": not is_regular,
         "holiday": "",
-        "timestamp": current.astimezone(KST).isoformat(timespec="seconds"),
+        "timestamp": kst_now.isoformat(timespec="seconds"),
     }
 
 
@@ -4288,6 +4300,52 @@ def candidate_data_snapshot_record(candidate: dict, mode: str, stage: str, now_t
     }
 
 
+def carry_forward_candidate_data_record(record: dict, previous: dict) -> tuple[dict, list[str]]:
+    if not isinstance(record, dict) or not isinstance(previous, dict):
+        return record, []
+    previous_latest = previous.get("latest", {}) if isinstance(previous.get("latest"), dict) else {}
+    if not previous_latest:
+        return record, []
+
+    carried: list[str] = []
+    if not candidate_has_toss_last_price(record) and candidate_has_toss_last_price(previous_latest):
+        for key in ("price", "updated", "livePrice"):
+            if key in previous_latest:
+                record[key] = copy.deepcopy(previous_latest[key])
+        if isinstance(record.get("livePrice"), dict):
+            record["livePrice"] = {
+                **record["livePrice"],
+                "retained": True,
+                "dataSource": record["livePrice"].get("dataSource") or "candidate_data_snapshots",
+                "message": "이번 수집에서 가격이 누락되어 서버에 저장된 직전 유효 토스 가격을 유지합니다.",
+            }
+        carried.append("price")
+
+    if not candidate_data_has_change(record) and candidate_data_has_change(previous_latest):
+        record["change"] = previous_latest.get("change", record.get("change", ""))
+        previous_live_price = previous_latest.get("livePrice", {}) if isinstance(previous_latest.get("livePrice"), dict) else {}
+        if isinstance(record.get("livePrice"), dict):
+            record["livePrice"] = {
+                **record["livePrice"],
+                "retainedChange": True,
+                "changeSource": previous_live_price.get("changeSource") or "stored-candidate-data",
+                "changeMessage": "이번 수집에서 등락률이 누락되어 서버에 저장된 직전 등락률을 유지합니다.",
+            }
+        carried.append("change")
+
+    for key in ("liveCandles", "liveOrderbook", "liveTrades"):
+        current_value = record.get(key, {}) if isinstance(record.get(key), dict) else {}
+        previous_value = previous_latest.get(key, {}) if isinstance(previous_latest.get(key), dict) else {}
+        if not candidate_data_source_ok(current_value) and candidate_data_source_ok(previous_value):
+            record[key] = copy.deepcopy(previous_value)
+            carried.append(key)
+
+    if carried:
+        record["carriedForward"] = unique_texts(carried, limit=8)
+        record["dataCompleteness"] = candidate_data_completeness(record)
+    return record, unique_texts(carried, limit=8)
+
+
 def trim_candidate_data_items(items: dict) -> dict:
     if len(items) <= SIGNAL_CANDIDATE_DATA_MAX_ITEMS:
         return items
@@ -4309,6 +4367,8 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
         stored_count = 0
         display_ready_count = 0
         entry_ready_count = 0
+        carried_forward_count = 0
+        carried_forward_fields: dict[str, int] = {}
         missing_counts: dict[str, int] = {}
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -4316,6 +4376,13 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
             record = candidate_data_snapshot_record(candidate, mode, stage, now_text)
             if record is None:
                 continue
+            symbol = str(record["symbol"])
+            previous = items.get(symbol, {}) if isinstance(items.get(symbol), dict) else {}
+            record, carried_fields = carry_forward_candidate_data_record(record, previous)
+            if carried_fields:
+                carried_forward_count += 1
+                for key in carried_fields:
+                    carried_forward_fields[str(key)] = carried_forward_fields.get(str(key), 0) + 1
             completeness = record.get("dataCompleteness", {}) if isinstance(record.get("dataCompleteness"), dict) else {}
             if completeness.get("displayReady"):
                 display_ready_count += 1
@@ -4323,8 +4390,6 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
                 entry_ready_count += 1
             for key in (completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []):
                 missing_counts[str(key)] = missing_counts.get(str(key), 0) + 1
-            symbol = str(record["symbol"])
-            previous = items.get(symbol, {}) if isinstance(items.get(symbol), dict) else {}
             history = previous.get("history", []) if isinstance(previous.get("history"), list) else []
             history = [*history, record][-max(1, SIGNAL_CANDIDATE_DATA_HISTORY_LIMIT):]
             items[symbol] = {
@@ -4335,6 +4400,7 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
                 "latestAt": now_text,
                 "firstSeenAt": previous.get("firstSeenAt") or now_text,
                 "observations": int(previous.get("observations", 0) or 0) + 1,
+                "carriedForwardCount": int(previous.get("carriedForwardCount", 0) or 0) + (1 if carried_fields else 0),
                 "latest": record,
                 "history": history,
             }
@@ -4346,6 +4412,8 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
             "itemCount": len(data["items"]),
             "displayReadyCount": display_ready_count,
             "entryReadyCount": entry_ready_count,
+            "carriedForwardCount": carried_forward_count,
+            "carriedForwardFields": carried_forward_fields,
             "missingCounts": missing_counts,
             "mode": mode,
             "stage": stage,
@@ -4360,6 +4428,8 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
         "itemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
         "displayReadyCount": display_ready_count,
         "entryReadyCount": entry_ready_count,
+        "carriedForwardCount": carried_forward_count,
+        "carriedForwardFields": carried_forward_fields,
         "missingCounts": missing_counts,
         "updatedAt": now_text,
         "message": f"후보 {stored_count}개 데이터 묶음을 저장했습니다.",
@@ -4384,6 +4454,8 @@ def candidate_data_snapshot_status() -> dict:
         "storedCount": summary.get("storedCount", 0),
         "displayReadyCount": summary.get("displayReadyCount", 0),
         "entryReadyCount": summary.get("entryReadyCount", 0),
+        "carriedForwardCount": summary.get("carriedForwardCount", 0),
+        "carriedForwardFields": summary.get("carriedForwardFields", {}),
         "missingCounts": summary.get("missingCounts", {}),
         "latestAt": data.get("updatedAt", ""),
         "message": "후보별 최신 수신 데이터 묶음을 저장합니다.",
@@ -12423,6 +12495,8 @@ def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "p
         "candidateDataStoredCount": candidate_data_status.get("storedCount", 0),
         "candidateDataDisplayReadyCount": candidate_data_status.get("displayReadyCount", 0),
         "candidateDataEntryReadyCount": candidate_data_status.get("entryReadyCount", 0),
+        "candidateDataCarriedForwardCount": candidate_data_status.get("carriedForwardCount", 0),
+        "candidateDataCarriedForwardFields": candidate_data_status.get("carriedForwardFields", {}),
         "stableDecisionCount": selection_status.get("stableDecisionCount", 0),
         "finalDecisionStabilitySeconds": selection_status.get("finalDecisionStabilitySeconds", 0),
     })
