@@ -1456,6 +1456,7 @@ function renderMetrics() {
     const reactionOnlySignals = Number(summary.reactionOnlySignalCount ?? validationCounts.reaction_only ?? 0);
     const blockedSignals = Number(summary.blockedSignalCount ?? validationCounts.blocked ?? 0);
     const confidence = summary.averageDataConfidence;
+    const sourceReliability = summary.averageSourceReliability;
     const averageReaction = summary.averagePriceReaction;
     const officialCounts = summary.officialEventCounts ?? {};
     const officialCandidates = Number(summary.officialEventCandidateCount ?? 0);
@@ -1465,6 +1466,11 @@ function renderMetrics() {
         ? ` · 실전 ${gates.actionable ?? 0} · 관찰 ${gates.watch ?? 0} · 대기 ${gates.defer ?? 0} · 제외 ${gates.exclude ?? 0}`
         : "";
     const confidenceText = confidence != null ? ` · 평균 신뢰 ${confidence}/100` : "";
+    const sourceReliabilityCounts = summary.sourceReliabilityCounts ?? {};
+    const sourceReliabilityText =
+      sourceReliability != null
+        ? ` · 원천신뢰 ${sourceReliability}/100 · 높음 ${sourceReliabilityCounts.high ?? 0} · 부족 ${sourceReliabilityCounts.poor ?? 0}`
+        : "";
     const reactionText =
       reactions.strong || reactions.confirmed || reactions.weak || reactions.missing
         ? ` · 가격반응 강 ${reactions.strong ?? 0} · 확인 ${reactions.confirmed ?? 0} · 약 ${reactions.weak ?? 0} · 부족 ${reactions.missing ?? 0}`
@@ -1516,7 +1522,7 @@ function renderMetrics() {
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
     const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
+      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${confidenceText}${sourceReliabilityText}${reactionText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
       : "";
     els.candidateSource.textContent = `${sourceLabel}${detail}`;
   }
@@ -2799,6 +2805,7 @@ function renderFeed() {
       const priceGuide = primaryPriceGuide(plan);
       const gate = item.qualityGate ?? {};
       const confidence = item.dataConfidence ?? {};
+      const sourceReliability = item.sourceReliability ?? {};
       const reaction = item.priceReaction ?? {};
       const official = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
       const materialNews = Number(item.trend?.materialNewsCount ?? item.discovery?.materialNewsItems ?? 0);
@@ -2828,6 +2835,7 @@ function renderFeed() {
               ${officialBadge ? `<span class="feed-badge official-badge official-${escapeHtml(official.riskLevel || "low")}">${escapeHtml(officialBadge)}</span>` : ""}
               ${materialNews ? `<span class="feed-badge news-badge">재료뉴스 ${escapeHtml(materialNews)}</span>` : ""}
               ${confidence.score != null ? `<span class="feed-badge confidence-badge">신뢰 ${escapeHtml(confidence.score)}</span>` : ""}
+              ${sourceReliability.score != null ? `<span class="feed-badge reliability-badge">원천 ${escapeHtml(sourceReliability.score)}</span>` : ""}
               ${reaction.score != null ? `<span class="feed-badge reaction-badge">반응 ${escapeHtml(reaction.score)}</span>` : ""}
               ${isHiddenOpportunity(item) ? `<span class="feed-badge">숨은</span>` : ""}
               ${opportunityScore >= 8 ? `<span class="feed-badge">기회 ${opportunityScore}</span>` : ""}
@@ -3624,6 +3632,7 @@ function decisionGroupSection(item) {
   const qualityLabel = discoveryQualityLabel(item);
   const compression = compressionForDisplay(item);
   const confidence = item.dataConfidence ?? {};
+  const sourceReliability = item.sourceReliability ?? {};
   const reaction = item.priceReaction ?? {};
   const gate = item.qualityGate ?? {};
   const finalDecision = item.finalDecision ?? {};
@@ -3641,6 +3650,7 @@ function decisionGroupSection(item) {
         ${statCard("분류", group.label)}
         ${qualityLabel ? statCard("품질", qualityLabel) : ""}
         ${confidence.score != null ? statCard("신뢰도", `${confidence.score}/100`) : ""}
+        ${sourceReliability.score != null ? statCard("원천 신뢰", `${sourceReliability.label ?? "-"} · ${sourceReliability.score}/100`) : ""}
         ${reaction.score != null ? statCard("가격 반응", `${reaction.label ?? "-"} · ${reaction.score}/100`) : ""}
         ${holding ? statCard("보유 손익", `${holding.profitLossRate ?? "-"} · ${holding.judgement ?? "보유"}`) : ""}
         ${holding ? statCard("평균단가", holding.averagePurchasePrice ?? "-") : ""}
@@ -3653,6 +3663,9 @@ function decisionGroupSection(item) {
         <li>${escapeHtml(group.reason)}</li>
         ${qualityReason ? `<li>${escapeHtml(`후보 품질: ${qualityReason}`)}</li>` : ""}
         ${(confidence.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`신뢰 근거: ${text}`)}</li>`).join("")}
+        ${(sourceReliability.reasons ?? []).slice(0, 3).map((text) => `<li>${escapeHtml(`원천 근거: ${text}`)}</li>`).join("")}
+        ${(sourceReliability.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 보강: ${text}`)}</li>`).join("")}
+        ${(sourceReliability.blockers ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`원천 차단: ${text}`)}</li>`).join("")}
         ${(reaction.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`가격 반응: ${text}`)}</li>`).join("")}
         ${(reaction.warnings ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`반응 경고: ${text}`)}</li>`).join("")}
         ${(gate.reasons ?? []).slice(0, 2).map((text) => `<li>${escapeHtml(`게이트: ${text}`)}</li>`).join("")}

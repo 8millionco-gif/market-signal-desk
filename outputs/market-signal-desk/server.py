@@ -4423,7 +4423,171 @@ def decision_group_counts(candidates: list[dict]) -> dict:
     return counts
 
 
-def candidate_data_confidence(candidate: dict) -> dict:
+def raw_event_reliability_context() -> dict:
+    db_enabled = database_storage_enabled()
+    persistent = bool(db_enabled and DB_SCHEMA_READY and not DB_LAST_ERROR)
+    return {
+        "enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED,
+        "backend": "postgres" if db_enabled else "filesystem",
+        "persistent": persistent,
+        "lastStoredAt": RAW_EVENT_STATE.get("lastStoredAt", ""),
+        "lastSource": RAW_EVENT_STATE.get("lastSource", ""),
+        "lastEventType": RAW_EVENT_STATE.get("lastEventType", ""),
+    }
+
+
+def reliability_component(score: int, label: str, status: str, reason: str = "", weight: int = 1) -> dict:
+    return {
+        "score": bounded_int(score, 0, 100),
+        "label": label,
+        "status": status,
+        "reason": reason,
+        "weight": max(1, int(weight)),
+    }
+
+
+def candidate_source_reliability(candidate: dict, raw_context: dict | None = None) -> dict:
+    raw_context = raw_context if isinstance(raw_context, dict) else raw_event_reliability_context()
+    components: dict[str, dict] = {}
+    reasons: list[str] = []
+    warnings: list[str] = []
+    blockers: list[str] = []
+
+    live_price = candidate.get("livePrice", {})
+    if isinstance(live_price, dict) and live_price.get("source") == "toss":
+        score = 95
+        label = "Toss 현재가"
+        status = "verified"
+        reason = "실시간 현재가 출처 확인"
+        if live_price.get("baselineWarning"):
+            score -= 18
+            warnings.append("샘플 기준가와 실시간 현재가 차이가 큼")
+    elif display_number_to_decimal(candidate.get("price")) is not None:
+        score, label, status, reason = 42, "샘플 현재가", "fallback", "실시간 현재가 미확인"
+        blockers.append("실시간 현재가 미확인")
+    else:
+        score, label, status, reason = 8, "현재가 없음", "missing", "가격 기준 계산 불가"
+        blockers.append("현재가 미확인")
+    components["price"] = reliability_component(score, label, status, reason, weight=24)
+
+    live_candles = candidate.get("liveCandles", {})
+    if isinstance(live_candles, dict) and live_candles.get("source") == "toss":
+        score, label, status, reason = 90, "Toss 차트", "verified", "일봉/차트 출처 확인"
+    elif isinstance(live_candles, dict) and live_candles.get("source") == "stale":
+        score, label, status, reason = 38, "오래된 차트", "stale", "차트 최신성 부족"
+        warnings.append("차트 최신성 확인 필요")
+    else:
+        score, label, status, reason = 30, "샘플 차트", "fallback", "실시간 차트 미확인"
+    components["chart"] = reliability_component(score, label, status, reason, weight=14)
+
+    liquidity_scores = []
+    orderbook = candidate.get("liveOrderbook", {})
+    trades = candidate.get("liveTrades", {})
+    if isinstance(orderbook, dict) and orderbook.get("source") == "toss":
+        liquidity_scores.append(88)
+        reasons.append("호가 출처 확인")
+    if isinstance(trades, dict) and trades.get("source") == "toss":
+        liquidity_scores.append(88)
+        reasons.append("체결 출처 확인")
+    if liquidity_scores:
+        liquidity_score = round(sum(liquidity_scores) / len(liquidity_scores))
+        label, status, reason = "호가/체결 확인", "verified", "수급 원천 일부 확인"
+    else:
+        liquidity_score, label, status, reason = 35, "수급 미확인", "missing", "호가·체결 원천 미확인"
+        warnings.append("수급 반응은 가격만으로 판단 중")
+    components["liquidity"] = reliability_component(liquidity_score, label, status, reason, weight=13)
+
+    live_news = candidate.get("liveNews", {}) if isinstance(candidate.get("liveNews"), dict) else {}
+    global_news = candidate.get("globalNews", {}) if isinstance(candidate.get("globalNews"), dict) else {}
+    news_items = len(live_news.get("items", [])) if isinstance(live_news.get("items"), list) else 0
+    global_items = len(global_news.get("items", [])) if isinstance(global_news.get("items"), list) else 0
+    relevance = live_news.get("relevanceSummary", {}) if isinstance(live_news.get("relevanceSummary"), dict) else {}
+    gdelt_relevance = global_news.get("relevanceSummary", {}) if isinstance(global_news.get("relevanceSummary"), dict) else {}
+    material = bounded_int(relevance.get("material", 0), 0, 100) + bounded_int(gdelt_relevance.get("material", 0), 0, 100)
+    high = bounded_int(relevance.get("high", 0), 0, 100) + bounded_int(gdelt_relevance.get("high", 0), 0, 100)
+    filtered = bounded_int(live_news.get("filteredOut", 0), 0, 1_000)
+    if news_items or global_items:
+        news_score = bounded_int(58 + min(22, (news_items + global_items) * 3) + material * 5 + high * 3, 0, 100)
+        label, status, reason = "관련 뉴스 확인", "verified", f"관련 뉴스 {news_items + global_items}건"
+        if material:
+            reasons.append(f"재료성 뉴스 {material}건")
+    elif filtered:
+        news_score, label, status, reason = 36, "뉴스 관련성 낮음", "weak", "검색 뉴스는 있으나 종목 관련성이 낮음"
+        warnings.append("뉴스 관련성 필터 통과 건수 부족")
+    else:
+        news_score, label, status, reason = 28, "뉴스 미확인", "missing", "후보 재료 뉴스 미확인"
+    components["news"] = reliability_component(news_score, label, status, reason, weight=18)
+
+    live_disclosures = candidate.get("liveDisclosures", {}) if isinstance(candidate.get("liveDisclosures"), dict) else {}
+    official_signal = candidate.get("officialSignal", {})
+    if not isinstance(official_signal, dict) or official_signal.get("count") is None:
+        official_signal = official_event_signal(candidate)
+    disclosure_items = live_disclosures.get("items", []) if isinstance(live_disclosures.get("items"), list) else []
+    if official_signal.get("riskLevel") == "high":
+        official_score, label, status, reason = 42, "공식 리스크", "risk", "중대 공시 리스크 확인"
+        blockers.append("중대 공식 공시 리스크")
+    elif live_disclosures.get("source") in {"opendart", "dart"}:
+        official_score = 94 if disclosure_items else 82
+        label, status = "OpenDART 확인", "verified"
+        reason = f"공식 공시 {len(disclosure_items)}건" if disclosure_items else "최근 공식 공시 조회 완료"
+    elif str(candidate.get("market", "")).upper() == "KR":
+        official_score, label, status, reason = 38, "공시 미확인", "missing", "국내 종목 공식 공시 조회 미확인"
+        warnings.append("국내 종목은 공시 확인 전 매수 후보로 낮춤")
+    else:
+        official_score, label, status, reason = 52, "해외 공시 미연결", "partial", "해외 공식 공시 수집은 아직 미연결"
+    if official_signal.get("count") and status != "risk":
+        official_score = max(official_score, 86)
+        reasons.append(f"공식 이벤트 {official_signal.get('count')}건 분류")
+    components["official"] = reliability_component(official_score, label, status, reason, weight=18)
+
+    if raw_context.get("enabled") and raw_context.get("persistent"):
+        raw_score, label, status, reason = 90, "DB 원천 저장", "persistent", "원천 이벤트 DB 저장 가능"
+    elif raw_context.get("enabled"):
+        raw_score, label, status, reason = 58, "파일 원천 저장", "filesystem", "원천 이벤트 파일 저장 가능"
+        warnings.append("원천 데이터는 DB가 아니면 재배포 후 유지가 불안정")
+    else:
+        raw_score, label, status, reason = 22, "원천 저장 꺼짐", "disabled", "판단 근거 사후 검증 어려움"
+        blockers.append("원천 데이터 저장 비활성")
+    components["rawStorage"] = reliability_component(raw_score, label, status, reason, weight=8)
+
+    weighted_total = sum(component["score"] * component["weight"] for component in components.values())
+    weight_sum = sum(component["weight"] for component in components.values()) or 1
+    score = bounded_int(round(weighted_total / weight_sum), 0, 100)
+    if score >= 78:
+        label = "높음"
+        action = "신뢰 통과"
+    elif score >= 64:
+        label = "보통"
+        action = "조건부 활용"
+    elif score >= 48:
+        label = "낮음"
+        action = "근거 보강"
+    else:
+        label = "부족"
+        action = "오늘 제외 검토"
+
+    strongest = sorted(components.items(), key=lambda item: item[1]["score"], reverse=True)[:3]
+    weakest = sorted(components.items(), key=lambda item: item[1]["score"])[:3]
+    reasons = unique_texts([*reasons, *[component["reason"] for _, component in strongest if component.get("reason")]], limit=5)
+    warnings = unique_texts([*warnings, *[component["reason"] for _, component in weakest if component.get("score", 0) < 55 and component.get("reason")]], limit=5)
+
+    return {
+        "score": score,
+        "label": label,
+        "action": action,
+        "components": components,
+        "reasons": reasons,
+        "warnings": warnings,
+        "blockers": unique_texts(blockers, limit=4),
+        "rawStorage": {
+            "enabled": bool(raw_context.get("enabled")),
+            "persistent": bool(raw_context.get("persistent")),
+            "backend": raw_context.get("backend", ""),
+        },
+    }
+
+
+def candidate_data_confidence(candidate: dict, source_reliability: dict | None = None) -> dict:
     score = 0
     reasons: list[str] = []
     warnings: list[str] = []
@@ -4480,7 +4644,7 @@ def candidate_data_confidence(candidate: dict) -> dict:
         reasons.append(f"글로벌 뉴스 {global_items}건")
 
     live_disclosures = candidate.get("liveDisclosures", {})
-    if isinstance(live_disclosures, dict) and live_disclosures.get("source") == "dart":
+    if isinstance(live_disclosures, dict) and live_disclosures.get("source") in {"opendart", "dart"}:
         score += 8
         reasons.append("OpenDART 확인")
         if isinstance(live_disclosures.get("items"), list) and live_disclosures.get("items"):
@@ -4507,6 +4671,13 @@ def candidate_data_confidence(candidate: dict) -> dict:
         score -= 12
         warnings.append("발굴 품질 기준 미달")
 
+    if isinstance(source_reliability, dict):
+        reliability_score = bounded_int(source_reliability.get("score", 0), 0, 100)
+        score = round((score * 0.72) + (reliability_score * 0.28))
+        reasons.append(f"원천 신뢰 {reliability_score}/100")
+        warnings.extend(text_list(source_reliability.get("warnings", []), limit=3))
+        warnings.extend(text_list(source_reliability.get("blockers", []), limit=2))
+
     score = bounded_int(score, 0, 100)
     if score >= 75:
         label = "높음"
@@ -4531,6 +4702,8 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
     reaction_key = str(reaction.get("key", "missing"))
@@ -4544,6 +4717,12 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
     if official_signal.get("riskLevel") == "high":
         key, label, priority = "exclude", "공시 리스크", 4
         reasons.append("중대 공식 공시가 있어 신규 진입 제외")
+    elif reliability_score < 45:
+        key, label, priority = "exclude", "원천 신뢰 부족", 4
+        reasons.append("가격·뉴스·공시 원천 신뢰도가 낮아 오늘 제외")
+    elif reliability_score < 58 and group_key == "action":
+        key, label, priority = "defer", "근거 보강 대기", 3
+        reasons.append("진입 후보로 보기에는 원천 데이터 보강 필요")
     elif official_signal.get("riskLevel") == "medium" and group_key == "action":
         key, label, priority = "defer", "공시 확인 대기", 3
         reasons.append("공식 공시 영향 확인 전까지 진입 보류")
@@ -4574,9 +4753,10 @@ def candidate_quality_gate(candidate: dict, score_detail: dict, total: int, read
         "label": label,
         "priority": priority,
         "confidenceScore": confidence_score,
+        "sourceReliabilityScore": reliability_score,
         "reactionScore": reaction_score,
         "tradeAllowed": key == "actionable",
-        "reasons": unique_texts([*reasons, *official_signal.get("warnings", []), *reaction.get("warnings", []), *confidence.get("warnings", [])], limit=5),
+        "reasons": unique_texts([*reasons, *official_signal.get("warnings", []), *reaction.get("warnings", []), *confidence.get("warnings", []), *source_reliability.get("blockers", [])], limit=5),
     }
 
 
@@ -4685,6 +4865,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     change = display_percent_to_decimal(candidate.get("change"))
     has_price = display_number_to_decimal(candidate.get("price")) is not None
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
     hot = change is not None and change >= Decimal("3")
     weak = change is not None and change <= Decimal("-2")
     reaction = reaction if isinstance(reaction, dict) else candidate_price_reaction(candidate, score_detail)
@@ -4726,6 +4908,12 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     elif official_signal.get("riskLevel") == "high":
         action_key, action, tone = "exclude", "공시 리스크 제외", "risk"
         summary = "중대 공식 공시 리스크가 있어 가격 반응보다 공시 내용 확인을 우선합니다."
+    elif reliability_score < 45:
+        action_key, action, tone = "exclude", "원천 신뢰 부족", "risk"
+        summary = "가격·뉴스·공시 원천 신뢰도가 부족해 오늘 신규 진입 대상에서 제외합니다."
+    elif reliability_score < 58:
+        action_key, action, tone = "verify", "근거 보강 대기", "wait"
+        summary = "후보 신호는 있으나 원천 데이터 신뢰도가 낮아 시세·뉴스·공시 보강 전까지 대기합니다."
     elif official_signal.get("riskLevel") == "medium" and reaction_key not in {"strong", "confirmed"}:
         action_key, action, tone = "verify", "공시 확인 대기", "wait"
         summary = "공식 공시 영향이 아직 가격과 거래량으로 검증되지 않아 진입을 보류합니다."
@@ -4786,6 +4974,7 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     reasons = [
         f"최종 게이트: {gate.get('label', '미분류')}",
         f"데이터 신뢰도: {confidence_score}/100",
+        f"원천 신뢰도: {reliability_score}/100",
         f"후보 점수: {total}/100",
         f"진입 준비도: {readiness}/100",
     ]
@@ -4806,6 +4995,8 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         "tradeAllowed": action_key in {"buy", "add"},
         "gateKey": gate_key,
         "confidenceScore": confidence_score,
+        "sourceReliabilityScore": reliability_score,
+        "sourceReliabilityLabel": source_reliability.get("label", ""),
         "reactionScore": reaction_score,
         "reactionLabel": reaction.get("label", ""),
         "officialSignal": official_signal,
@@ -5870,8 +6061,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     score_shifts = []
     opportunity_scores = []
     confidence_scores = []
+    reliability_scores = []
     reaction_scores = []
     official_scores = []
+    reliability_counts = {"high": 0, "medium": 0, "low": 0, "poor": 0}
     official_counts = {"positive": 0, "risk": 0, "caution": 0, "neutral": 0, "highRisk": 0}
     gate_counts = {"actionable": 0, "watch": 0, "defer": 0, "exclude": 0}
     reaction_counts = {"strong": 0, "confirmed": 0, "weak": 0, "missing": 0}
@@ -5951,7 +6144,19 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         item["preopenPriority"] = preopen_priority
         item["verdict"] = verdict_from_scores(total, readiness, risk, heat, opportunity)
         item["decisionGroup"] = candidate_decision_group(item, score_detail, total, readiness, preopen_priority)
-        confidence = candidate_data_confidence(item)
+        source_reliability = candidate_source_reliability(item)
+        reliability_score = bounded_int(source_reliability.get("score", 0), 0, 100)
+        reliability_scores.append(reliability_score)
+        if reliability_score >= 78:
+            reliability_counts["high"] += 1
+        elif reliability_score >= 64:
+            reliability_counts["medium"] += 1
+        elif reliability_score >= 48:
+            reliability_counts["low"] += 1
+        else:
+            reliability_counts["poor"] += 1
+        item["sourceReliability"] = source_reliability
+        confidence = candidate_data_confidence(item, source_reliability)
         reaction = candidate_price_reaction(item, score_detail)
         reaction_scores.append(bounded_int(reaction.get("score", 0), 0, 100))
         reaction_counts[reaction["key"]] = reaction_counts.get(reaction["key"], 0) + 1
@@ -5993,6 +6198,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     average_shift = sum(score_shifts) / len(score_shifts) if score_shifts else 0
     average_opportunity = sum(opportunity_scores) / len(opportunity_scores) if opportunity_scores else 0
     average_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
+    average_reliability = sum(reliability_scores) / len(reliability_scores) if reliability_scores else 0
     average_reaction = sum(reaction_scores) / len(reaction_scores) if reaction_scores else 0
     average_official = sum(official_scores) / len(official_scores) if official_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
@@ -6006,6 +6212,8 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "averageScoreShift": round(average_shift, 1),
         "averageOpportunityScore": round(average_opportunity, 1),
         "averageDataConfidence": round(average_confidence, 1),
+        "averageSourceReliability": round(average_reliability, 1),
+        "sourceReliabilityCounts": reliability_counts,
         "averagePriceReaction": round(average_reaction, 1),
         "averageOfficialEventScore": round(average_official, 1),
         "officialEventCounts": official_counts,
@@ -7962,6 +8170,8 @@ def build_dashboard_payload(context: dict) -> dict:
             "averageScoreShift": selection_status.get("averageScoreShift"),
             "averageOpportunityScore": selection_status.get("averageOpportunityScore"),
             "averageDataConfidence": selection_status.get("averageDataConfidence"),
+            "averageSourceReliability": selection_status.get("averageSourceReliability"),
+            "sourceReliabilityCounts": selection_status.get("sourceReliabilityCounts", {}),
             "averagePriceReaction": selection_status.get("averagePriceReaction"),
             "averageOfficialEventScore": selection_status.get("averageOfficialEventScore"),
             "officialEventCounts": selection_status.get("officialEventCounts", {}),
@@ -8223,7 +8433,9 @@ def dashboard_summary(payload: dict) -> dict:
         "readyCount": summary.get("readyCount", 0),
         "averageScoreShift": summary.get("averageScoreShift"),
         "averageDataConfidence": summary.get("averageDataConfidence"),
+        "averageSourceReliability": summary.get("averageSourceReliability"),
         "averagePriceReaction": summary.get("averagePriceReaction"),
+        "sourceReliabilityCounts": summary.get("sourceReliabilityCounts", {}),
         "materialNewsCount": summary.get("materialNewsCount"),
         "selectedMaterialNewsCount": summary.get("selectedMaterialNewsCount"),
         "filteredNewsCount": summary.get("filteredNewsCount"),
