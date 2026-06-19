@@ -1614,8 +1614,6 @@ function candidatePoolStateForDisplay(item) {
 }
 
 function isActionCandidate(item) {
-  const freshness = priceFreshnessInfo(item);
-  if (!freshness.isFresh) return false;
   const gate = item?.qualityGate;
   if (gate?.key === "actionable") return true;
   if (["defer", "exclude"].includes(gate?.key)) return false;
