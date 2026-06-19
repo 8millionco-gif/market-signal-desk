@@ -5548,9 +5548,81 @@ function drawChart(values) {
   ctx.fill();
 }
 
+function setWatchButtonState(watched, loading = false) {
+  const button = document.querySelector("#watchButton");
+  if (!button) return;
+  const label = watched ? "관심 해제" : "관심 등록";
+  button.classList.toggle("active", watched);
+  button.classList.toggle("loading", loading);
+  button.disabled = loading;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  const hiddenLabel = button.querySelector(".sr-only");
+  if (hiddenLabel) hiddenLabel.textContent = label;
+}
+
+function applyWatchStateToCandidate(candidate, symbol, watched) {
+  if (!candidate || String(candidate.symbol) !== String(symbol)) return;
+  candidate.isWatched = watched;
+}
+
+function setCandidateWatchState(symbol, watched) {
+  (state.dashboard?.candidates ?? []).forEach((candidate) => {
+    applyWatchStateToCandidate(candidate, symbol, watched);
+  });
+  applyWatchStateToCandidate(state.dashboard?.selected, symbol, watched);
+  applyWatchStateToCandidate(state.selectedLookup, symbol, watched);
+  if (state.stockSearch?.items?.length) {
+    state.stockSearch.items.forEach((candidate) => {
+      applyWatchStateToCandidate(candidate, symbol, watched);
+    });
+  }
+}
+
+function adjustWatchedSummary(symbol, previous, next) {
+  if (!state.dashboard?.summary || previous === next) return;
+  const hasCandidate = (state.dashboard?.candidates ?? []).some((candidate) => String(candidate.symbol) === String(symbol));
+  if (!hasCandidate) return;
+  const current = Number(state.dashboard.summary.watchedCount ?? 0);
+  state.dashboard.summary.watchedCount = Math.max(0, current + (next ? 1 : -1));
+  renderMetrics();
+}
+
 async function toggleWatch(item) {
-  await postJson("/api/watchlist", { symbol: item.symbol, watch: !item.isWatched });
-  await loadDashboard();
+  const symbol = item?.symbol;
+  if (!symbol) return;
+  const previous = Boolean(item.isWatched);
+  const next = !previous;
+
+  setCandidateWatchState(symbol, next);
+  adjustWatchedSummary(symbol, previous, next);
+  setWatchButtonState(next, true);
+  renderFeed();
+  renderTradeDecisionStatus();
+
+  try {
+    const payload = await postJson("/api/watchlist", { symbol, watch: next });
+    const symbols = Array.isArray(payload?.symbols)
+      ? new Set(payload.symbols.map((value) => String(value)))
+      : null;
+    const confirmed = symbols ? symbols.has(String(symbol)) : next;
+    if (confirmed !== next) {
+      setCandidateWatchState(symbol, confirmed);
+      adjustWatchedSummary(symbol, next, confirmed);
+    }
+    setWatchButtonState(confirmed, false);
+    renderFeed();
+    renderTradeDecisionStatus();
+    saveDashboardToBrowserCache(state.dashboard);
+  } catch (error) {
+    setCandidateWatchState(symbol, previous);
+    adjustWatchedSummary(symbol, next, previous);
+    setWatchButtonState(previous, false);
+    renderFeed();
+    renderTradeDecisionStatus();
+    saveDashboardToBrowserCache(state.dashboard);
+    window.alert("관심 목록 변경에 실패했습니다. 다시 시도해 주세요.");
+  }
 }
 
 function updateViewButtons() {

@@ -1370,6 +1370,11 @@ h3 {
   background: rgba(255, 100, 115, 0.18);
 }
 
+.watch-button.loading {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .headline {
   margin-top: 10px;
   color: var(--text);
