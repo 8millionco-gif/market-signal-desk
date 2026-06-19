@@ -3185,6 +3185,7 @@ function stockSearchStatusText(payload) {
   const status = payload?.status ?? {};
   const masterCount = Number(status.searchMasterCount ?? 0);
   const generatedCount = Number(status.generatedMasterCount ?? 0);
+  const summary = status.searchMasterSummary ?? {};
   const storage = stockMasterStorageLabel(status.searchMasterStorage);
   const sourceLabel =
     status.source === "toss"
@@ -3194,8 +3195,14 @@ function stockSearchStatusText(payload) {
         : status.source === "disabled"
           ? "마스터 검색"
           : "자동완성";
+  const coverageParts = [
+    Number(summary.domestic ?? 0) ? `국내 ${summary.domestic}` : "",
+    Number(summary.overseas ?? 0) ? `해외 ${summary.overseas}` : "",
+    Number(summary.etf ?? 0) ? `ETF ${summary.etf}` : ""
+  ].filter(Boolean);
   const parts = [
     masterCount ? `마스터 ${masterCount}개` : "",
+    coverageParts.length ? coverageParts.join("/") : "",
     generatedCount ? `저장 ${generatedCount}개` : "",
     status.searchMasterStorage ? storage : "",
     sourceLabel

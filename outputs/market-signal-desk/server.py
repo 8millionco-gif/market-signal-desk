@@ -6674,9 +6674,9 @@ HANGUL_INITIALS = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 
 
 STOCK_SEARCH_ALIAS_OVERRIDES = {
-    "005930": ["삼전", "삼성반도체", "삼성전자보통주", "samsung"],
-    "000660": ["하닉", "하이닉", "sk하닉", "에스케이하이닉스"],
-    "035420": ["네이버", "naver"],
+    "005930": ["삼전", "삼성", "삼성반도체", "삼성전자보통주", "samsung", "samsung electronics"],
+    "000660": ["하닉", "하이닉", "sk하닉", "에스케이하이닉스", "sk hynix", "hynix"],
+    "035420": ["네이버", "naver", "naver corp"],
     "035720": ["카톡", "카카오톡", "kakao"],
     "005380": ["현차", "현대자동차"],
     "012450": ["한에어", "한화에어로", "한화방산"],
@@ -6697,6 +6697,36 @@ STOCK_SEARCH_ALIAS_OVERRIDES = {
     "PLTR": ["팔란티어", "palantir"],
     "VRT": ["버티브", "vertiv"],
     "SMCI": ["슈마컴", "슈퍼마이크로", "supermicro"],
+    "069500": ["코덱스200", "kodex200", "kodex 200", "코스피200", "kospi200"],
+    "102110": ["타이거200", "tiger200", "tiger 200", "코스피200", "kospi200"],
+    "278530": ["코덱스200tr", "kodex200tr", "kodex 200 tr", "코스피200tr"],
+    "122630": ["코덱스레버리지", "kodex leverage", "kodex레버리지", "코스피레버리지"],
+    "252670": ["곱버스", "코덱스인버스2x", "kodex inverse 2x", "kodex200선물인버스2x"],
+}
+
+STOCK_SEARCH_QUERY_SYNONYMS = {
+    "삼성": ["삼성전자", "삼전", "samsung", "samsung electronics"],
+    "삼전": ["삼성전자", "samsung electronics"],
+    "하이닉스": ["SK하이닉스", "하닉", "sk hynix", "hynix"],
+    "하닉": ["SK하이닉스", "하이닉스", "sk hynix"],
+    "네이버": ["NAVER", "naver", "035420"],
+    "카카오": ["kakao", "카톡", "035720"],
+    "현대차": ["현대자동차", "hyundai motor", "005380"],
+    "엔비디아": ["NVIDIA", "NVDA", "nvidia"],
+    "엔비": ["NVIDIA", "NVDA", "nvidia"],
+    "애플": ["Apple", "AAPL", "apple"],
+    "마이크로소프트": ["Microsoft", "MSFT", "microsoft"],
+    "마소": ["Microsoft", "MSFT", "microsoft"],
+    "아마존": ["Amazon", "AMZN", "amazon"],
+    "테슬라": ["Tesla", "TSLA", "tesla"],
+    "구글": ["Alphabet", "GOOGL", "google"],
+    "메타": ["Meta", "META", "facebook"],
+    "타이거200": ["TIGER 200", "tiger200", "102110", "코스피200"],
+    "tiger200": ["TIGER 200", "타이거200", "102110", "코스피200"],
+    "코덱스200": ["KODEX 200", "kodex200", "069500", "코스피200"],
+    "kodex200": ["KODEX 200", "코덱스200", "069500", "코스피200"],
+    "코덱스반도체": ["KODEX 반도체", "091160", "반도체ETF"],
+    "kodex반도체": ["KODEX 반도체", "091160", "반도체ETF"],
 }
 
 ETF_BRAND_ALIASES = {
@@ -6834,6 +6864,38 @@ def compact_alias(value: str) -> str:
     return re.sub(r"\s+", "", clean_news_text(str(value or "")))
 
 
+def stock_search_query_variants(query: str) -> list[str]:
+    raw = clean_news_text(str(query or ""))
+    normalized = normalized_search_text(raw)
+    if not normalized:
+        return []
+    variants: list[str] = [raw, normalized]
+    compact = compact_alias(raw)
+    if compact:
+        variants.append(compact)
+
+    synonyms = STOCK_SEARCH_QUERY_SYNONYMS.get(normalized, [])
+    variants.extend(synonyms)
+
+    alpha_number = re.fullmatch(r"([a-zA-Z]+)([0-9].*)", compact or raw)
+    if alpha_number:
+        brand, rest = alpha_number.groups()
+        upper_brand = brand.upper()
+        variants.extend([f"{upper_brand} {rest}", f"{upper_brand}{rest}"])
+        for brand_alias in ETF_BRAND_ALIASES.get(upper_brand, []):
+            variants.extend([f"{brand_alias}{rest}", f"{brand_alias} {rest}"])
+
+    hangul_number = re.fullmatch(r"([가-힣]+)([0-9].*)", compact or raw)
+    if hangul_number:
+        brand, rest = hangul_number.groups()
+        for canonical, brand_aliases in ETF_BRAND_ALIASES.items():
+            normalized_aliases = [normalized_search_text(alias) for alias in brand_aliases]
+            if normalized_search_text(brand) in normalized_aliases:
+                variants.extend([f"{canonical} {rest}", f"{canonical}{rest}"])
+
+    return unique_texts(variants, limit=16)
+
+
 def stock_search_auto_aliases(entry: dict) -> list[str]:
     name = str(entry.get("name") or "").strip()
     english_name = str(entry.get("englishName") or "").strip()
@@ -6937,6 +6999,9 @@ def search_terms_for_item(item: dict) -> list[tuple[str, str]]:
         ("종목명", "name"),
         ("영문명", "englishName"),
         ("테마", "headline"),
+        ("검색어", "query"),
+        ("유형", "securityType"),
+        ("시장", "market"),
     ]:
         value = item.get(key)
         if value:
@@ -6949,34 +7014,50 @@ def search_terms_for_item(item: dict) -> list[tuple[str, str]]:
 
 
 def stock_search_match_info(query: str, item: dict) -> dict:
-    normalized_query = normalized_search_text(query)
-    if not normalized_query:
+    query_variants = stock_search_query_variants(query)
+    if not query_variants:
         return {"matched": False, "rank": 99, "field": "", "text": ""}
 
-    initials_query = search_query_is_initials(query)
-    best = {"matched": False, "rank": 99, "field": "", "text": ""}
-    for field, raw_text in search_terms_for_item(item):
-        text = str(raw_text or "")
-        normalized_text = normalized_search_text(text)
-        if not normalized_text:
+    original_normalized = normalized_search_text(query_variants[0])
+    best = {"matched": False, "rank": 99, "field": "", "text": "", "variant": ""}
+    for variant in query_variants:
+        normalized_query = normalized_search_text(variant)
+        if not normalized_query:
             continue
-        initials = hangul_initials(text)
-        allow_initials = field != "테마"
-        rank = None
-        if normalized_query == normalized_text:
-            rank = 0
-        elif normalized_text.startswith(normalized_query):
-            rank = 1
-        elif allow_initials and initials and initials.startswith(normalized_query):
-            rank = 2
-        elif normalized_query in normalized_text:
-            rank = 3
-        elif allow_initials and initials and normalized_query in initials:
-            rank = 4
-        elif allow_initials and initials_query and initials and search_text_subsequence(normalized_query, initials):
-            rank = 5
-        if rank is not None and rank < best["rank"]:
-            best = {"matched": True, "rank": rank, "field": field, "text": text}
+        initials_query = search_query_is_initials(variant)
+        variant_penalty = 0 if normalized_query == original_normalized else 1
+        for field, raw_text in search_terms_for_item(item):
+            text = str(raw_text or "")
+            normalized_text = normalized_search_text(text)
+            if not normalized_text:
+                continue
+            initials = hangul_initials(text)
+            allow_initials = field not in {"테마", "검색어"}
+            rank = None
+            if normalized_query == normalized_text:
+                rank = 0
+            elif normalized_text.startswith(normalized_query):
+                rank = 1
+            elif allow_initials and initials and initials.startswith(normalized_query):
+                rank = 2
+            elif normalized_query in normalized_text:
+                rank = 3
+            elif allow_initials and initials and normalized_query in initials:
+                rank = 4
+            elif allow_initials and initials_query and initials and search_text_subsequence(normalized_query, initials):
+                rank = 5
+            if rank is None:
+                continue
+            adjusted_rank = min(98, rank + variant_penalty)
+            candidate = {"matched": True, "rank": adjusted_rank, "field": field, "text": text, "variant": variant}
+            if (
+                adjusted_rank < best["rank"]
+                or (
+                    adjusted_rank == best["rank"]
+                    and stock_search_field_priority(field) < stock_search_field_priority(str(best.get("field", "")))
+                )
+            ):
+                best = candidate
     return best
 
 
@@ -6986,8 +7067,11 @@ def stock_search_field_priority(field: str) -> int:
         "종목명": 1,
         "별칭": 1,
         "영문명": 2,
-        "테마": 3,
-    }.get(str(field), 4)
+        "검색어": 3,
+        "테마": 4,
+        "유형": 5,
+        "시장": 6,
+    }.get(str(field), 7)
 
 
 def search_relevance_rank(query: str, item: dict) -> tuple[int, ...]:
@@ -7001,7 +7085,52 @@ def search_relevance_rank(query: str, item: dict) -> tuple[int, ...]:
     symbol = normalized_search_text(item.get("symbol", ""))
     in_candidates = 0 if item.get("inCandidates") else 1
     watched = 0 if item.get("isWatched") else 1
-    return bucket, field_priority, in_candidates, watched, -score, len(name or symbol)
+    security_type = str(item.get("securityType", "")).upper()
+    source = str(item.get("source", ""))
+    source_priority = {
+        "candidate": 0,
+        "candidate-universe": 1,
+        "stock-search-generated": 2,
+        "stock-search-master": 3,
+        "manual-etf": 3,
+        "dart-corp-code": 4,
+        "toss": 5,
+    }.get(source, 6)
+    etf_priority = 0 if security_type == "ETF" and ("etf" in normalized_search_text(query) or any(brand.lower() in normalized_search_text(query) for brand in ETF_BRAND_ALIASES)) else 1
+    return bucket, field_priority, in_candidates, watched, etf_priority, source_priority, -score, len(name or symbol)
+
+
+def stock_search_universe_summary(entries: list[dict] | None = None) -> dict:
+    entries = entries if isinstance(entries, list) else stock_search_universe_entries()
+    domestic = 0
+    overseas = 0
+    etf = 0
+    stock = 0
+    sources: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        category = str(entry.get("category", "")).lower()
+        market = str(entry.get("market", "")).upper()
+        security_type = str(entry.get("securityType", "")).upper()
+        source = str(entry.get("source", "unknown"))
+        sources[source] = sources.get(source, 0) + 1
+        if category == "overseas" or market in {"US", "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}:
+            overseas += 1
+        else:
+            domestic += 1
+        if security_type == "ETF":
+            etf += 1
+        else:
+            stock += 1
+    return {
+        "total": len(entries),
+        "domestic": domestic,
+        "overseas": overseas,
+        "etf": etf,
+        "stock": stock,
+        "sources": sources,
+    }
 
 
 def seed_candidate_search(query: str, watched: set[str], limit: int = 8) -> list[dict]:
@@ -7341,7 +7470,9 @@ def stock_search(query: str, limit: int = 8) -> dict:
     watched = set(watchlist())
     generated_master, generated_storage = stock_search_generated_data()
     generated_count = len(generated_master.get("symbols", [])) if isinstance(generated_master, dict) and isinstance(generated_master.get("symbols", []), list) else 0
-    search_master_count = len(stock_search_universe_entries())
+    search_master_entries = stock_search_universe_entries()
+    search_master_count = len(search_master_entries)
+    search_master_summary = stock_search_universe_summary(search_master_entries)
     candidate_items = seed_candidate_search(query, watched, limit=limit)
     items = list(candidate_items)
     existing_symbols = {str(item.get("symbol", "")).upper() for item in items}
@@ -7412,6 +7543,7 @@ def stock_search(query: str, limit: int = 8) -> dict:
         "status": {
             **toss_status,
             "searchMasterCount": search_master_count,
+            "searchMasterSummary": search_master_summary,
             "searchMasterStorage": generated_storage,
             "generatedMasterCount": generated_count,
             "usingGeneratedMaster": generated_count > 0,
