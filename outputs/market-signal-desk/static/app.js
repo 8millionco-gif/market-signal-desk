@@ -3920,6 +3920,11 @@ function renderTossStatus() {
     ["오류 사유", !tossIssue, tossIssue || "없음"],
     ["가격 live", status.livePricesEnabled, status.livePricesEnabled ? "켜짐" : "꺼짐"],
     [
+      "상세 범위",
+      status.liveCandlesEnabled || status.liveOrderbookEnabled || status.liveTradesEnabled,
+      `차트 ${status.candleMaxCandidates ?? "-"} · 호가 ${status.orderbookMaxCandidates ?? "-"} · 체결 ${status.tradesMaxCandidates ?? "-"}`
+    ],
+    [
       "가격 출처",
       priceStatus?.source === "toss" && baselineDriftCount === 0,
       priceSourceValue
