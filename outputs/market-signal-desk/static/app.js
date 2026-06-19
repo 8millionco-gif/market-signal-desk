@@ -962,19 +962,23 @@ function reactionLiveMetrics(item) {
   const reaction = item?.priceReaction ?? {};
   const metrics = reaction.metrics ?? {};
   const freshness = priceFreshnessInfo(item);
+  const candles = item?.liveCandles ?? {};
   const orderbook = item?.liveOrderbook ?? {};
   const trades = item?.liveTrades ?? {};
   const volumeValue = metrics.volumeSpike || volumeReactionText(item);
+  const candleValue = candles.source === "toss"
+    ? `토스 일봉 ${candles.count ?? 0}개`
+    : dataSourceLabel(candles.source || "", "차트 대기", candles.message);
   const orderbookValue = metrics.orderbookImbalance
     ? `${orderbook.pressure || "호가"} ${metrics.orderbookImbalance}`
     : orderbook.source === "toss"
       ? orderbook.pressure || "반영"
-      : dataSourceLabel(orderbook.source || "");
+      : dataSourceLabel(orderbook.source || "", "호가 대기", orderbook.message);
   const tradeValue = metrics.tradeBias
     ? `${trades.pressure || "체결"} ${metrics.tradeBias}`
     : trades.source === "toss"
       ? trades.pressure || "반영"
-      : dataSourceLabel(trades.source || "");
+      : dataSourceLabel(trades.source || "", "체결 대기", trades.message);
   return [
     {
       label: "현재가",
@@ -984,9 +988,11 @@ function reactionLiveMetrics(item) {
     },
     {
       label: "거래량",
-      value: volumeValue || "-",
-      note: metrics.volumeConfirmed ? "거래량 반응 확인" : "거래량 확인 필요",
-      tone: metrics.volumeConfirmed ? "ok" : volumeValue && volumeValue !== "-" ? "warn" : "wait"
+      value: volumeValue && volumeValue !== "-" ? volumeValue : candleValue,
+      note: candles.source === "toss"
+        ? `토스 일봉 기반${metrics.volumeConfirmed ? " · 거래량 반응 확인" : ""}`
+        : candles.message || "거래량 확인 필요",
+      tone: metrics.volumeConfirmed ? "ok" : candles.source === "toss" ? "warn" : dataSourceTone(candles.source, candles.message)
     },
     {
       label: "호가",
@@ -1409,18 +1415,42 @@ function livePriceLabel(item) {
 
 function dataSourceTone(source, message = "") {
   if (source === "toss") return "ok";
-  if (["stale", "error"].includes(source)) return "warn";
+  if (["sample", "stale", "error"].includes(source)) return "warn";
   if (["skipped", "retained"].includes(source)) return "wait";
   if (String(message).includes("응답이 비어")) return "wait";
   return "wait";
 }
 
-function dataSourceLabel(source, fallback = "대기") {
+function fallbackStatusLabel(status, fallback = "대체값") {
+  const source = typeof status === "string" ? status : status?.source;
+  const message = String(typeof status === "object" ? status?.message ?? status?.detail ?? "" : "");
+  if (!source) return fallback;
+  if (source === "toss") return "토스 반영";
+  if (source === "opendart") return "OpenDART";
+  if (source === "naver") return "네이버";
+  if (source === "gdelt") return "GDELT";
+  if (source === "fx-api" || source === "index-api" || source === "index-api-partial") return "API 반영";
+  if (source === "retained") return "직전값 유지";
+  if (source === "skipped") return "후보 제한";
+  if (source === "stale") return "데이터 오래됨";
+  if (source === "lookup") return "검색값";
+  if (source === "error") return "오류";
+  if (source === "sample") {
+    if (message.includes("응답이 비어")) return "미수신";
+    if (message.includes("환경변수") || message.includes("키")) return "설정 대기";
+    if (message.includes("꺼져")) return "라이브 꺼짐";
+    if (message.includes("실패")) return "대체값";
+    return fallback;
+  }
+  return fallback;
+}
+
+function dataSourceLabel(source, fallback = "대기", message = "") {
   if (source === "toss") return "반영";
   if (source === "stale") return "오래됨";
   if (source === "skipped") return "제한";
   if (source === "retained") return "유지";
-  if (source === "sample") return "대기";
+  if (source === "sample") return fallbackStatusLabel({ source, message }, "대체값");
   if (source === "lookup") return "검색";
   if (source === "error") return "오류";
   return fallback;
@@ -1450,7 +1480,7 @@ function liveDataCoverage(item) {
       label: "차트",
       short: "차",
       tone: dataSourceTone(candleSource, candles.message),
-      value: candleSource === "toss" ? `${candles.count ?? 0}개` : dataSourceLabel(candleSource),
+      value: candleSource === "toss" ? `${candles.count ?? 0}개` : dataSourceLabel(candleSource, "대기", candles.message),
       title: candleSource === "toss"
         ? `토스 일봉 ${candles.count ?? 0}개 반영`
         : candles.message || "토스 차트 반영 대기"
@@ -1460,7 +1490,7 @@ function liveDataCoverage(item) {
       label: "호가",
       short: "호",
       tone: dataSourceTone(orderbookSource, orderbook.message),
-      value: orderbookSource === "toss" ? orderbook.pressure || "반영" : dataSourceLabel(orderbookSource),
+      value: orderbookSource === "toss" ? orderbook.pressure || "반영" : dataSourceLabel(orderbookSource, "대기", orderbook.message),
       title: orderbookSource === "toss"
         ? `호가 ${orderbook.pressure || "반영"} · 스프레드 ${orderbook.spreadPercent || "-"}`
         : orderbook.message || "토스 호가 반영 대기"
@@ -1470,7 +1500,7 @@ function liveDataCoverage(item) {
       label: "체결",
       short: "체",
       tone: dataSourceTone(tradesSource, trades.message),
-      value: tradesSource === "toss" ? trades.pressure || "반영" : dataSourceLabel(tradesSource),
+      value: tradesSource === "toss" ? trades.pressure || "반영" : dataSourceLabel(tradesSource, "대기", trades.message),
       title: tradesSource === "toss"
         ? `최근 체결 ${trades.pressure || "반영"} · ${trades.biasPercent || "-"}`
         : trades.message || "토스 체결 반영 대기"
@@ -2101,7 +2131,7 @@ function candidateSourceLabel(summary = {}) {
   if (summary.candidateSource === "auto-discovery") return "실시간 발굴";
   if (summary.candidateSource === "auto-news") return "자동 뉴스 선정";
   if (summary.candidateSource === "auto-universe") return "자동 유니버스 선정";
-  if (summary.candidateSource === "sample") return "샘플 후보";
+  if (summary.candidateSource === "sample") return "시드 후보";
   return summary.candidateSource || "후보 출처 확인 중";
 }
 
@@ -2141,7 +2171,7 @@ function candidateSourceDetailRows(summary = {}) {
       ? `${timeLabel(live.updatedAt)} · ${live.error ? live.message || "갱신 실패" : live.message || "토스 현재가 반영"}`
       : "대기";
   return [
-    ["후보 출처", sourceLabel !== "샘플 후보", `${sourceLabel}${cacheSuffix}`],
+    ["후보 출처", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}`],
     ["기준 시각", Boolean(cachedAt), cachedAt ? timeLabel(cachedAt) : "-"],
     ["갱신 방식", cache.cached || summary.candidateSourceStored, refreshPolicy],
     ["장중 가격", Boolean(live.updatedAt && !live.error), liveText],
@@ -2625,7 +2655,7 @@ function renderMarket() {
     fxSource?.source === "fx-api"
       ? `환율: ${fxSource.provider}${fxSource.timestamp ? ` · ${fxSource.timestamp}` : ""}`
       : fxSource?.source === "sample"
-        ? "환율: 샘플"
+        ? `환율: ${fallbackStatusLabel(fxSource, "대체 환율")}`
         : "";
   const indexSource = market.indexSource;
   const indexText =
@@ -2634,7 +2664,7 @@ function renderMarket() {
       : indexSource?.source === "index-api-partial"
         ? `지수: ${indexSource.provider} 일부`
         : indexSource?.source === "sample"
-          ? "지수: 샘플"
+          ? `지수: ${fallbackStatusLabel(indexSource, "대체 지수")}`
           : "";
   const snapshotText = state.viewingSnapshot
     ? `스냅샷 보기: ${modeLabel(state.viewingSnapshot.mode)} · ${timeLabel(state.viewingSnapshot.createdAt)}`
@@ -3813,12 +3843,12 @@ function renderMarketStatus() {
         ? `${indexStatus.provider ?? "API"} ${indexStatus.count ?? 0}건`
         : indexStatus?.source === "index-api-partial"
           ? `${indexStatus.provider ?? "API"} 일부`
-          : "샘플"
+          : fallbackStatusLabel(indexStatus, "대체 지수")
     ],
     [
       "환율 조회",
       fxOk,
-      fxStatus?.source === "fx-api" ? `${fxStatus.provider ?? "API"}` : "샘플"
+      fxStatus?.source === "fx-api" ? `${fxStatus.provider ?? "API"}` : fallbackStatusLabel(fxStatus, "대체 환율")
     ]
   ];
   els.marketStatus.innerHTML = rows
@@ -3941,6 +3971,7 @@ function tossSourceLabel(status, liveEnabled, countKey) {
   if (status.source === "retained") return "이전값 유지";
   if (status.source === "skipped") return "후보 제한";
   if (status.source === "stale") return "데이터 오래됨";
+  if (status.source === "sample") return fallbackStatusLabel(status, "대체값");
   if (status.source === "toss") return `토스 ${status[countKey] ?? 0}건`;
   const message = String(status.message ?? "");
   if (message.includes("응답이 비어")) return "응답 없음";
@@ -3985,7 +4016,7 @@ function renderDartStatus() {
     [
       "공시 출처",
       disclosureStatus?.source === "opendart",
-      disclosureStatus?.source === "opendart" ? `${disclosureStatus.disclosureCount ?? 0}건` : "샘플"
+      disclosureStatus?.source === "opendart" ? `${disclosureStatus.disclosureCount ?? 0}건` : fallbackStatusLabel(disclosureStatus, "대체 공시")
     ]
   ];
   els.dartStatus.innerHTML = rows
@@ -4001,7 +4032,7 @@ function renderDartStatus() {
     .join("");
 }
 
-function newsSourceLabel(status, liveSource, sampleLabel = "샘플") {
+function newsSourceLabel(status, liveSource, sampleLabel = "대체 뉴스") {
   if (!status) return sampleLabel;
   if (status.source === liveSource) {
     return `${status.newsCount ?? status.disclosureCount ?? 0}건`;
@@ -4012,7 +4043,7 @@ function newsSourceLabel(status, liveSource, sampleLabel = "샘플") {
   }
   if (status.source === "skipped") return "건너뜀";
   if (status.enabled === false) return "꺼짐";
-  return sampleLabel;
+  return fallbackStatusLabel(status, sampleLabel);
 }
 
 function renderNewsStatus() {
@@ -4682,7 +4713,7 @@ function renderPerformance() {
   const byHorizon = Array.isArray(payload.byHorizon) ? payload.byHorizon : [];
   const poolPerformance = payload.candidatePoolPerformance ?? {};
   const poolUpdatedSymbols = Array.isArray(poolPerformance.updatedSymbols) ? poolPerformance.updatedSymbols : [];
-  const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : "샘플 가격";
+  const priceSource = payload.priceStatus?.source === "toss" ? "토스 현재가" : fallbackStatusLabel(payload.priceStatus, "대체 가격");
   const threshold = payload.config?.successThreshold ?? "+1.0%";
   const best = summary.best;
   const worst = summary.worst;
