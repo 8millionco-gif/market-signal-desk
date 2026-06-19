@@ -6608,6 +6608,20 @@ STOCK_SEARCH_ALIAS_OVERRIDES = {
     "SMCI": ["슈마컴", "슈퍼마이크로", "supermicro"],
 }
 
+ETF_BRAND_ALIASES = {
+    "KODEX": ["코덱스", "kodex"],
+    "TIGER": ["타이거", "tiger"],
+    "ACE": ["에이스", "ace"],
+    "SOL": ["솔", "sol"],
+    "KBSTAR": ["케이비스타", "KB스타", "kbstar"],
+    "HANARO": ["하나로", "hanaro"],
+    "ARIRANG": ["아리랑", "arirang"],
+    "KOSEF": ["코세프", "kosef"],
+    "TIMEFOLIO": ["타임폴리오", "timefolio"],
+    "RISE": ["라이즈", "rise"],
+    "PLUS": ["플러스", "plus"],
+}
+
 
 STOCK_SEARCH_MANUAL_UNIVERSE = [
     {
@@ -6721,8 +6735,54 @@ def expanded_stock_aliases(symbol: str, aliases: list[str] | None = None) -> lis
             *(aliases or []),
             *STOCK_SEARCH_ALIAS_OVERRIDES.get(normalized_symbol, []),
         ],
-        limit=16,
+        limit=32,
     )
+
+
+def compact_alias(value: str) -> str:
+    return re.sub(r"\s+", "", clean_news_text(str(value or "")))
+
+
+def stock_search_auto_aliases(entry: dict) -> list[str]:
+    name = str(entry.get("name") or "").strip()
+    english_name = str(entry.get("englishName") or "").strip()
+    security_type = str(entry.get("securityType") or "").upper()
+    themes = text_list(entry.get("themes", []), limit=8)
+    aliases: list[str] = []
+    for value in [name, english_name]:
+        compact = compact_alias(value)
+        if value:
+            aliases.append(value)
+        if compact and compact != value:
+            aliases.append(compact)
+
+    is_etf = security_type == "ETF" or any("ETF" in str(theme).upper() for theme in themes)
+    if not is_etf or not name:
+        return unique_texts(aliases, limit=24)
+
+    parts = name.split(maxsplit=1)
+    if not parts:
+        return unique_texts(aliases, limit=24)
+
+    brand = parts[0].strip().upper()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    rest_compact = compact_alias(rest)
+    brand_aliases = ETF_BRAND_ALIASES.get(brand, [])
+    if brand_aliases and rest:
+        for brand_alias in brand_aliases:
+            aliases.extend(
+                [
+                    f"{brand_alias}{rest_compact}",
+                    f"{brand_alias} {rest}",
+                    f"{brand_alias}{rest_compact}ETF",
+                ]
+            )
+    if rest:
+        aliases.extend([rest, rest_compact, f"{rest_compact}ETF", f"{rest} ETF"])
+    for theme in themes:
+        theme_compact = compact_alias(theme)
+        aliases.extend([theme, theme_compact])
+    return unique_texts(aliases, limit=24)
 
 
 def search_query_looks_symbol(query: str) -> bool:
@@ -6746,8 +6806,9 @@ def candidate_search_result(candidate: dict) -> dict:
         [
             *text_list(candidate.get("aliases", []), limit=8),
             *universe_aliases_for_symbol(str(candidate.get("symbol", ""))),
+            *stock_search_auto_aliases(candidate),
         ],
-        limit=16,
+        limit=32,
     )
     aliases = expanded_stock_aliases(str(candidate.get("symbol", "")), aliases)
     return {
@@ -6789,7 +6850,7 @@ def search_terms_for_item(item: dict) -> list[tuple[str, str]]:
         value = item.get(key)
         if value:
             terms.append((label, str(value)))
-    for alias in text_list(item.get("aliases", []), limit=16):
+    for alias in text_list(item.get("aliases", []), limit=32):
         terms.append(("별칭", alias))
     for theme in text_list(item.get("themes", []), limit=8):
         terms.append(("테마", theme))
@@ -6881,7 +6942,7 @@ def universe_search_result(entry: dict, watched: set[str]) -> dict:
         "category": entry.get("category", ""),
         "discoveryTier": entry.get("discoveryTier", "core"),
         "opportunityType": entry.get("opportunityType", "core"),
-        "aliases": expanded_stock_aliases(symbol, text_list(entry.get("aliases", []), limit=12)),
+        "aliases": expanded_stock_aliases(symbol, [*text_list(entry.get("aliases", []), limit=24), *stock_search_auto_aliases(entry)]),
         "price": "-",
         "change": "",
         "headline": " · ".join(themes) if themes else f"{name} 감시 유니버스",
@@ -6944,7 +7005,7 @@ def normalize_stock_search_entry(entry: dict, default_source: str, default_label
     if not item.get("category"):
         item["category"] = "overseas" if market in {"US", "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"} else "domestic"
     item["securityType"] = item.get("securityType", "STOCK")
-    item["aliases"] = expanded_stock_aliases(symbol, text_list(item.get("aliases", []), limit=16))
+    item["aliases"] = expanded_stock_aliases(symbol, [*text_list(item.get("aliases", []), limit=24), *stock_search_auto_aliases(item)])
     item["themes"] = text_list(item.get("themes", []), limit=8)
     item["focusWeight"] = bounded_int(item.get("focusWeight", 3), 0, 15)
     item["source"] = item.get("source", default_source)
@@ -7129,7 +7190,7 @@ def universe_candidate_search(query: str, watched: set[str], limit: int = 8, exi
         result = universe_search_result(entry, watched)
         result["englishName"] = entry.get("englishName", "")
         result["themes"] = text_list(entry.get("themes", []), limit=6)
-        result["aliases"] = expanded_stock_aliases(symbol, text_list(entry.get("aliases", []), limit=12))
+        result["aliases"] = expanded_stock_aliases(symbol, [*text_list(entry.get("aliases", []), limit=24), *stock_search_auto_aliases(entry)])
         match = stock_search_match_info(query, result)
         if not match.get("matched"):
             continue

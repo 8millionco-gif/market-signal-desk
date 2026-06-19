@@ -3172,6 +3172,38 @@ function stockSearchSubtitle(item) {
   return parts.join(" · ") || "종목 검색 결과";
 }
 
+function stockSearchStatusText(payload) {
+  const status = payload?.status ?? {};
+  const masterCount = Number(status.searchMasterCount ?? 0);
+  const generatedCount = Number(status.generatedMasterCount ?? 0);
+  const storage = stockMasterStorageLabel(status.searchMasterStorage);
+  const sourceLabel =
+    status.source === "toss"
+      ? "토스 직접조회"
+      : status.source === "error"
+        ? "토스 조회 오류"
+        : status.source === "disabled"
+          ? "마스터 검색"
+          : "자동완성";
+  const parts = [
+    masterCount ? `마스터 ${masterCount}개` : "",
+    generatedCount ? `저장 ${generatedCount}개` : "",
+    status.searchMasterStorage ? storage : "",
+    sourceLabel
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function stockSearchEmptyMessage(payload) {
+  const query = state.query.trim();
+  const statusText = stockSearchStatusText(payload);
+  const base = payload.message || `${query} 검색 결과가 없습니다.`;
+  const help = statusText
+    ? `${statusText} 기준입니다. ETF나 해외 종목이 빠지면 설정에서 검색 마스터를 재생성하세요.`
+    : "삼성, 하이닉스, 엔비, AAPL처럼 종목명·별칭·코드로 입력하세요.";
+  return `${base} ${help}`;
+}
+
 function shouldSearchStocks(query) {
   const text = String(query ?? "").trim();
   if (!text) return false;
@@ -3259,6 +3291,7 @@ function renderStockSearchResults() {
   const stale = payload.query !== query;
   const loading = payload.loading || stale;
   const message = payload.message || payload.status?.message || "";
+  const statusText = stockSearchStatusText(payload);
   const activeIndex = items.length ? Math.min(Math.max(Number(payload.activeIndex ?? 0), 0), items.length - 1) : -1;
   els.stockSearchResults.hidden = false;
   els.stockSearchResults.innerHTML = `
@@ -3266,6 +3299,7 @@ function renderStockSearchResults() {
       <strong>종목 자동완성</strong>
       <span>${loading ? "조회 중" : items.length ? `${items.length}건` : "결과 없음"}</span>
     </div>
+    ${statusText ? `<div class="stock-search-status">${escapeHtml(statusText)}</div>` : ""}
     ${
       items.length
         ? `<div class="stock-search-list">
@@ -3287,7 +3321,7 @@ function renderStockSearchResults() {
               )
               .join("")}
           </div>`
-        : `<p>${escapeHtml(message || "삼성, 하이닉스, 엔비, AAPL처럼 입력하세요.")}</p>`
+        : `<p>${escapeHtml(loading ? "검색 마스터에서 종목을 찾고 있습니다." : stockSearchEmptyMessage(payload))}</p>`
     }
     ${message && items.length ? `<p>${escapeHtml(message)}</p>` : ""}
   `;

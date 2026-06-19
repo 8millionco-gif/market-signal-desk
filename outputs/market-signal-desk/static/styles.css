@@ -518,6 +518,17 @@ h3 {
   font-weight: 800;
 }
 
+.stock-search-status {
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(17, 21, 29, 0.72);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
 .stock-search-results p {
   margin: 0;
   color: var(--muted);
