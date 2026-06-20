@@ -5646,14 +5646,67 @@ def freshness_is_closed_market_baseline(freshness: dict | None) -> bool:
     return bool(freshness.get("isClosedBaseline") or session.get("isClosedOrPreopen"))
 
 
-def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at: str = "") -> dict:
+def first_present(*values):
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def normalize_candidate_live_price_fields(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return candidate
     item = dict(candidate)
+    live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+    if not live_price:
+        return item
+
+    raw_price = first_present(
+        live_price.get("lastPrice"),
+        live_price.get("price"),
+        live_price.get("currentPrice"),
+    )
+    currency = str(live_price.get("currency") or "").strip()
+    if raw_price is not None and raw_price != "":
+        raw_price_text = str(raw_price)
+        live_price["lastPrice"] = raw_price_text
+        live_price["price"] = raw_price_text
+        live_price["currentPrice"] = raw_price_text
+        if currency:
+            display = display_price(raw_price_text, currency)
+            item["price"] = display
+            item["displayPrice"] = display
+            live_price["displayPrice"] = display
+        elif not item.get("displayPrice") and item.get("price"):
+            item["displayPrice"] = item.get("price")
+            live_price["displayPrice"] = item.get("price")
+
+    change_display = first_present(live_price.get("changeDisplay"), item.get("change"))
+    if change_display not in {"", None}:
+        change_text = str(change_display)
+        item["change"] = change_text
+        live_price["changeDisplay"] = change_text
+    change_rate = first_present(live_price.get("changeRate"), item.get("changeRate"))
+    if change_rate not in {"", None}:
+        change_rate_text = str(change_rate)
+        item["changeRate"] = change_rate_text
+        live_price["changeRate"] = change_rate_text
+
+    basis = normalize_price_basis(live_price.get("basis"), str(item.get("market", "")), bool(live_price.get("retainedOnFailure")))
+    live_price["basis"] = basis
+    item["priceBasisKey"] = basis
+    item["livePrice"] = live_price
+    return item
+
+
+def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at: str = "") -> dict:
+    item = normalize_candidate_live_price_fields(dict(candidate))
     live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
     item["livePrice"] = {
         **live_price,
         "freshness": live_price_freshness(live_price, fallback_updated_at, str(item.get("market", ""))),
     }
-    return item
+    return normalize_candidate_live_price_fields(item)
 
 
 def candidate_has_fresh_live_price(candidate: dict) -> bool:
@@ -10737,7 +10790,7 @@ def candidate_public_next_action(candidate: dict) -> dict:
 def enrich_candidate_public_evidence_fields(candidate: dict) -> dict:
     if not isinstance(candidate, dict):
         return candidate
-    item = candidate
+    item = normalize_candidate_live_price_fields(candidate)
     if not isinstance(item.get("evidenceSummary"), dict):
         item["evidenceSummary"] = candidate_public_evidence_summary(item)
     if not isinstance(item.get("riskFlags"), list):
