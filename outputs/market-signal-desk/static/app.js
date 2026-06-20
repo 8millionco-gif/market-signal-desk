@@ -4103,9 +4103,11 @@ function renderStorageStatus() {
     ["다음", decisionReady && status.writable, nextText]
   ];
   const canMigrate = Boolean(database.urlConfigured && database.ready);
+  const canRetryDb = Boolean(database.urlConfigured);
   const actionMarkup = `
     <div class="storage-actions">
       <button type="button" data-storage-action="refresh">새로고침</button>
+      <button type="button" data-storage-action="db-retry" ${canRetryDb ? "" : "disabled"}>DB 재연결</button>
       <button type="button" data-storage-action="migrate" ${canMigrate ? "" : "disabled"}>DB 이관 실행</button>
     </div>
   `;
@@ -4128,6 +4130,9 @@ function renderStorageStatus() {
       const action = button.dataset.storageAction;
       if (action === "refresh") {
         await refreshStorageStatus();
+      }
+      if (action === "db-retry") {
+        await retryDatabaseConnection();
       }
       if (action === "migrate") {
         await runStorageMigration();
@@ -4346,6 +4351,33 @@ async function refreshStorageStatus() {
     state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 10000);
     state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 10000);
   } finally {
+    renderStorageStatus();
+    renderEvidenceStatus();
+  }
+}
+
+async function retryDatabaseConnection() {
+  const buttons = els.storageStatus?.querySelectorAll("[data-storage-action]") ?? [];
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  startActivity("DB 재연결 확인 중", "Postgres 연결 백오프를 초기화하고 스키마를 다시 확인합니다");
+  try {
+    const payload = await postJson("/api/storage/db-retry", {}, 30000);
+    state.storageStatus = payload.storage ?? await safeFetchJson("/api/storage/status?fresh=1", statusFallbacks().storage, 10000);
+    state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 10000);
+  } catch (error) {
+    const current = state.storageStatus ?? statusFallbacks().storage;
+    state.storageStatus = {
+      ...current,
+      database: {
+        ...(current.database ?? {}),
+        error: error?.name === "AbortError" ? "DB 재연결 응답 지연" : "DB 재연결 실패",
+        nextAction: "Render Postgres Available 상태와 Web Service 환경변수/재시작을 확인"
+      }
+    };
+  } finally {
+    finishActivity();
     renderStorageStatus();
     renderEvidenceStatus();
   }

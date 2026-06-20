@@ -1109,6 +1109,52 @@ def clear_storage_status_cache() -> None:
         STORAGE_STATUS_CACHE["expires_at"] = datetime.min.replace(tzinfo=timezone.utc)
 
 
+def reset_database_connection_state() -> tuple[dict, int]:
+    global DB_SCHEMA_READY, DB_SCHEMA_LAST_CHECKED_AT
+    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE
+    global DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
+    if not DATABASE_URL:
+        return {
+            "ok": False,
+            "error": "database-not-configured",
+            "message": "DATABASE_URL이 설정되어 있지 않습니다.",
+            "storage": snapshot_storage_status(fast=False),
+        }, 400
+    if not database_storage_enabled():
+        return {
+            "ok": False,
+            "error": "database-backend-disabled",
+            "message": "SIGNAL_STORAGE_BACKEND가 DB 사용 모드가 아닙니다.",
+            "storage": snapshot_storage_status(fast=False),
+        }, 400
+
+    close_db_shared_connection()
+    with DB_KV_READ_CACHE_LOCK:
+        DB_KV_READ_CACHE.clear()
+    DB_SCHEMA_READY = False
+    DB_SCHEMA_LAST_CHECKED_AT = ""
+    DB_LAST_ERROR = ""
+    DB_LAST_ERROR_AT = ""
+    DB_LAST_ERROR_TYPE = ""
+    DB_LAST_BACKOFF_MESSAGE = ""
+    DB_LAST_BACKOFF_AT = ""
+    DB_FAILURE_BACKOFF_UNTIL = 0.0
+    clear_storage_status_cache()
+
+    ready = ensure_database_schema()
+    storage = snapshot_storage_status(fast=False)
+    database = storage.get("database", {}) if isinstance(storage, dict) else {}
+    ok = bool(ready or database.get("ready") or storage.get("operationReady"))
+    payload = {
+        "ok": ok,
+        "ready": ok,
+        "message": "Postgres 연결을 다시 확인했습니다." if ok else "Postgres 연결 재시도에 실패했습니다.",
+        "database": database,
+        "storage": storage,
+    }
+    return payload, 200 if ok else 503
+
+
 def short_text(value: object, limit: int) -> str:
     text = str(value or "")
     limit = max(0, int(limit))
@@ -20138,6 +20184,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/stocks/master/refresh":
             self.send_json(refresh_stock_search_master(trigger="manual"))
+            return
+
+        if parsed.path == "/api/storage/db-retry":
+            payload, status = reset_database_connection_state()
+            self.send_json(payload, status)
             return
 
         if parsed.path == "/api/storage/migrate":
