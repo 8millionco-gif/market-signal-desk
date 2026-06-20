@@ -1827,7 +1827,7 @@ function evaluationModeForDisplay(item) {
 function reactionGateLabel(value) {
   if (value === "confirmed") return "반응 확인";
   if (value === "watch") return "관찰 지속";
-  if (value === "wait") return "반응 대기";
+  if (value === "wait") return "반응 보강";
   if (value === "blocked") return "반응 차단";
   return "가격 반응";
 }
@@ -2065,7 +2065,7 @@ function reactionStageForDisplay(item) {
   const missingFactors = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
   const gate = reaction.reactionGate || "";
 
-  let label = decision.label || reaction.decisionLabel || (closedBaseline ? "다음 장 관찰" : "가격 확인 필요");
+  let label = decision.label || reaction.decisionLabel || (closedBaseline ? "다음 장 관찰" : "데이터 보강 대기");
   let tone = decision.tone || "wait";
   let summary = decision.summary || reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
   const isBaseline = closedBaseline || evaluation.status === "baseline";
@@ -2095,9 +2095,9 @@ function reactionStageForDisplay(item) {
     tone = "buy";
     summary = reaction.nextCheck || "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
   } else if (!isBaseline && (reaction.entryBlock || gate === "wait")) {
-    label = "가격 확인 필요";
+    label = "데이터 보강 대기";
     tone = "wait";
-    summary = reaction.nextCheck || "실시간 가격·거래량·수급 중 부족한 조건을 확인한 뒤 판단합니다.";
+    summary = reaction.nextCheck || "서버 DB의 가격·거래량·수급 근거가 충분히 채워진 뒤 판단합니다.";
   } else if (!isBaseline && gate === "watch") {
     label = "관찰 유지";
     summary = reaction.nextCheck || "일부 반응은 있으나 진입 판단 전 가격 흐름을 더 확인합니다.";
@@ -2113,7 +2113,7 @@ function reactionStageForDisplay(item) {
         criterion.value || (criterion.ok ? "확인" : "대기")
       ])
     : [
-        ["실시간 가격", hasLivePrice, hasLivePrice ? livePriceLabel(item) : "토스 가격 대기"],
+        ["가격 기준", hasLivePrice || freshness.isBaseline || freshness.isSnapshot, hasLivePrice ? livePriceLabel(item) : freshness.isBaseline ? "장마감 기준가" : "DB 가격 보강"],
         ["가격 방향", hasPositivePrice, displayCandidateChangeText(item)],
         ["거래 반응", hasVolume, volumeReactionText(item)],
         ["확인 조건", confirmationCount >= requiredConfirmations, `${confirmationCount}/${requiredConfirmations}`]
@@ -2161,14 +2161,14 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
   }
   if (["wait", "watch"].includes(reactionDecision.key) && !reactionDecision.tradeAllowed && (decision.actionKey === "buy" || gate.key === "actionable")) {
-    return { key: "wait", label: reactionDecision.label || "반응 대기", detail: reactionDecision.summary || "가격·거래량 반응을 더 확인합니다." };
+    return { key: "wait", label: reactionDecision.label || "반응 보강", detail: reactionDecision.summary || "가격·거래량 반응을 더 확인합니다." };
   }
   if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
     if (freshness.isBaseline) {
       return { key: "wait", label: "장마감 기준가", detail: freshness.message || "장마감 기준가 분석입니다. 개장 후 가격·거래량 반응을 확인하세요." };
     }
     if (!freshness.isFresh) {
-      return { key: "wait", label: "가격 확인 필요", detail: freshness.message || "토스 현재가를 다시 확인한 뒤 진입 여부를 판단합니다." };
+      return { key: "wait", label: "가격 보강 대기", detail: freshness.message || "서버가 DB 가격 기준을 보강한 뒤 진입 여부를 판단합니다." };
     }
     return { key: "buy", label: "매수 가능", detail: plan.summary || "조건 충족 시 관찰 매수 후보입니다." };
   }
@@ -2343,7 +2343,7 @@ function dataReadinessPriority(item) {
     unavailable: 10
   }[key] ?? 8;
   const blockers = Array.isArray(evaluation.blockerReasons) ? evaluation.blockerReasons.join(" ") : "";
-  if (blockers.includes("가격 미수신")) priority += 3;
+  if (blockers.includes("가격 미수신") || blockers.includes("가격 저장값 없음") || blockers.includes("가격 보강")) priority += 3;
   if (blockers.includes("등락률")) priority += 1;
   if (blockers.includes("응답 없음")) priority += 1;
   if (blockers.includes("후보 제한")) priority += 1;
@@ -5917,8 +5917,8 @@ function tradeNowGuide(item, plan) {
     if (!freshness.isFresh) {
       return {
         tone: "wait",
-        title: "가격 확인 필요",
-        summary: freshness.message || "토스 현재가를 다시 확인한 뒤 매수 가능 여부를 판단합니다.",
+        title: "가격 보강 대기",
+        summary: freshness.message || "서버가 DB 가격 기준을 보강한 뒤 매수 가능 여부를 판단합니다.",
         current,
         focus: entry
       };

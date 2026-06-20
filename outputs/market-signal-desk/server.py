@@ -2253,6 +2253,17 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
         "basisCounts": basis_counts,
+        "basisCoverage": {
+            "live": basis_counts.get("live", 0),
+            "closedBaseline": basis_counts.get("closed_baseline", 0),
+            "lastGood": basis_counts.get("last_good", 0),
+            "unknown": basis_counts.get("unknown", 0),
+            "usable": basis_counts.get("live", 0) + basis_counts.get("closed_baseline", 0),
+            "retained": basis_counts.get("last_good", 0),
+        },
+        "unknownBasisCount": basis_counts.get("unknown", 0),
+        "usablePriceCount": basis_counts.get("live", 0) + basis_counts.get("closed_baseline", 0),
+        "actionableLivePriceCount": basis_counts.get("live", 0),
         "bySource": summary.get("bySource", {}),
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
@@ -6859,13 +6870,13 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
         if price_source == "toss" and freshness_status in {"delayed", "stale", "unknown"}:
             reasons.append(f"가격 {freshness.get('label', '지연')}")
         elif price_source == "missing" or freshness_status == "missing":
-            reasons.append("가격 미수신")
+            reasons.append("가격 저장값 없음")
         elif price_source == "sample":
             reasons.append("가격 대체값")
         elif not price_source:
             reasons.append("가격 저장값 없음")
         else:
-            reasons.append("가격 확인 필요")
+            reasons.append("가격 보강 필요")
     elif freshness_status == "closed-baseline" or closed_market_baseline:
         reasons.append("장마감 기준가")
     elif freshness_status in {"delayed", "stale", "unknown"} and not closed_market_baseline:
@@ -6878,7 +6889,7 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
         elif change_source:
             reasons.append("등락률 보강 필요")
         else:
-            reasons.append("등락률 미수신")
+            reasons.append("등락률 보강 필요")
 
     if not completeness.get("materialOk"):
         reasons.append("뉴스/공시 부족")
@@ -8992,7 +9003,7 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     else:
         reaction_decision = {
             "key": "wait",
-            "label": "반응 대기",
+            "label": "반응 보강",
             "tone": "wait",
             "action": "진입 보류",
             "summary": next_check,
@@ -10229,7 +10240,7 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     if price_confirmed:
         reasons.append(f"가격 반응 {reaction_score}/100")
     else:
-        blockers.append("가격·거래량 반응 확인 필요")
+        blockers.append("가격·거래량 반응 보강 필요")
     if confidence_score >= 60:
         reasons.append(f"데이터 신뢰도 {confidence_score}/100")
     else:
@@ -10258,7 +10269,7 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
         key, label, priority = "confirmed", "근거+가격 확인", 1
         reasons.append("투자 근거와 시장 반응이 함께 확인")
     elif has_material_evidence and price_weak:
-        key, label, priority = "evidence_wait", "재료 후 반응 대기", 2
+        key, label, priority = "evidence_wait", "재료 후 반응 보강", 2
         blockers.append("뉴스·공시 대비 자금 반응이 약함")
     elif not has_material_evidence and price_confirmed:
         key, label, priority = "reaction_only", "가격 선행 확인", 2
@@ -11306,7 +11317,7 @@ def candidate_pool_monitor_profile(record: dict) -> dict:
         label = "다음 장 관찰"
         reason = "장마감 기준가와 전일 등락률 기준으로 유지하고 장 시작 후 가격·거래량 반응 확인"
     elif evidence >= 65 and reaction_gate != "confirmed":
-        label = "반응 대기"
+        label = "반응 보강"
         reason = "근거는 있으나 가격·거래량 반응 확인 전"
     elif reaction_gate == "confirmed" and evidence < 60:
         label = "근거 보강"
@@ -11480,22 +11491,22 @@ def candidate_prefetch_gap_profile(
         reasons.append("후보 저장값 없음")
         gap_score += 34
     if not has_price:
-        reasons.append("가격 미수신")
+        reasons.append("가격 저장값 없음")
         gap_score += 42
     if not has_change:
-        reasons.append("등락률 미수신")
+        reasons.append("등락률 보강 필요")
         gap_score += 30
     if not has_candles:
-        reasons.append("차트 미수신")
+        reasons.append("차트 보강 필요")
         gap_score += 14
     if not has_orderbook:
-        reasons.append("호가 미수신")
+        reasons.append("호가 보강 필요")
         gap_score += 12
     if not has_trades:
-        reasons.append("체결 미수신")
+        reasons.append("체결 보강 필요")
         gap_score += 12
     if not has_depth:
-        reasons.append("가격 반응 미확인")
+        reasons.append("가격 반응 보강 필요")
         gap_score += 12
 
     display_ready = bool(latest_completeness.get("displayReady"))
@@ -15144,7 +15155,7 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         elif isinstance(readiness, dict) and isinstance(readiness.get("blockerReasons"), list):
             blockers = [str(value) for value in readiness.get("blockerReasons", [])]
         blocker_text = " ".join(blockers)
-        if "가격 미수신" in blocker_text:
+        if "가격 미수신" in blocker_text or "가격 저장값 없음" in blocker_text or "가격 보강" in blocker_text:
             base -= 24
         if "등락률" in blocker_text:
             base -= 12
@@ -16651,6 +16662,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     stored_candidate_count = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
     stored_price_count = bounded_int(market_data.get("priceCount", 0), 0, 1_000_000)
     stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
+    basis_counts = market_data.get("basisCounts", {}) if isinstance(market_data.get("basisCounts"), dict) else {}
+    basis_coverage = market_data.get("basisCoverage", {}) if isinstance(market_data.get("basisCoverage"), dict) else {}
     missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
     price_coverage = (
         min(1, round(stored_price_count / stored_candidate_count, 4))
@@ -16706,6 +16719,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "priceCoveragePercent": display_percent_abs(Decimal(str(price_coverage * 100))) if stored_candidate_count > 0 else "0%",
             "staleCandidateCount": stale_price_count,
             "stalePriceCount": stale_price_count,
+            "basisCounts": basis_counts,
+            "basisCoverage": basis_coverage,
+            "livePriceCount": bounded_int(basis_counts.get("live", 0), 0, 1_000_000),
+            "closedBaselinePriceCount": bounded_int(market_data.get("closedBaselinePriceCount", basis_counts.get("closed_baseline", 0)), 0, 1_000_000),
+            "lastGoodPriceCount": bounded_int(market_data.get("lastGoodPriceCount", basis_counts.get("last_good", 0)), 0, 1_000_000),
+            "unknownBasisCount": bounded_int(market_data.get("unknownBasisCount", basis_counts.get("unknown", 0)), 0, 1_000_000),
+            "usablePriceCount": bounded_int(market_data.get("usablePriceCount", basis_coverage.get("usable", 0)), 0, 1_000_000),
+            "actionableLivePriceCount": bounded_int(market_data.get("actionableLivePriceCount", basis_counts.get("live", 0)), 0, 1_000_000),
             "stalePriceRatio": stale_price_ratio,
             "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
             "missingPriceTimestampCount": missing_price_count,
@@ -16764,6 +16785,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "priceCoveragePercent": display_percent_abs(Decimal(str(price_coverage * 100))) if stored_candidate_count > 0 else "0%",
         "staleCandidateCount": stale_price_count,
         "stalePriceCount": stale_price_count,
+        "basisCounts": basis_counts,
+        "basisCoverage": basis_coverage,
+        "livePriceCount": bounded_int(basis_counts.get("live", 0), 0, 1_000_000),
+        "closedBaselinePriceCount": bounded_int(market_data.get("closedBaselinePriceCount", basis_counts.get("closed_baseline", 0)), 0, 1_000_000),
+        "lastGoodPriceCount": bounded_int(market_data.get("lastGoodPriceCount", basis_counts.get("last_good", 0)), 0, 1_000_000),
+        "unknownBasisCount": bounded_int(market_data.get("unknownBasisCount", basis_counts.get("unknown", 0)), 0, 1_000_000),
+        "usablePriceCount": bounded_int(market_data.get("usablePriceCount", basis_coverage.get("usable", 0)), 0, 1_000_000),
+        "actionableLivePriceCount": bounded_int(market_data.get("actionableLivePriceCount", basis_counts.get("live", 0)), 0, 1_000_000),
         "stalePriceRatio": stale_price_ratio,
         "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
         "missingPriceTimestampCount": missing_price_count,
