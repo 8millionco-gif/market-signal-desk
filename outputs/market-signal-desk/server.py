@@ -539,6 +539,15 @@ def database_retry_seconds() -> int:
     return max(0, int(DB_FAILURE_BACKOFF_UNTIL - time.time() + 0.999))
 
 
+def database_backoff_active() -> bool:
+    return database_retry_seconds() > 0
+
+
+def maybe_migrate_files_to_database_once() -> None:
+    if SIGNAL_DB_AUTO_MIGRATE and not DB_MIGRATION_DONE and not DB_MIGRATION_STATUS.get("ran"):
+        migrate_files_to_database()
+
+
 def database_url_diagnostics() -> dict:
     if not DATABASE_URL:
         return {
@@ -726,8 +735,11 @@ def ensure_database_schema() -> bool:
     DB_SCHEMA_LAST_CHECKED_AT = db_diag_now()
     if not database_storage_enabled():
         return False
+    if database_backoff_active():
+        set_db_error(f"database temporarily unavailable; retry in {database_retry_seconds()}s")
+        return False
     if DB_SCHEMA_READY:
-        migrate_files_to_database()
+        maybe_migrate_files_to_database_once()
         return True
     with DB_LOCK:
         if DB_SCHEMA_READY:
@@ -735,7 +747,7 @@ def ensure_database_schema() -> bool:
         else:
             schema_ready = False
         if schema_ready:
-            migrate_files_to_database()
+            maybe_migrate_files_to_database_once()
             return True
         try:
             psycopg, _jsonb = psycopg_modules()
@@ -852,7 +864,7 @@ def ensure_database_schema() -> bool:
         except Exception as error:
             set_db_error(error)
             return False
-    migrate_files_to_database()
+    maybe_migrate_files_to_database_once()
     return True
 
 
