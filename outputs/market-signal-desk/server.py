@@ -652,6 +652,9 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "ran": False,
             "candidatePool": "disabled",
             "candidateData": "disabled",
+            "marketData": "disabled",
+            "newsEventsLatest": "disabled",
+            "newsEventsInserted": 0,
             "discoveryLatest": "disabled",
             "error": "",
         }
@@ -677,6 +680,9 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "ran": True,
             "candidatePool": "missing",
             "candidateData": "missing",
+            "marketData": "missing",
+            "newsEventsLatest": "missing",
+            "newsEventsInserted": 0,
             "discoveryLatest": "missing",
             "snapshotsInserted": 0,
             "snapshotsScanned": 0,
@@ -687,6 +693,8 @@ def migrate_files_to_database(force: bool = False) -> dict:
             psycopg, Jsonb = psycopg_modules()
             candidate_pool = safe_read_json_file(CANDIDATE_POOL_FILE)
             candidate_data = safe_read_json_file(CANDIDATE_DATA_FILE)
+            market_latest = safe_read_json_file(MARKET_DATA_LATEST_FILE)
+            news_latest = safe_read_json_file(NEWS_EVENTS_FILE)
             discovery_latest = safe_read_json_file(DISCOVERY_LATEST_FILE)
             run_paths = []
             if RUNS_DIR.exists() and SIGNAL_DB_MIGRATE_RUN_LIMIT != 0:
@@ -696,31 +704,76 @@ def migrate_files_to_database(force: bool = False) -> dict:
                     run_paths = run_paths[:limit]
             with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
-                    if isinstance(candidate_pool, dict) and candidate_pool.get("items"):
-                        cur.execute(
-                            """
-                            INSERT INTO signal_kv (key, payload, updated_at)
-                            VALUES ('candidate_pool', %s, NOW())
-                            ON CONFLICT (key) DO NOTHING
-                            """,
-                            (Jsonb(candidate_pool),),
-                        )
-                        status["candidatePool"] = "inserted" if cur.rowcount else "already-present"
-                    elif isinstance(candidate_pool, dict):
-                        status["candidatePool"] = "empty"
+                    def upsert_file_kv_if_db_empty(key: str, payload: object, status_key: str, item_key: str = "items") -> None:
+                        if isinstance(payload, dict) and payload_item_count(payload, item_key) > 0:
+                            cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (key,))
+                            row = cur.fetchone()
+                            existing = normalize_db_payload(row[0], {}) if row else {}
+                            if row and payload_item_count(existing, item_key) > 0:
+                                status[status_key] = "already-present"
+                                return
+                            cur.execute(
+                                """
+                                INSERT INTO signal_kv (key, payload, updated_at)
+                                VALUES (%s, %s, NOW())
+                                ON CONFLICT (key)
+                                DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+                                """,
+                                (key, Jsonb(payload)),
+                            )
+                            status[status_key] = "inserted" if not row else "replaced-empty"
+                        elif isinstance(payload, dict):
+                            status[status_key] = "empty"
 
-                    if isinstance(candidate_data, dict) and candidate_data.get("items"):
-                        cur.execute(
-                            """
-                            INSERT INTO signal_kv (key, payload, updated_at)
-                            VALUES (%s, %s, NOW())
-                            ON CONFLICT (key) DO NOTHING
-                            """,
-                            (CANDIDATE_DATA_KV_KEY, Jsonb(candidate_data)),
-                        )
-                        status["candidateData"] = "inserted" if cur.rowcount else "already-present"
-                    elif isinstance(candidate_data, dict):
-                        status["candidateData"] = "empty"
+                    upsert_file_kv_if_db_empty("candidate_pool", candidate_pool, "candidatePool")
+                    upsert_file_kv_if_db_empty(CANDIDATE_DATA_KV_KEY, candidate_data, "candidateData")
+                    upsert_file_kv_if_db_empty(MARKET_DATA_LATEST_KV_KEY, market_latest, "marketData")
+                    upsert_file_kv_if_db_empty(NEWS_EVENTS_KV_KEY, news_latest, "newsEventsLatest")
+
+                    news_events_inserted = 0
+                    if isinstance(news_latest, dict) and isinstance(news_latest.get("items"), dict):
+                        for event in news_latest.get("items", {}).values():
+                            if not isinstance(event, dict) or not event.get("id") or not event.get("provider"):
+                                continue
+                            published_at = str(event.get("publishedAt", "")).strip() or None
+                            cur.execute(
+                                """
+                                INSERT INTO signal_news_events (
+                                    id, provider, symbol, query, title, summary, url, source_host,
+                                    published_at, collected_at, relevance, payload, updated_at
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                ON CONFLICT (id)
+                                DO UPDATE SET
+                                    symbol = EXCLUDED.symbol,
+                                    query = EXCLUDED.query,
+                                    title = EXCLUDED.title,
+                                    summary = EXCLUDED.summary,
+                                    url = EXCLUDED.url,
+                                    source_host = EXCLUDED.source_host,
+                                    published_at = EXCLUDED.published_at,
+                                    collected_at = EXCLUDED.collected_at,
+                                    relevance = EXCLUDED.relevance,
+                                    payload = EXCLUDED.payload,
+                                    updated_at = NOW()
+                                """,
+                                (
+                                    event.get("id"),
+                                    event.get("provider"),
+                                    event.get("symbol", ""),
+                                    event.get("query", ""),
+                                    event.get("title", ""),
+                                    event.get("summary", ""),
+                                    event.get("url", ""),
+                                    event.get("sourceHost", ""),
+                                    published_at,
+                                    event.get("collectedAt") or datetime.now(KST).isoformat(timespec="seconds"),
+                                    Jsonb(event.get("relevance", {})),
+                                    Jsonb(event.get("payload", {})),
+                                ),
+                            )
+                            news_events_inserted += max(0, cur.rowcount)
+                    status["newsEventsInserted"] = news_events_inserted
 
                     if isinstance(discovery_latest, dict) and discovery_latest:
                         cur.execute(
@@ -863,10 +916,16 @@ def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items") ->
     db_ready = bool(db_enabled and ensure_database_schema())
     db_payload = db_read_kv(key, None) if db_ready else None
     file_payload = safe_read_json_file(file_path)
-    if isinstance(db_payload, dict):
+    db_item_count = payload_item_count(db_payload, item_key)
+    file_item_count = payload_item_count(file_payload, item_key)
+    if isinstance(db_payload, dict) and db_item_count > 0:
         read_source = "postgres"
-    elif isinstance(file_payload, dict):
+    elif isinstance(file_payload, dict) and file_item_count > 0:
         read_source = "filesystem"
+    elif isinstance(db_payload, dict):
+        read_source = "postgres-empty"
+    elif isinstance(file_payload, dict):
+        read_source = "filesystem-empty"
     else:
         read_source = "empty"
     file_exists = file_path.exists()
@@ -876,12 +935,36 @@ def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items") ->
         "databaseEnabled": db_enabled,
         "databaseReady": db_ready,
         "databaseError": DB_LAST_ERROR,
-        "dbItemCount": payload_item_count(db_payload, item_key),
-        "fileItemCount": payload_item_count(file_payload, item_key),
+        "dbItemCount": db_item_count,
+        "fileItemCount": file_item_count,
         "fileExists": file_exists,
         "writeFallback": bool(db_enabled and read_source != "postgres"),
         "readable": read_source != "empty",
     }
+
+
+def preferred_kv_payload(
+    key: str,
+    file_path: Path,
+    empty_factory,
+    item_key: str = "items",
+    promote_file_when_db_empty: bool = True,
+) -> dict:
+    stored = db_read_kv(key, None) if database_storage_enabled() else None
+    file_payload = safe_read_json_file(file_path)
+    if payload_item_count(stored, item_key) > 0:
+        data = stored
+    elif payload_item_count(file_payload, item_key) > 0:
+        data = file_payload
+        if promote_file_when_db_empty and database_storage_enabled():
+            db_write_kv(key, live_state_json_safe(file_payload))
+    elif isinstance(stored, dict):
+        data = stored
+    elif isinstance(file_payload, dict):
+        data = file_payload
+    else:
+        data = empty_factory()
+    return data if isinstance(data, dict) else empty_factory()
 
 
 def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
@@ -1037,9 +1120,11 @@ def market_data_latest_empty() -> dict:
 def market_data_latest_data() -> dict:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return market_data_latest_empty()
-    stored = db_read_kv(MARKET_DATA_LATEST_KV_KEY, None) if database_storage_enabled() else None
-    file_data = safe_read_json_file(MARKET_DATA_LATEST_FILE)
-    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else market_data_latest_empty()
+    data = preferred_kv_payload(
+        MARKET_DATA_LATEST_KV_KEY,
+        MARKET_DATA_LATEST_FILE,
+        market_data_latest_empty,
+    )
     if not isinstance(data, dict):
         return market_data_latest_empty()
     if not isinstance(data.get("items"), dict):
@@ -1982,9 +2067,11 @@ def news_events_latest_empty() -> dict:
 
 
 def news_events_latest_data() -> dict:
-    stored = db_read_kv(NEWS_EVENTS_KV_KEY, None) if database_storage_enabled() else None
-    file_data = safe_read_json_file(NEWS_EVENTS_FILE)
-    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else news_events_latest_empty()
+    data = preferred_kv_payload(
+        NEWS_EVENTS_KV_KEY,
+        NEWS_EVENTS_FILE,
+        news_events_latest_empty,
+    )
     if not isinstance(data, dict):
         return news_events_latest_empty()
     if not isinstance(data.get("items"), dict):
@@ -5236,9 +5323,11 @@ def candidate_data_snapshot_empty() -> dict:
 def candidate_data_snapshot_data() -> dict:
     if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
         return candidate_data_snapshot_empty()
-    stored = db_read_kv(CANDIDATE_DATA_KV_KEY, None) if database_storage_enabled() else None
-    file_data = safe_read_json_file(CANDIDATE_DATA_FILE)
-    data = stored if isinstance(stored, dict) else file_data if isinstance(file_data, dict) else candidate_data_snapshot_empty()
+    data = preferred_kv_payload(
+        CANDIDATE_DATA_KV_KEY,
+        CANDIDATE_DATA_FILE,
+        candidate_data_snapshot_empty,
+    )
     if not isinstance(data, dict):
         return candidate_data_snapshot_empty()
     if not isinstance(data.get("items"), dict):
@@ -9202,8 +9291,11 @@ def candidate_pool_empty() -> dict:
 
 
 def candidate_pool_data() -> dict:
-    stored = db_read_kv("candidate_pool", None) if database_storage_enabled() else None
-    data = stored if isinstance(stored, dict) else read_json(CANDIDATE_POOL_FILE, candidate_pool_empty())
+    data = preferred_kv_payload(
+        "candidate_pool",
+        CANDIDATE_POOL_FILE,
+        candidate_pool_empty,
+    )
     if not isinstance(data, dict):
         return candidate_pool_empty()
     if not isinstance(data.get("items"), dict):
@@ -9820,6 +9912,7 @@ def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
     data = candidate_pool_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     records = []
+    fallback_records = []
     keep_states = {"entry_candidate", "pullback_wait", "portfolio", "validating", "watching"}
     for record in items.values():
         if not isinstance(record, dict):
@@ -9831,15 +9924,19 @@ def candidate_pool_retainable_records(limit: int | None = None) -> list[dict]:
         retain_score = candidate_pool_selection_score(record)
         monitor = candidate_pool_monitor_profile(record)
         monitor_score = bounded_int(monitor.get("monitorScore", 0), 0, 100)
-        if max(retain_score, monitor_score) < SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and state_key not in keep_states:
-            continue
         item = dict(record)
         item["symbol"] = symbol
         item["retainScore"] = retain_score
         item["monitorScore"] = monitor_score
         item["monitorLabel"] = monitor.get("monitorLabel", item.get("monitorLabel", ""))
         item["monitorReason"] = monitor.get("monitorReason", item.get("monitorReason", ""))
+        if max(retain_score, monitor_score) < SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and state_key not in keep_states:
+            item["poolFallback"] = True
+            fallback_records.append(item)
+            continue
         records.append(item)
+    if not records and fallback_records:
+        records = fallback_records
     records.sort(
         key=lambda item: (
             bounded_int(item.get("monitorScore", 0), 0, 100),
@@ -15017,7 +15114,8 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
     if not raw_candidates:
         return None
 
-    market = copy.deepcopy(data.get("market", {}))
+    market, index_status = enrich_market_with_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_fx(market)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15053,18 +15151,8 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
         "selected": candidates[0] if candidates else None,
         "statuses": {
             **defaults,
-            "index": {
-                "source": "stored",
-                "enabled": False,
-                "message": "저장 후보 조회에서는 지수 실시간 조회를 생략했습니다.",
-                "updatedAt": now_text,
-            },
-            "fx": {
-                "source": "stored",
-                "enabled": False,
-                "message": "저장 후보 조회에서는 환율 실시간 조회를 생략했습니다.",
-                "updatedAt": now_text,
-            },
+            "index": index_status,
+            "fx": fx_status,
             "discovery": discovery_status,
             "selection": selection_status,
             "candidate_pool": pool_status,
@@ -15148,7 +15236,8 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     if not raw_candidates:
         return None
 
-    market = copy.deepcopy(data.get("market", {}))
+    market, index_status = enrich_market_with_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_fx(market)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15184,18 +15273,8 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
         "selected": candidates[0] if candidates else None,
         "statuses": {
             **defaults,
-            "index": {
-                "source": "stored",
-                "enabled": False,
-                "message": "저장 후보 조회에서는 지수 실시간 조회를 생략했습니다.",
-                "updatedAt": now_text,
-            },
-            "fx": {
-                "source": "stored",
-                "enabled": False,
-                "message": "저장 후보 조회에서는 환율 실시간 조회를 생략했습니다.",
-                "updatedAt": now_text,
-            },
+            "index": index_status,
+            "fx": fx_status,
             "discovery": discovery_status,
             "selection": selection_status,
             "candidate_pool": pool_status,
