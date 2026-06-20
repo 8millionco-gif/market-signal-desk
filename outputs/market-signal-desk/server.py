@@ -13,6 +13,7 @@ import time
 import zipfile
 import importlib
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
@@ -54,6 +55,8 @@ SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2
 SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
+SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DB_CONNECTION_TTL_SECONDS = max(10, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "120") or "120"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
@@ -380,6 +383,7 @@ DB_KV_READ_CACHE_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
+DB_CONNECTION_LOCK = threading.RLock()
 RAW_EVENT_LOCK = threading.Lock()
 MARKET_DATA_LOCK = threading.Lock()
 LIVE_STATE_LOCK = threading.Lock()
@@ -399,6 +403,8 @@ DB_LAST_SUCCESS_AT = ""
 DB_SCHEMA_LAST_CHECKED_AT = ""
 DB_FAILURE_BACKOFF_UNTIL = 0.0
 DB_PAYLOAD_UNSET = object()
+DB_SHARED_CONNECTION = None
+DB_SHARED_CONNECTION_CREATED_AT = 0.0
 DB_MIGRATION_STATUS: dict[str, object] = {
     "enabled": SIGNAL_DB_AUTO_MIGRATE,
     "done": False,
@@ -622,8 +628,88 @@ def db_connect_with_retry():
     raise RuntimeError("database connection failed")
 
 
+def db_connection_closed(conn) -> bool:
+    if conn is None:
+        return True
+    try:
+        return bool(getattr(conn, "closed", False))
+    except Exception:
+        return True
+
+
+def close_db_shared_connection(conn=None) -> None:
+    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT
+    target = conn if conn is not None else DB_SHARED_CONNECTION
+    if target is not None:
+        try:
+            target.close()
+        except Exception:
+            pass
+    if conn is None or conn is DB_SHARED_CONNECTION:
+        DB_SHARED_CONNECTION = None
+        DB_SHARED_CONNECTION_CREATED_AT = 0.0
+
+
+def db_reusable_connection():
+    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT
+    if (
+        DB_SHARED_CONNECTION is not None
+        and not db_connection_closed(DB_SHARED_CONNECTION)
+        and (time.time() - DB_SHARED_CONNECTION_CREATED_AT) <= SIGNAL_DB_CONNECTION_TTL_SECONDS
+    ):
+        return DB_SHARED_CONNECTION
+    close_db_shared_connection()
+    _psycopg, _jsonb, conn = db_connect_with_retry()
+    DB_SHARED_CONNECTION = conn
+    DB_SHARED_CONNECTION_CREATED_AT = time.time()
+    return conn
+
+
+def db_connection_reuse_status() -> dict:
+    age_seconds = int(time.time() - DB_SHARED_CONNECTION_CREATED_AT) if DB_SHARED_CONNECTION_CREATED_AT else 0
+    return {
+        "enabled": SIGNAL_DB_REUSE_CONNECTION,
+        "ttlSeconds": SIGNAL_DB_CONNECTION_TTL_SECONDS,
+        "hasConnection": DB_SHARED_CONNECTION is not None and not db_connection_closed(DB_SHARED_CONNECTION),
+        "ageSeconds": age_seconds,
+        "message": "짧은 DB 작업은 재사용 커넥션으로 직렬화해 Render Postgres 연결 폭주를 줄입니다.",
+    }
+
+
+@contextmanager
 def db_connection():
-    return db_connect_with_retry()[2]
+    if not SIGNAL_DB_REUSE_CONNECTION:
+        _psycopg, _jsonb, conn = db_connect_with_retry()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return
+
+    with DB_CONNECTION_LOCK:
+        conn = None
+        try:
+            conn = db_reusable_connection()
+            yield conn
+            conn.commit()
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                close_db_shared_connection(conn)
+            raise
 
 
 def safe_read_json_file(path: Path):
@@ -3375,6 +3461,7 @@ def database_status(fast: bool = False) -> dict:
         "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
+        "connectionReuse": db_connection_reuse_status(),
         "kvReadCache": db_kv_read_cache_status(),
         "checks": {
             "databaseUrlConfigured": bool(DATABASE_URL),
