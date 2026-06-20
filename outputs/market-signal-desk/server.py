@@ -1582,6 +1582,27 @@ def candidate_market_data_latest_record(
     )
 
 
+def normalize_price_basis(value: object, market: str = "", retained: bool = False) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    if raw in {"live", "closed_baseline", "last_good"}:
+        return raw
+    if raw in {"closed", "close", "baseline", "snapshot_baseline", "closedbaseline"}:
+        return "closed_baseline"
+    if raw in {"lastgood", "retained", "retained_failure", "retained_on_failure"}:
+        return "last_good"
+    if retained:
+        return "last_good"
+    session = market_session_context(market)
+    return "closed_baseline" if session.get("isClosedOrPreopen") else "live"
+
+
+def price_basis_is_stale(basis: str, retained: bool = False, explicit_stale: bool = False) -> bool:
+    normalized = normalize_price_basis(basis, retained=retained)
+    if normalized == "closed_baseline":
+        return False
+    return bool(retained or explicit_stale or normalized == "last_good")
+
+
 def update_market_data_latest_from_candidates(candidates: list[dict], mode: str = "", stage: str = "selected") -> dict:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return {"enabled": False, "stored": False, "storage": "disabled", "updatedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
@@ -1625,16 +1646,14 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
         if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice") and live_price.get("currency"):
             timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or candidate.get("updated") or now_text)
-            session = market_session_context(str(candidate.get("market", "")))
             retained_on_failure = bool(
                 live_price.get("retainedOnFailure")
                 or live_price.get("missedInLastFetch")
                 or live_price.get("stale")
                 or str(live_price.get("basis", "")).strip() == "last_good"
             )
-            basis = "last_good" if retained_on_failure else str(
-                live_price.get("basis") or ("closed_baseline" if session.get("isClosedOrPreopen") else "live")
-            )
+            basis = normalize_price_basis(live_price.get("basis"), str(candidate.get("market", "")), retained_on_failure)
+            row_stale = price_basis_is_stale(basis, retained_on_failure, bool(live_price.get("stale")))
             volume_value = None
             for volume_key in (
                 "volume",
@@ -1660,7 +1679,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 "basis": basis,
                 "dataSource": str(live_price.get("dataSource") or "candidate-final"),
                 "retained": bool(live_price.get("retained")),
-                "stale": retained_on_failure,
+                "stale": row_stale,
                 "retainedOnFailure": retained_on_failure,
                 "dataCompleteness": completeness_row,
             }
@@ -1688,7 +1707,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 **base_metadata,
                 "eventType": "prices",
                 "retained": bool(live_price.get("retained")),
-                "stale": retained_on_failure,
+                "stale": row_stale,
                 "retainedOnFailure": retained_on_failure,
                 "basis": basis,
                 "lastGoodAt": row.get("lastGoodAt", ""),
@@ -1918,6 +1937,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
     stale_price_count = 0
     retained_price_count = 0
     last_good_price_count = 0
+    closed_baseline_price_count = 0
     missing_price_timestamp_count = 0
     missing_field_counts: dict[str, int] = {}
     basis_counts: dict[str, int] = {}
@@ -1925,9 +1945,10 @@ def market_data_latest_status(fast: bool = False) -> dict:
     for item in price_items:
         row = market_data_record_payload_row(item)
         item_metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
-        basis = str(row.get("basis") or item.get("basis") or item_metadata.get("basis") or "").strip()
-        if not basis:
-            basis = "unknown"
+        retained_flag = bool(item.get("retainedOnFailure") or row.get("retainedOnFailure"))
+        explicit_stale = bool(item.get("stale") or row.get("stale"))
+        raw_basis = row.get("basis") or item.get("basis") or item_metadata.get("basis")
+        basis = normalize_price_basis(raw_basis, str(row.get("market") or item.get("market") or ""), retained_flag)
         basis_counts[basis] = basis_counts.get(basis, 0) + 1
         row_missing = row.get("missingFields") if isinstance(row, dict) else []
         item_missing = item.get("missingFields") if isinstance(item.get("missingFields"), list) else []
@@ -1937,7 +1958,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         )
         for field in missing_fields:
             missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
-        if bool(item.get("stale") or row.get("stale") or item.get("retainedOnFailure") or row.get("retainedOnFailure")):
+        if price_basis_is_stale(basis, retained_flag, explicit_stale):
             retained_price_count += 1
             stale_price_count += 1
             last_good_at = str(row.get("lastGoodAt") or item.get("lastGoodAt") or row.get("timestamp") or item.get("collectedAt") or "").strip()
@@ -1949,6 +1970,9 @@ def market_data_latest_status(fast: bool = False) -> dict:
         timestamp = str(row.get("updatedAt") or row.get("timestamp") or item.get("updatedAt") or item.get("collectedAt") or "").strip()
         if timestamp and (not latest_price_at or timestamp > latest_price_at):
             latest_price_at = timestamp
+        if basis == "closed_baseline":
+            closed_baseline_price_count += 1
+            continue
         age_seconds = seconds_since_timestamp(timestamp)
         if age_seconds is None:
             missing_price_timestamp_count += 1
@@ -1998,6 +2022,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "stalePriceCount": stale_price_count,
         "retainedPriceCount": retained_price_count,
         "lastGoodPriceCount": last_good_price_count,
+        "closedBaselinePriceCount": closed_baseline_price_count,
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
         "basisCounts": basis_counts,
@@ -2005,7 +2030,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
         "latestPriceAt": latest_price_at,
-        "lastStorage": MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
+        "lastStorage": "postgres" if persistent else MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
         "lastUpdatedAt": MARKET_DATA_LATEST_STATE.get("lastUpdatedAt", ""),
         "message": message,
     }
@@ -2078,6 +2103,16 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
     if last_price in {"", None} or not currency:
         return None
     updated_at = str(record.get("updatedAt") or record.get("collectedAt") or fallback_updated_at)
+    retained_flag = bool(row.get("retainedOnFailure") or record.get("retainedOnFailure"))
+    explicit_stale = bool(row.get("stale") or record.get("stale"))
+    basis = normalize_price_basis(row.get("basis") or record.get("basis"), market, retained_flag)
+    is_stale = price_basis_is_stale(basis, retained_flag, explicit_stale)
+    if basis == "closed_baseline":
+        message = "서버 DB에 저장된 장마감 기준가를 후보 판단에 반영했습니다."
+    elif basis == "last_good":
+        message = "서버 DB의 마지막 정상 토스 현재가를 후보 판단에 유지 반영했습니다."
+    else:
+        message = "서버 DB에 저장된 최신 토스 현재가를 후보 판단에 반영했습니다."
     live_price = {
         "lastPrice": str(last_price),
         "currency": str(currency),
@@ -2086,19 +2121,15 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
         "source": "toss",
         "dataSource": "market_data_latest",
         "retained": True,
-        "message": "서버 DB에 저장된 최신 토스 현재가를 후보 판단에 반영했습니다.",
+        "basis": basis,
+        "stale": is_stale,
+        "message": message,
     }
-    if bool(row.get("stale") or record.get("stale")):
-        live_price["stale"] = True
-    if bool(row.get("retainedOnFailure") or record.get("retainedOnFailure")):
+    if retained_flag:
         live_price["retainedOnFailure"] = True
-        live_price["basis"] = "last_good"
-        live_price["message"] = "서버 DB의 마지막 정상 토스 현재가를 후보 판단에 유지 반영했습니다."
     missing_fields = row.get("missingFields") or record.get("missingFields")
     if isinstance(missing_fields, list):
         live_price["missingFields"] = missing_fields
-    if row.get("basis"):
-        live_price["basis"] = str(row.get("basis"))
     if row.get("lastGoodAt"):
         live_price["lastGoodAt"] = str(row.get("lastGoodAt"))
     if row.get("volume") not in {None, ""}:
@@ -4886,6 +4917,11 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
     timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or fallback_updated_at or "").strip()
     age_seconds = seconds_since_timestamp(timestamp)
     session = market_session_context(market)
+    basis = normalize_price_basis(
+        live_price.get("basis"),
+        market,
+        bool(live_price.get("retainedOnFailure") or str(live_price.get("basis", "")).strip() == "last_good"),
+    )
     has_stored_price = bool(
         live_price.get("lastPrice")
         or live_price.get("price")
@@ -4909,7 +4945,14 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
         and bool(session.get("isClosedOrPreopen"))
     )
 
-    if source == "toss":
+    if has_stored_price and basis == "last_good":
+        status, label = "last-good", "마지막 정상값"
+        message = str(live_price.get("message") or "최근 수신 실패로 DB의 마지막 정상 가격을 유지합니다.")
+    elif has_stored_price and basis == "closed_baseline":
+        status, label = "closed-baseline", "장마감 기준가"
+        session_reason = str(session.get("label") or "비정규 시간")
+        message = f"{session_reason}이라 저장된 장마감 기준가로 다음 거래일 후보를 평가합니다."
+    elif source == "toss":
         if closed_baseline_allowed:
             status, label = "closed-baseline", "장마감 기준가"
             session_reason = str(session.get("label") or "비정규 시간")
@@ -4958,10 +5001,12 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
         "delayedSeconds": SIGNAL_LIVE_PRICE_DELAYED_SECONDS,
         "isFresh": status == "live",
         "isDelayed": status == "delayed",
-        "isStale": status in {"stale", "snapshot", "unknown", "missing"},
+        "isStale": status in {"stale", "snapshot", "unknown", "missing", "last-good"},
         "usableForReaction": status == "live",
         "usableForBaseline": status in {"live", "closed-baseline", "delayed"},
         "isClosedBaseline": status == "closed-baseline",
+        "isLastGood": status == "last-good",
+        "basis": basis,
         "session": session,
         "message": message,
     }
