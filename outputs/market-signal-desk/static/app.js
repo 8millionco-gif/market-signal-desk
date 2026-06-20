@@ -1724,7 +1724,13 @@ function signalValidationForDisplay(item) {
 }
 
 function evaluationModeForDisplay(item) {
-  const mode = item?.evaluationMode ?? item?.finalDecision?.evaluationMode ?? {};
+  const itemMode = item?.evaluationMode ?? {};
+  const decisionMode = item?.finalDecision?.evaluationMode ?? {};
+  const decisionIsBaseline =
+    decisionMode?.key === "closed_baseline" ||
+    decisionMode?.status === "baseline" ||
+    (state.mode === "close" && decisionMode?.priceOk && decisionMode?.changeOk);
+  const mode = decisionIsBaseline ? decisionMode : (itemMode?.key || itemMode?.status ? itemMode : decisionMode);
   const readiness = item?.priceReadiness ?? {};
   const key = mode.key || readiness.key || "collecting";
   const blockerReasons = Array.isArray(mode.blockerReasons)
