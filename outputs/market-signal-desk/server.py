@@ -55,6 +55,7 @@ SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2
 SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
+SIGNAL_DB_REFUSED_BACKOFF_SECONDS = max(5, int(os.getenv("SIGNAL_DB_REFUSED_BACKOFF_SECONDS", "90") or "90"))
 SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
     0,
     int(os.getenv("SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS", "2") or "2"),
@@ -538,12 +539,13 @@ def db_error_classification(error: Exception | str) -> dict:
         "connection is closed",
     )
     stale_connection = any(pattern in lower_message for pattern in stale_patterns)
+    connection_refused = "connection refused" in lower_message
     connection_failure = (
         stale_connection
         or "operationalerror" in lower_type
         or "interfaceerror" in lower_type
         or "connection failed" in lower_message
-        or "connection refused" in lower_message
+        or connection_refused
         or "server closed the connection" in lower_message
         or "terminating connection" in lower_message
     )
@@ -552,6 +554,7 @@ def db_error_classification(error: Exception | str) -> dict:
         "type": error_type,
         "connectionFailure": connection_failure,
         "staleConnection": stale_connection,
+        "connectionRefused": connection_refused,
     }
 
 
@@ -581,12 +584,17 @@ def set_db_error(error: Exception | str) -> None:
                 )
                 DB_LAST_BACKOFF_AT = db_diag_now()
                 return
+            backoff_seconds = (
+                SIGNAL_DB_REFUSED_BACKOFF_SECONDS
+                if classification.get("connectionRefused")
+                else SIGNAL_DB_FAILURE_BACKOFF_SECONDS
+            )
             DB_FAILURE_BACKOFF_UNTIL = max(
                 DB_FAILURE_BACKOFF_UNTIL,
-                time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
+                time.time() + backoff_seconds,
             )
             DB_LAST_BACKOFF_MESSAGE = (
-                f"database operation failed; retry in {SIGNAL_DB_FAILURE_BACKOFF_SECONDS}s"
+                f"database operation failed; retry in {backoff_seconds}s"
             )
             DB_LAST_BACKOFF_AT = db_diag_now()
     else:
@@ -3661,7 +3669,7 @@ def database_status(fast: bool = False) -> dict:
         "lastErrorAt": "" if ready else DB_LAST_ERROR_AT,
         "lastErrorType": "" if ready else DB_LAST_ERROR_TYPE,
         "lastErrorClassification": (
-            {"connectionFailure": False, "staleConnection": False}
+            {"connectionFailure": False, "staleConnection": False, "connectionRefused": False}
             if ready
             else db_error_classification(DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)
         ),
@@ -3672,6 +3680,11 @@ def database_status(fast: bool = False) -> dict:
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
         "connectionReuse": db_connection_reuse_status(),
+        "connectionBackoff": {
+            "operationSeconds": SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
+            "refusedSeconds": SIGNAL_DB_REFUSED_BACKOFF_SECONDS,
+            "staleConnectionSeconds": SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS,
+        },
         "kvReadCache": db_kv_read_cache_status(),
         "checks": {
             "databaseUrlConfigured": bool(DATABASE_URL),
