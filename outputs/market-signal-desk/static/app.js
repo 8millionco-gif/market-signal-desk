@@ -2563,18 +2563,15 @@ function renderTradeDecisionStatus() {
     return;
   }
   const plan = tradePlan(item);
-  const stage = reactionStageForDisplay(item);
   const primary = primaryDecisionForDisplay(item, plan);
   const closedBaseline = isClosedBaselineCandidate(item);
   const currentRow = plan.rows.find(([label]) => label === "관찰 매수")?.[1] ?? "-";
   const holdingRow = plan.holding ? `${plan.holding.judgement ?? "보유"} · ${plan.holding.profitLossRate ?? "-"}` : "미보유";
   const rows = [
     ["선택", true, item.name ?? item.symbol ?? "-"],
-    ["뉴스 시그널", Array.isArray(item.sources) && item.sources.length > 0, candidateSignalMeta(item) || "출처 확인 중"],
-    ["가격 반응", closedBaseline || stage.tone === "buy", stage.label],
     ["최종 판단", closedBaseline || primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
-    ["관찰 매수", plan.tone === "buy", currentRow],
     ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayCandidateChangeText(item)}`.trim()],
+    ["관찰 매수", plan.tone === "buy", currentRow],
     ["보유", Boolean(plan.holding), holdingRow]
   ];
   setHtmlIfChanged(els.tradeDecisionStatus, rows
@@ -4738,29 +4735,21 @@ function renderPortfolioStatus() {
   if (!status) return;
   const summary = status.summary ?? {};
   const buyingPower = status.buyingPower ?? {};
-  const selectedAccount = status.selectedAccount ?? {};
   const items = Array.isArray(status.items) ? status.items : [];
   const krwPower = buyingPower.KRW?.cashBuyingPower ?? "-";
   const usdPower = buyingPower.USD?.cashBuyingPower ?? "-";
-  const accountLabel = selectedAccount.accountNoPreview || (status.selectedAccountSeq ? "연결됨" : "-");
   const rows = [
-    [
-      "자산 조회",
-      Boolean(status.enabled && status.ready && status.source === "toss"),
-      !status.enabled ? "꺼짐" : status.ready ? "읽기 가능" : "대기"
-    ],
-    ["계좌", Boolean(status.selectedAccountSeq), accountLabel],
     ["보유", Number(summary.holdingCount ?? 0) > 0, `${summary.holdingCount ?? 0}종목`],
     ["총 손익률", isPositiveText(summary.profitLossRate), summary.profitLossRate ?? "-"],
     ["오늘", isPositiveText(summary.dailyProfitLossRate), summary.dailyProfitLossRate ?? "-"],
     ["매수 가능", krwPower !== "-" || usdPower !== "-", `${krwPower}${usdPower !== "-" ? ` · ${usdPower}` : ""}`]
   ];
-  const holdingRows = items.slice(0, 3).map((item) => [
+  const holdingRows = items.slice(0, 2).map((item) => [
     item.name || item.symbol || "보유 종목",
     !String(item.judgement ?? "").includes("경계"),
     `${item.judgement ?? "보유"} · ${item.profitLossRate ?? "-"}`
   ]);
-  els.portfolioStatus.innerHTML = [...rows, ...holdingRows]
+  setHtmlIfChanged(els.portfolioStatus, [...rows, ...holdingRows]
     .map(([label, ok, value]) => {
       const tone = ok ? "ok" : "warn";
       return `
@@ -4770,7 +4759,7 @@ function renderPortfolioStatus() {
         </div>
       `;
     })
-    .join("");
+    .join(""));
 }
 
 function renderSnapshotHistory() {
