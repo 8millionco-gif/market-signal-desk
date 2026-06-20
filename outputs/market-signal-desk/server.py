@@ -2161,7 +2161,7 @@ def market_data_latest_record_market(record: dict, row: dict | None = None) -> s
 def market_data_latest_payload_price_value(row: dict) -> object:
     for key in ("lastPrice", "price", "currentPrice", "close", "displayPrice"):
         value = row.get(key)
-        if value not in {None, ""}:
+        if value not in {None, ""} and candidate_price_value_usable(value):
             return value
     return None
 
@@ -2361,7 +2361,11 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         })
 
         live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-        if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice") and live_price.get("currency"):
+        if (
+            str(live_price.get("source", "")) == "toss"
+            and candidate_price_value_usable(live_price.get("lastPrice"))
+            and live_price.get("currency")
+        ):
             timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or candidate.get("updated") or now_text)
             retained_on_failure = bool(
                 live_price.get("retainedOnFailure")
@@ -2444,7 +2448,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             previous_record = existing_items.get(previous_key, {}) if isinstance(existing_items.get(previous_key), dict) else {}
             previous_row = market_data_record_payload_row(previous_record) if previous_record else {}
             previous_price = previous_row.get("lastPrice") if isinstance(previous_row, dict) else None
-            if previous_price:
+            if candidate_price_value_usable(previous_price):
                 market = str(candidate.get("market", ""))
                 session = market_session_context(market)
                 previous_basis = normalize_price_basis(
@@ -2676,13 +2680,33 @@ def market_data_latest_status(fast: bool = False) -> dict:
     retained_price_count = 0
     last_good_price_count = 0
     closed_baseline_price_count = 0
+    price_value_count = 0
+    missing_price_value_count = 0
     missing_price_timestamp_count = 0
     missing_field_counts: dict[str, int] = {}
-    basis_counts: dict[str, int] = {"live": 0, "closed_baseline": 0, "last_good": 0, "unknown": 0}
+    basis_counts: dict[str, int] = {"live": 0, "closed_baseline": 0, "last_good": 0, "data_wait": 0, "unknown": 0}
     latest_price_at = ""
     for item in price_items:
         row = market_data_record_payload_row(item)
         item_metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        has_price_value = market_data_latest_payload_price_value(row) not in {None, ""}
+        if not has_price_value:
+            basis_counts["data_wait"] = basis_counts.get("data_wait", 0) + 1
+            missing_price_value_count += 1
+            row_missing = row.get("missingFields") if isinstance(row, dict) else []
+            item_missing = item.get("missingFields") if isinstance(item.get("missingFields"), list) else []
+            missing_fields = unique_texts(
+                list(row_missing if isinstance(row_missing, list) else [])
+                + list(item_missing if isinstance(item_missing, list) else [])
+                + ["price"]
+            )
+            for field in missing_fields:
+                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+            timestamp = str(row.get("updatedAt") or row.get("timestamp") or item.get("updatedAt") or item.get("collectedAt") or "").strip()
+            if timestamp and (not latest_price_at or timestamp > latest_price_at):
+                latest_price_at = timestamp
+            continue
+        price_value_count += 1
         retained_flag = bool(item.get("retainedOnFailure") or row.get("retainedOnFailure"))
         explicit_stale = bool(item.get("stale") or row.get("stale"))
         raw_basis = row.get("basis") or item.get("basis") or item_metadata.get("basis")
@@ -2720,12 +2744,13 @@ def market_data_latest_status(fast: bool = False) -> dict:
             delayed_price_count += 1
         else:
             stale_price_count += 1
-    price_count = len(price_items)
+    price_record_count = len(price_items)
+    price_count = price_value_count
     usable_price_count = basis_counts.get("live", 0) + basis_counts.get("closed_baseline", 0)
     action_live_count = basis_counts.get("live", 0)
     unknown_basis_count = basis_counts.get("unknown", 0)
-    price_coverage = min(1, round(usable_price_count / price_count, 4)) if price_count > 0 else 0
-    price_coverage_percent = display_percent_abs(Decimal(str(price_coverage * 100))) if price_count > 0 else "0%"
+    price_coverage = min(1, round(usable_price_count / price_value_count, 4)) if price_value_count > 0 else 0
+    price_coverage_percent = display_percent_abs(Decimal(str(price_coverage * 100))) if price_value_count > 0 else "0%"
 
     probe = kv_payload_read_probe(
         MARKET_DATA_LATEST_KV_KEY,
@@ -2736,14 +2761,16 @@ def market_data_latest_status(fast: bool = False) -> dict:
     )
     storage = probe["readSource"]
     persistent = storage == "postgres"
-    display_ready = bool(persistent and price_count > 0)
+    display_ready = bool(persistent and price_value_count > 0)
     decision_ready = bool(persistent and usable_price_count > 0)
     basis_ready = bool(unknown_basis_count == 0)
     gaps: list[str] = []
     if not persistent:
         gaps.append("Postgres 최신값 저장소 미사용")
-    if price_count <= 0:
+    if price_record_count <= 0:
         gaps.append("가격 레코드 없음")
+    elif price_value_count <= 0:
+        gaps.append("저장 가격값 없음")
     if usable_price_count <= 0:
         gaps.append("live/장마감 기준가 없음")
     if unknown_basis_count > 0:
@@ -2790,7 +2817,9 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "volatileFallback": not persistent,
         "itemCount": len(items),
         "priceCount": price_count,
-        "storedPriceCount": price_count,
+        "priceRecordCount": price_record_count,
+        "priceValueCount": price_value_count,
+        "storedPriceCount": price_value_count,
         "priceCoverage": price_coverage,
         "priceCoveragePercent": price_coverage_percent,
         "freshPriceCount": fresh_price_count,
@@ -2799,6 +2828,8 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "retainedPriceCount": retained_price_count,
         "lastGoodPriceCount": last_good_price_count,
         "closedBaselinePriceCount": closed_baseline_price_count,
+        "dataWaitPriceCount": basis_counts.get("data_wait", 0),
+        "missingPriceValueCount": missing_price_value_count,
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
         "basisCounts": basis_counts,
@@ -2809,6 +2840,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
             "live": basis_counts.get("live", 0),
             "closedBaseline": basis_counts.get("closed_baseline", 0),
             "lastGood": basis_counts.get("last_good", 0),
+            "dataWait": basis_counts.get("data_wait", 0),
             "unknown": basis_counts.get("unknown", 0),
             "usable": usable_price_count,
             "retained": basis_counts.get("last_good", 0),
@@ -2822,11 +2854,15 @@ def market_data_latest_status(fast: bool = False) -> dict:
             "basisReady": basis_ready,
             "persistentStorageReady": persistent,
             "priceCount": price_count,
+            "priceRecordCount": price_record_count,
+            "priceValueCount": price_value_count,
             "usablePriceCount": usable_price_count,
             "livePriceCount": action_live_count,
             "closedBaselinePriceCount": closed_baseline_price_count,
             "lastGoodPriceCount": last_good_price_count,
             "stalePriceCount": stale_price_count,
+            "dataWaitPriceCount": basis_counts.get("data_wait", 0),
+            "missingPriceValueCount": missing_price_value_count,
             "unknownBasisCount": unknown_basis_count,
             "priceCoverage": price_coverage,
             "priceCoveragePercent": price_coverage_percent,
@@ -17658,9 +17694,11 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     analysis_persistent = bool(candidate_data.get("persistent") and market_data.get("persistent") and analysis_ready)
     evidence_persistent = bool(analysis_persistent and news_events.get("persistent") and news_ready)
     stored_candidate_count = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
-    stored_price_count = bounded_int(market_data.get("priceCount", 0), 0, 1_000_000)
-    stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
     basis_counts = market_data.get("basisCounts", {}) if isinstance(market_data.get("basisCounts"), dict) else {}
+    price_record_count = bounded_int(market_data.get("priceRecordCount", market_data.get("priceCount", 0)), 0, 1_000_000)
+    price_value_count = bounded_int(market_data.get("priceValueCount", market_data.get("priceCount", 0)), 0, 1_000_000)
+    stored_price_count = price_value_count
+    stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
     basis_coverage = market_data.get("basisCoverage", {}) if isinstance(market_data.get("basisCoverage"), dict) else {}
     usable_price_count = bounded_int(market_data.get("usablePriceCount", basis_coverage.get("usable", 0)), 0, 1_000_000)
     live_price_count = bounded_int(basis_counts.get("live", 0), 0, 1_000_000)
@@ -17671,6 +17709,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     )
     last_good_price_count = bounded_int(market_data.get("lastGoodPriceCount", basis_counts.get("last_good", 0)), 0, 1_000_000)
     unknown_basis_count = bounded_int(market_data.get("unknownBasisCount", basis_counts.get("unknown", 0)), 0, 1_000_000)
+    data_wait_price_count = bounded_int(market_data.get("dataWaitPriceCount", basis_counts.get("data_wait", 0)), 0, 1_000_000)
+    missing_price_value_count = bounded_int(market_data.get("missingPriceValueCount", 0), 0, 1_000_000)
     actionable_live_price_count = bounded_int(market_data.get("actionableLivePriceCount", live_price_count), 0, 1_000_000)
     missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
     price_coverage_denominator = stored_candidate_count if stored_candidate_count > 0 else stored_price_count
@@ -17743,6 +17783,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
             "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
             "storedCandidateCount": stored_candidate_count,
+            "priceRecordCount": price_record_count,
+            "priceValueCount": price_value_count,
             "storedPriceCount": stored_price_count,
             "usablePriceCount": usable_price_count,
             "priceCoverageBasis": "usable_price_over_candidate",
@@ -17756,6 +17798,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "closedBaselinePriceCount": closed_baseline_price_count,
             "lastGoodPriceCount": last_good_price_count,
             "unknownBasisCount": unknown_basis_count,
+            "dataWaitPriceCount": data_wait_price_count,
+            "missingPriceValueCount": missing_price_value_count,
             "actionableLivePriceCount": actionable_live_price_count,
             "stalePriceRatio": stale_price_ratio,
             "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
@@ -17821,6 +17865,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
         "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
         "storedCandidateCount": stored_candidate_count,
+        "priceRecordCount": price_record_count,
+        "priceValueCount": price_value_count,
         "storedPriceCount": stored_price_count,
         "usablePriceCount": usable_price_count,
         "priceCoverageBasis": "usable_price_over_candidate",
@@ -17834,6 +17880,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "closedBaselinePriceCount": closed_baseline_price_count,
         "lastGoodPriceCount": last_good_price_count,
         "unknownBasisCount": unknown_basis_count,
+        "dataWaitPriceCount": data_wait_price_count,
+        "missingPriceValueCount": missing_price_value_count,
         "actionableLivePriceCount": actionable_live_price_count,
         "stalePriceRatio": stale_price_ratio,
         "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
@@ -18409,8 +18457,12 @@ def stored_snapshot_unavailable_dashboard_payload(mode: str, fallback_error: str
         "dashboardCacheSource": "db-snapshot-only",
         "selectionSource": "db-snapshot-only",
         "storedCandidateCount": storage_status.get("storedCandidateCount", 0),
+        "priceRecordCount": storage_status.get("priceRecordCount", 0),
+        "priceValueCount": storage_status.get("priceValueCount", storage_status.get("storedPriceCount", 0)),
         "storedPriceCount": storage_status.get("storedPriceCount", 0),
         "stalePriceCount": storage_status.get("stalePriceCount", 0),
+        "dataWaitPriceCount": storage_status.get("dataWaitPriceCount", 0),
+        "missingPriceValueCount": storage_status.get("missingPriceValueCount", 0),
         "latestPriceAt": storage_status.get("latestPriceAt", ""),
     }
     payload = {
@@ -18433,8 +18485,11 @@ def stored_snapshot_unavailable_dashboard_payload(mode: str, fallback_error: str
                 "config": toss_config_status(),
                 "prices": {
                     "source": "market_data_latest",
+                    "priceRecordCount": storage_status.get("priceRecordCount", 0),
+                    "priceValueCount": storage_status.get("priceValueCount", storage_status.get("storedPriceCount", 0)),
                     "storedPriceCount": storage_status.get("storedPriceCount", 0),
                     "stalePriceCount": storage_status.get("stalePriceCount", 0),
+                    "dataWaitPriceCount": storage_status.get("dataWaitPriceCount", 0),
                     "message": "화면 조회에서는 토스를 직접 호출하지 않습니다.",
                 },
             },
