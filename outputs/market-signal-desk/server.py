@@ -2519,6 +2519,16 @@ def db_raw_event_counts() -> dict:
                 source_rows = cur.fetchall()
                 cur.execute(
                     """
+                    SELECT event_type, COUNT(*)
+                    FROM signal_raw_events
+                    GROUP BY event_type
+                    ORDER BY COUNT(*) DESC, event_type ASC
+                    LIMIT 16
+                    """
+                )
+                type_rows = cur.fetchall()
+                cur.execute(
+                    """
                     SELECT source, event_type, symbol, query, collected_at
                     FROM signal_raw_events
                     ORDER BY collected_at DESC
@@ -2540,6 +2550,7 @@ def db_raw_event_counts() -> dict:
         return {
             "count": bounded_int(total_count, 0, 10_000_000),
             "bySource": {str(source): bounded_int(count, 0, 10_000_000) for source, count in source_rows},
+            "byType": {str(event_type): bounded_int(count, 0, 10_000_000) for event_type, count in type_rows},
             "latest": latest_record,
         }
     except Exception as error:
@@ -2870,13 +2881,17 @@ def file_raw_event_counts() -> dict:
         events = []
     events = [event for event in events if isinstance(event, dict)]
     by_source: dict[str, int] = {}
+    by_type: dict[str, int] = {}
     for event in events:
         source = str(event.get("source") or "unknown")
         by_source[source] = by_source.get(source, 0) + 1
+        event_type = str(event.get("eventType") or "raw")
+        by_type[event_type] = by_type.get(event_type, 0) + 1
     latest = events[0] if events else {}
     return {
         "count": len(events),
         "bySource": by_source,
+        "byType": by_type,
         "latest": {
             "source": latest.get("source", ""),
             "eventType": latest.get("eventType", ""),
@@ -2904,6 +2919,7 @@ def raw_event_storage_status() -> dict:
         "file": display_local_path(RAW_EVENTS_FILE),
         "count": counts.get("count", 0),
         "bySource": counts.get("bySource", {}),
+        "byType": counts.get("byType", {}),
         "latest": counts.get("latest", {}),
         "last": dict(RAW_EVENT_STATE),
     }
@@ -2931,9 +2947,9 @@ def evidence_kind_from_parts(source: object = "", event_type: object = "") -> st
         return "orderbook"
     if source_text == "toss" and event_text in {"trade", "trades", "execution", "executions"}:
         return "trade"
-    if event_text in {"index", "indices", "market_index", "market_indices"}:
+    if event_text in {"index", "indices", "market_index", "market_indices"} or source_text in {"market-index", "market_index"}:
         return "market_index"
-    if event_text in {"fx", "exchange", "currency", "usdkrw"} or source_text in {"fx", "open_er_api", "open.er-api.com"}:
+    if event_text in {"fx", "exchange", "currency", "usdkrw"} or source_text in {"fx", "open_er_api", "open.er-api.com", "open-er-api"}:
         return "fx"
     if source_text in {"naver", "gdelt", "news"} or event_text in {"news", "article", "articles"}:
         return "news"
@@ -2994,8 +3010,11 @@ def evidence_status() -> dict:
     news_status = news_event_storage_status()
     market_status = market_data_latest_status(fast=True)
     by_kind: dict[str, int] = {}
-    for source, count in (raw_status.get("bySource", {}) if isinstance(raw_status.get("bySource"), dict) else {}).items():
-        kind = evidence_kind_from_parts(source, "")
+    raw_by_type = raw_status.get("byType", {}) if isinstance(raw_status.get("byType"), dict) else {}
+    raw_by_source = raw_status.get("bySource", {}) if isinstance(raw_status.get("bySource"), dict) else {}
+    raw_iterable = raw_by_type.items() if raw_by_type else raw_by_source.items()
+    for key, count in raw_iterable:
+        kind = evidence_kind_from_parts("", key) if raw_by_type else evidence_kind_from_parts(key, "")
         by_kind[kind] = by_kind.get(kind, 0) + bounded_int(count, 0, 10_000_000)
     for provider, count in (news_status.get("byProvider", {}) if isinstance(news_status.get("byProvider"), dict) else {}).items():
         by_kind["news"] = by_kind.get("news", 0) + bounded_int(count, 0, 10_000_000)
