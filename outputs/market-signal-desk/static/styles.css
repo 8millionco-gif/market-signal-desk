@@ -348,6 +348,12 @@ h3 {
 
 .signal-panel {
   padding: 16px;
+  position: sticky;
+  top: 18px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
 }
 
 .panel-header {
@@ -410,6 +416,10 @@ h3 {
 
 .candidate-source-card strong.warn {
   color: var(--amber);
+}
+
+.workspace .candidate-source-card {
+  display: none;
 }
 
 .status-dot {
@@ -550,6 +560,25 @@ h3 {
 .feed {
   display: grid;
   gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  margin-right: -4px;
+}
+
+.feed::-webkit-scrollbar {
+  width: 8px;
+}
+
+.feed::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(180, 193, 216, 0.18);
+}
+
+.feed::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .stock-search-results {
@@ -2690,6 +2719,18 @@ h3 {
   .decision-panel {
     position: static;
     max-height: none;
+  }
+
+  .signal-panel {
+    display: block;
+    overflow: visible;
+  }
+
+  .signal-panel .feed {
+    flex: initial;
+    overflow: visible;
+    padding-right: 0;
+    margin-right: 0;
   }
 
   .market-strip {
