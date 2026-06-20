@@ -79,6 +79,7 @@ SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_
 SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS = max(16, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS", "256") or "256"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_DB_MIGRATION_RETRY_SECONDS = max(5, int(os.getenv("SIGNAL_DB_MIGRATION_RETRY_SECONDS", "45") or "45"))
+SIGNAL_DB_AUTO_MIGRATION_BACKOFF_RESET = os.getenv("SIGNAL_DB_AUTO_MIGRATION_BACKOFF_RESET", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
     1,
@@ -434,6 +435,7 @@ DB_FAILURE_BACKOFF_UNTIL = 0.0
 DB_CONSECUTIVE_FAILURES = 0
 DB_LAST_FAILURE_KIND = ""
 DB_MIGRATION_LAST_ATTEMPT_AT = 0.0
+DB_MIGRATION_BACKOFF_RESET_AT = 0.0
 DB_PAYLOAD_UNSET = object()
 DB_SHARED_CONNECTION = None
 DB_SHARED_CONNECTION_CREATED_AT = 0.0
@@ -546,6 +548,16 @@ def database_fast_read_allowed() -> bool:
 
 def db_diag_now() -> str:
     return datetime.now(KST).isoformat(timespec="seconds")
+
+
+def db_diag_from_timestamp(value: float | int) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(KST).isoformat(timespec="seconds")
 
 
 def db_diag_age_seconds(value: object) -> int | None:
@@ -690,6 +702,36 @@ def database_transient_degraded() -> bool:
         or classification.get("staleConnection")
         or classification.get("connectionFailure")
     )
+
+
+def maybe_clear_database_backoff_for_auto_migration() -> bool:
+    global DB_MIGRATION_BACKOFF_RESET_AT, DB_MIGRATION_STATUS
+    if not SIGNAL_DB_AUTO_MIGRATION_BACKOFF_RESET:
+        return False
+    if not SIGNAL_DB_AUTO_MIGRATE or DB_MIGRATION_DONE:
+        return False
+    if not database_storage_enabled() or not DB_SCHEMA_READY:
+        return False
+    if not database_backoff_active():
+        return False
+    migration_done = bool(DB_MIGRATION_STATUS.get("done"))
+    migration_error = str(DB_MIGRATION_STATUS.get("error") or "").strip()
+    if migration_done and not migration_error:
+        return False
+    if not database_recently_succeeded():
+        return False
+    now = time.time()
+    last_attempt_at = max(DB_MIGRATION_LAST_ATTEMPT_AT, DB_MIGRATION_BACKOFF_RESET_AT)
+    if last_attempt_at and now - last_attempt_at < SIGNAL_DB_MIGRATION_RETRY_SECONDS:
+        return False
+    DB_MIGRATION_BACKOFF_RESET_AT = now
+    DB_MIGRATION_STATUS = {
+        **DB_MIGRATION_STATUS,
+        "autoBackoffReset": True,
+        "autoBackoffResetAt": db_diag_now(),
+    }
+    clear_database_retry_state(reset_schema=False)
+    return True
 
 
 def maybe_migrate_files_to_database_once() -> None:
@@ -929,8 +971,9 @@ def ensure_database_schema() -> bool:
     if not database_storage_enabled():
         return False
     if database_backoff_active():
-        set_db_error(f"database temporarily unavailable; retry in {database_retry_seconds()}s")
-        return False
+        if not maybe_clear_database_backoff_for_auto_migration():
+            set_db_error(f"database temporarily unavailable; retry in {database_retry_seconds()}s")
+            return False
     if DB_SCHEMA_READY:
         maybe_migrate_files_to_database_once()
         return True
@@ -3940,6 +3983,11 @@ def database_status(fast: bool = False) -> dict:
         "requiredForStableOperation": True,
         "requested": requested,
         "autoMigrate": SIGNAL_DB_AUTO_MIGRATE,
+        "autoMigrationBackoffReset": {
+            "enabled": SIGNAL_DB_AUTO_MIGRATION_BACKOFF_RESET,
+            "lastResetAt": db_diag_from_timestamp(DB_MIGRATION_BACKOFF_RESET_AT),
+            "retrySeconds": SIGNAL_DB_MIGRATION_RETRY_SECONDS,
+        },
         "migration": dict(DB_MIGRATION_STATUS),
         "migrationRan": migration_ran,
         "migrationDone": migration_done,
