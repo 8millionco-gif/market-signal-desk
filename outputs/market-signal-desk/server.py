@@ -1445,9 +1445,12 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         return {"enabled": False, "stored": False, "storage": "disabled", "updatedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
 
     now_text = datetime.now(KST).isoformat(timespec="seconds")
+    existing_data = market_data_latest_data()
+    existing_items = existing_data.get("items", {}) if isinstance(existing_data.get("items"), dict) else {}
     rows: list[tuple[str, dict]] = []
     skipped_count = 0
     skipped_price_count = 0
+    retained_price_count = 0
     updated_by_type: dict[str, int] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -1510,7 +1513,71 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             updated_by_type["prices"] = updated_by_type.get("prices", 0) + 1
             candidate_stored = True
         else:
-            skipped_price_count += 1
+            previous_key = market_data_latest_key("toss", "prices", symbol, "")
+            previous_record = existing_items.get(previous_key, {}) if isinstance(existing_items.get(previous_key), dict) else {}
+            previous_row = market_data_record_payload_row(previous_record) if previous_record else {}
+            previous_price = previous_row.get("lastPrice") if isinstance(previous_row, dict) else None
+            if previous_price:
+                previous_metadata = previous_record.get("metadata", {}) if isinstance(previous_record.get("metadata"), dict) else {}
+                previous_payload = previous_record.get("payload", {}) if isinstance(previous_record.get("payload"), dict) else {}
+                previous_payload_metadata = previous_payload.get("metadata", {}) if isinstance(previous_payload.get("metadata"), dict) else {}
+                previous_updated = str(
+                    previous_row.get("lastGoodAt")
+                    or previous_row.get("timestamp")
+                    or previous_record.get("lastGoodAt")
+                    or previous_record.get("collectedAt")
+                    or previous_record.get("updatedAt")
+                    or ""
+                )
+                missing_fields = unique_texts(
+                    list(completeness_row.get("missing", []) if isinstance(completeness_row.get("missing"), list) else [])
+                    + ["price"]
+                )
+                retained_row = {
+                    **previous_row,
+                    **base_row,
+                    "updatedAt": now_text,
+                    "lastGoodAt": previous_updated,
+                    "stale": True,
+                    "retained": True,
+                    "retainedOnFailure": True,
+                    "missingFields": missing_fields,
+                    "dataSource": "last-good-retained",
+                    "dataCompleteness": completeness_row,
+                    "message": "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다.",
+                }
+                metadata = {
+                    **previous_metadata,
+                    **previous_payload_metadata,
+                    **base_metadata,
+                    "eventType": "prices",
+                    "retained": True,
+                    "retainedOnFailure": True,
+                    "lastGoodAt": previous_updated,
+                    "missingFields": missing_fields,
+                }
+                retained_record = {
+                    **previous_record,
+                    "source": "toss",
+                    "eventType": "prices",
+                    "symbol": symbol,
+                    "query": "candidate-final",
+                    "metadata": metadata,
+                    "payload": {
+                        "data": retained_row,
+                        "metadata": metadata,
+                    },
+                    "updatedAt": now_text,
+                    "lastGoodAt": previous_updated,
+                    "stale": True,
+                    "missingFields": missing_fields,
+                }
+                rows.append((previous_key, retained_record))
+                updated_by_type["prices_retained"] = updated_by_type.get("prices_retained", 0) + 1
+                retained_price_count += 1
+                candidate_stored = True
+            else:
+                skipped_price_count += 1
 
         depth_specs = [
             ("candles", "liveCandles"),
@@ -1564,6 +1631,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             "updatedCount": 0,
             "skippedCount": skipped_count,
             "skippedPriceCount": skipped_price_count,
+            "retainedPriceCount": retained_price_count,
             "updatedByType": updated_by_type,
             "message": "최종 후보 중 저장할 Toss 수집값이 없습니다.",
         }
@@ -1598,6 +1666,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             "lastCandidateFinalCount": len(rows),
             "lastCandidateFinalByType": updated_by_type,
             "lastCandidateFinalStage": stage,
+            "lastCandidateRetainedPriceCount": retained_price_count,
         }
         ok, storage = market_data_latest_write(data)
     MARKET_DATA_LATEST_STATE.update({
@@ -1614,10 +1683,11 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         "updatedCount": len(rows),
         "skippedCount": skipped_count,
         "skippedPriceCount": skipped_price_count,
+        "retainedPriceCount": retained_price_count,
         "updatedByType": updated_by_type,
         "itemCount": len(data.get("items", {})) if isinstance(data.get("items"), dict) else 0,
         "updatedAt": data.get("updatedAt", ""),
-        "message": f"서버 최종 후보 Toss 수집값 {len(rows)}개를 최신값 저장소에 업데이트했습니다.",
+        "message": f"서버 최종 후보 Toss 수집값 {len(rows)}개를 최신값 저장소에 업데이트했습니다. 마지막 정상값 유지 {retained_price_count}개.",
     }
 
 
@@ -1655,9 +1725,33 @@ def market_data_latest_status(fast: bool = False) -> dict:
     fresh_price_count = 0
     delayed_price_count = 0
     stale_price_count = 0
+    retained_price_count = 0
+    last_good_price_count = 0
     missing_price_timestamp_count = 0
+    missing_field_counts: dict[str, int] = {}
+    latest_price_at = ""
     for item in price_items:
-        timestamp = str(item.get("updatedAt") or item.get("collectedAt") or "").strip()
+        row = market_data_record_payload_row(item)
+        row_missing = row.get("missingFields") if isinstance(row, dict) else []
+        item_missing = item.get("missingFields") if isinstance(item.get("missingFields"), list) else []
+        missing_fields = unique_texts(
+            list(row_missing if isinstance(row_missing, list) else [])
+            + list(item_missing if isinstance(item_missing, list) else [])
+        )
+        for field in missing_fields:
+            missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+        if bool(item.get("stale") or row.get("stale") or item.get("retainedOnFailure") or row.get("retainedOnFailure")):
+            retained_price_count += 1
+            stale_price_count += 1
+            last_good_at = str(row.get("lastGoodAt") or item.get("lastGoodAt") or row.get("timestamp") or item.get("collectedAt") or "").strip()
+            if last_good_at:
+                last_good_price_count += 1
+                if not latest_price_at or last_good_at > latest_price_at:
+                    latest_price_at = last_good_at
+            continue
+        timestamp = str(row.get("updatedAt") or row.get("timestamp") or item.get("updatedAt") or item.get("collectedAt") or "").strip()
+        if timestamp and (not latest_price_at or timestamp > latest_price_at):
+            latest_price_at = timestamp
         age_seconds = seconds_since_timestamp(timestamp)
         if age_seconds is None:
             missing_price_timestamp_count += 1
@@ -1705,10 +1799,14 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "freshPriceCount": fresh_price_count,
         "delayedPriceCount": delayed_price_count,
         "stalePriceCount": stale_price_count,
+        "retainedPriceCount": retained_price_count,
+        "lastGoodPriceCount": last_good_price_count,
         "missingPriceTimestampCount": missing_price_timestamp_count,
+        "missingFieldCounts": missing_field_counts,
         "bySource": summary.get("bySource", {}),
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
+        "latestPriceAt": latest_price_at,
         "lastStorage": MARKET_DATA_LATEST_STATE.get("lastStorage", ""),
         "lastUpdatedAt": MARKET_DATA_LATEST_STATE.get("lastUpdatedAt", ""),
         "message": message,
@@ -15302,6 +15400,18 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     news_ready = bool(bounded_int(news_events.get("count", 0), 0, 10_000_000) > 0)
     analysis_persistent = bool(candidate_data.get("persistent") and market_data.get("persistent") and analysis_ready)
     evidence_persistent = bool(analysis_persistent and news_events.get("persistent") and news_ready)
+    stored_candidate_count = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
+    stored_price_count = bounded_int(market_data.get("priceCount", 0), 0, 1_000_000)
+    stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
+    missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
+    collector_roles = {
+        "candidateDiscovery": "ready" if stored_candidate_count > 0 else "waiting",
+        "priceCollector": "ready" if stored_price_count > 0 else "waiting",
+        "depthCollector": "ready" if bounded_int(market_data.get("byType", {}).get("candles", 0) if isinstance(market_data.get("byType"), dict) else 0, 0, 1_000_000) > 0 else "waiting",
+        "newsCollector": "ready" if news_ready else "waiting",
+        "analyzer": "ready" if analysis_ready else "waiting",
+        "snapshotWriter": "ready" if bounded_int(len(recent_scheduler_runs(1)), 0, 10) > 0 else "waiting",
+    }
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
         data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent") and news_events.get("persistent"))
@@ -15324,11 +15434,20 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "persistent": operation_ready,
             "volatileFallback": not operation_ready,
             "operationReady": operation_ready,
+            "dbPrimaryReady": bool(candidate_data.get("persistent") and market_data.get("persistent")),
             "analysisReady": analysis_ready,
             "analysisPersistent": analysis_persistent,
             "newsReady": news_ready,
             "evidencePersistent": evidence_persistent,
             "displayFallbackReady": bool(analysis_ready and not analysis_persistent),
+            "dashboardReadMode": "db-snapshot-only" if candidate_data.get("persistent") and market_data.get("persistent") else "fallback",
+            "storedCandidateCount": stored_candidate_count,
+            "storedPriceCount": stored_price_count,
+            "staleCandidateCount": stale_price_count,
+            "stalePriceCount": stale_price_count,
+            "missingPriceTimestampCount": missing_price_count,
+            "latestPriceAt": market_data.get("latestPriceAt", ""),
+            "collectorRoles": collector_roles,
             "requiresDatabase": False,
             "recentRunCount": len(recent_runs),
             "latestRunId": recent_runs[0]["id"] if recent_runs else "",
@@ -15366,11 +15485,20 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "persistent": persistent,
         "volatileFallback": True,
         "operationReady": False,
+        "dbPrimaryReady": False,
         "analysisReady": analysis_ready,
         "analysisPersistent": False,
         "newsReady": news_ready,
         "evidencePersistent": False,
         "displayFallbackReady": analysis_ready,
+        "dashboardReadMode": "fallback",
+        "storedCandidateCount": stored_candidate_count,
+        "storedPriceCount": stored_price_count,
+        "staleCandidateCount": stale_price_count,
+        "stalePriceCount": stale_price_count,
+        "missingPriceTimestampCount": missing_price_count,
+        "latestPriceAt": market_data.get("latestPriceAt", ""),
+        "collectorRoles": collector_roles,
         "requiresDatabase": True,
         "recentRunCount": len(recent_runs),
         "latestRunId": recent_runs[0]["id"] if recent_runs else "",
@@ -15915,6 +16043,73 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
         payload["summary"]["candidateSourceStored"] = True
     return ensure_dashboard_market_snapshot(payload, mode)
+
+
+def stored_snapshot_unavailable_dashboard_payload(mode: str, fallback_error: str = "") -> dict:
+    selected_mode = normalize_signal_mode(mode)
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    data = seed_data()
+    market = copy.deepcopy(data.get("market", {})) if isinstance(data.get("market"), dict) else {}
+    market, index_status = enrich_market_with_stored_latest_indices(market)
+    market, fx_status = enrich_market_with_stored_latest_fx(market)
+    market, index_status, fx_status = enrich_market_with_last_good_sources(market, index_status, fx_status)
+    storage_status = snapshot_storage_status(fast=True)
+    summary = {
+        "candidateCount": 0,
+        "watchedCount": 0,
+        "highScoreCount": 0,
+        "readyCount": 0,
+        "candidateSource": "stored-snapshot-unavailable",
+        "candidateSourceStored": True,
+        "dashboardCacheSource": "db-snapshot-only",
+        "selectionSource": "db-snapshot-only",
+        "storedCandidateCount": storage_status.get("storedCandidateCount", 0),
+        "storedPriceCount": storage_status.get("storedPriceCount", 0),
+        "stalePriceCount": storage_status.get("stalePriceCount", 0),
+        "latestPriceAt": storage_status.get("latestPriceAt", ""),
+    }
+    payload = {
+        "generatedAt": now_text,
+        "mode": selected_mode,
+        "source": "stored-snapshot-unavailable",
+        "message": "DB 저장 스냅샷이 아직 없어 웹은 외부 API 재분석 없이 대기합니다.",
+        "market": market,
+        "principles": data.get("principles", []),
+        "summary": summary,
+        "integrations": {
+            "storage": storage_status,
+            "market": {"indices": index_status, "fx": fx_status},
+            "selection": {
+                "source": "db-snapshot-only",
+                "state": "waiting",
+                "message": "서버 수집 봇이 후보/가격/뉴스를 DB에 저장하면 화면에 표시됩니다.",
+            },
+            "toss": {
+                "config": toss_config_status(),
+                "prices": {
+                    "source": "market_data_latest",
+                    "storedPriceCount": storage_status.get("storedPriceCount", 0),
+                    "stalePriceCount": storage_status.get("stalePriceCount", 0),
+                    "message": "화면 조회에서는 토스를 직접 호출하지 않습니다.",
+                },
+            },
+        },
+        "pipeline": [
+            pipeline_step("storage", "DB 스냅샷 조회", "fallback", "표시 가능한 저장 스냅샷이 아직 없습니다.", 0),
+            pipeline_step("collector", "서버 수집 대기", "wait", "후보 발굴/가격 수집/판단 봇 결과를 기다립니다.", 0),
+        ],
+        "cache": {
+            "cached": True,
+            "source": "db-snapshot-only",
+            "requestedMode": selected_mode,
+            "mode": selected_mode,
+            "createdAt": now_text,
+            "fallbackError": fallback_error,
+        },
+        "candidates": [],
+        "selected": None,
+    }
+    return ensure_dashboard_market_snapshot(payload, selected_mode)
 
 
 def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
@@ -17872,30 +18067,32 @@ class AppHandler(BaseHTTPRequestHandler):
             mode = normalize_signal_mode(query.get("mode", ["auto"])[0])
             force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
             if not force_refresh:
-                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
-                if stored_candidate_data_payload is not None:
-                    self.send_json(stored_candidate_data_payload)
-                    return
                 cached_payload = cached_dashboard_payload(mode)
                 if cached_payload is not None:
                     self.send_json(cached_payload)
+                    return
+                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
+                if stored_candidate_data_payload is not None:
+                    self.send_json(stored_candidate_data_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
                 if stored_pool_payload is not None:
                     self.send_json(stored_pool_payload)
                     return
+                self.send_json(stored_snapshot_unavailable_dashboard_payload(mode))
+                return
             try:
                 payload = dashboard(mode, force_discovery=force_refresh)
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
                 self.send_json(payload)
             except Exception as error:
-                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
-                if stored_candidate_data_payload is not None:
-                    self.send_json(stored_candidate_data_payload)
-                    return
                 cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if cached_payload is not None:
                     self.send_json(cached_payload)
+                    return
+                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
+                if stored_candidate_data_payload is not None:
+                    self.send_json(stored_candidate_data_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_pool_payload is not None:
