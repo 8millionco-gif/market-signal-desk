@@ -2909,6 +2909,148 @@ def raw_event_storage_status() -> dict:
     }
 
 
+EVIDENCE_SCORING_WEIGHTS = {
+    "reliability": 25,
+    "impact": 25,
+    "priceReaction": 25,
+    "marketEnvironment": 15,
+    "riskPenalty": 10,
+}
+
+
+def evidence_kind_from_parts(source: object = "", event_type: object = "") -> str:
+    source_text = str(source or "").strip().lower()
+    event_text = str(event_type or "").strip().lower().replace("-", "_")
+    if source_text in {"opendart", "dart"} or event_text in {"disclosure", "disclosures", "filing", "ir"}:
+        return "disclosure"
+    if source_text == "toss" and event_text in {"price", "prices"}:
+        return "price"
+    if source_text == "toss" and event_text in {"chart", "charts", "candle", "candles"}:
+        return "chart"
+    if source_text == "toss" and event_text in {"orderbook", "quote", "quotes", "bidask"}:
+        return "orderbook"
+    if source_text == "toss" and event_text in {"trade", "trades", "execution", "executions"}:
+        return "trade"
+    if event_text in {"index", "indices", "market_index", "market_indices"}:
+        return "market_index"
+    if event_text in {"fx", "exchange", "currency", "usdkrw"} or source_text in {"fx", "open_er_api", "open.er-api.com"}:
+        return "fx"
+    if source_text in {"naver", "gdelt", "news"} or event_text in {"news", "article", "articles"}:
+        return "news"
+    return event_text or source_text or "unknown"
+
+
+def evidence_base_reliability(kind: str, source: object = "") -> int:
+    source_text = str(source or "").strip().lower()
+    if kind == "disclosure":
+        return 90
+    if kind == "price":
+        return 86 if source_text == "toss" else 78
+    if kind in {"chart", "orderbook", "trade"}:
+        return 82 if source_text == "toss" else 74
+    if kind in {"market_index", "fx"}:
+        return 80
+    if kind == "news":
+        if source_text == "naver":
+            return 62
+        if source_text == "gdelt":
+            return 55
+        return 58
+    return 40
+
+
+def evidence_risk_flags_from_texts(values: list[object], limit: int = 6) -> list[str]:
+    risk_keywords = {
+        "급락": "급락",
+        "하락": "하락",
+        "적자": "적자",
+        "손실": "손실",
+        "소송": "소송",
+        "규제": "규제",
+        "경고": "경고",
+        "불확실": "불확실성",
+        "리스크": "리스크",
+        "downgrade": "투자의견 하향",
+        "lawsuit": "소송",
+        "loss": "손실",
+        "warning": "경고",
+        "risk": "리스크",
+        "probe": "조사",
+    }
+    flags: list[str] = []
+    for value in values:
+        text = clean_news_text(str(value or ""))
+        lowered = text.lower()
+        for keyword, label in risk_keywords.items():
+            if keyword in lowered and label not in flags:
+                flags.append(label)
+                if len(flags) >= limit:
+                    return flags
+    return flags
+
+
+def evidence_status() -> dict:
+    raw_status = raw_event_storage_status()
+    news_status = news_event_storage_status()
+    market_status = market_data_latest_status(fast=True)
+    by_kind: dict[str, int] = {}
+    for source, count in (raw_status.get("bySource", {}) if isinstance(raw_status.get("bySource"), dict) else {}).items():
+        kind = evidence_kind_from_parts(source, "")
+        by_kind[kind] = by_kind.get(kind, 0) + bounded_int(count, 0, 10_000_000)
+    for provider, count in (news_status.get("byProvider", {}) if isinstance(news_status.get("byProvider"), dict) else {}).items():
+        by_kind["news"] = by_kind.get("news", 0) + bounded_int(count, 0, 10_000_000)
+        provider_kind = f"news:{provider}"
+        by_kind[provider_kind] = by_kind.get(provider_kind, 0) + bounded_int(count, 0, 10_000_000)
+    market_by_type = market_status.get("byType", {}) if isinstance(market_status.get("byType"), dict) else {}
+    for event_type, count in market_by_type.items():
+        kind = evidence_kind_from_parts("toss", event_type)
+        by_kind[kind] = by_kind.get(kind, 0) + bounded_int(count, 0, 10_000_000)
+    latest_candidates = [
+        str(raw_status.get("latest", {}).get("collectedAt", "")) if isinstance(raw_status.get("latest"), dict) else "",
+        str(news_status.get("latest", {}).get("collectedAt", "")) if isinstance(news_status.get("latest"), dict) else "",
+        str(market_status.get("latestAt", "")),
+    ]
+    latest_at = max([item for item in latest_candidates if item] or [""])
+    total_count = (
+        bounded_int(raw_status.get("count", 0), 0, 10_000_000)
+        + bounded_int(news_status.get("count", 0), 0, 10_000_000)
+        + bounded_int(market_status.get("itemCount", 0), 0, 10_000_000)
+    )
+    openai_pending = 0
+    stale_prices = bounded_int(market_status.get("stalePriceCount", 0), 0, 10_000_000)
+    return {
+        "enabled": True,
+        "implementation": "postgres" if raw_status.get("persistent") or news_status.get("persistent") or market_status.get("persistent") else "filesystem",
+        "persistent": bool(raw_status.get("persistent") or news_status.get("persistent") or market_status.get("persistent")),
+        "totalCount": total_count,
+        "byKind": by_kind,
+        "latestAt": latest_at,
+        "openAiPendingCount": openai_pending,
+        "stalePriceCount": stale_prices,
+        "priceCoverage": market_status.get("priceCoverage"),
+        "basisCounts": market_status.get("basisCounts", {}),
+        "rawEvents": raw_status,
+        "newsEvents": news_status,
+        "marketData": {
+            "readSource": market_status.get("readSource"),
+            "itemCount": market_status.get("itemCount", 0),
+            "priceCount": market_status.get("priceCount", 0),
+            "latestAt": market_status.get("latestAt", ""),
+            "latestPriceAt": market_status.get("latestPriceAt", ""),
+        },
+        "pipeline": [
+            "collect_evidence",
+            "normalize_evidence",
+            "analyze_evidence_with_openai",
+            "score_candidates",
+            "verify_price_reaction",
+            "write_dashboard_snapshot",
+        ],
+        "scoringWeights": dict(EVIDENCE_SCORING_WEIGHTS),
+        "message": "뉴스·공시·가격·시장 근거를 DB 기준 evidence 상태로 집계합니다.",
+    }
+
+
 def db_recent_scheduler_runs(limit: int) -> list[dict]:
     if not ensure_database_schema():
         return []
@@ -9915,6 +10057,140 @@ def candidate_discovery_evidence_strength(candidate: dict) -> dict:
         "materialNews": material_news,
         "officialCount": official_count,
     }
+
+
+def candidate_public_risk_flags(candidate: dict) -> list[str]:
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    values: list[object] = [
+        candidate.get("headline", ""),
+        candidate.get("summary", ""),
+        candidate.get("description", ""),
+        *text_list(final_decision.get("blockers", []), limit=8),
+        *text_list(reaction.get("blockers", []), limit=8),
+        *text_list(reaction.get("warnings", []), limit=8),
+        *text_list(evidence.get("blockers", []), limit=8),
+        *text_list(official.get("warnings", []), limit=8),
+    ]
+    explicit = []
+    for source in (candidate.get("riskFlags"), final_decision.get("riskFlags"), evidence.get("riskFlags")):
+        if isinstance(source, list):
+            explicit.extend(source)
+    return unique_texts([*explicit, *evidence_risk_flags_from_texts(values, limit=8)], limit=8)
+
+
+def candidate_public_price_basis(candidate: dict) -> dict:
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    freshness = live_price.get("freshness", {}) if isinstance(live_price.get("freshness"), dict) else {}
+    evaluation_mode = candidate.get("evaluationMode", {}) if isinstance(candidate.get("evaluationMode"), dict) else {}
+    market = str(candidate.get("market") or candidate.get("region") or "")
+    retained = bool(live_price.get("retainedOnFailure") or live_price.get("retained"))
+    basis = normalize_price_basis(
+        live_price.get("basis")
+        or freshness.get("basis")
+        or evaluation_mode.get("priceBasis")
+        or evaluation_mode.get("basis"),
+        market,
+        retained,
+    )
+    label_map = {
+        "live": "실시간 가격",
+        "closed_baseline": "장마감 기준가",
+        "last_good": "마지막 정상값",
+    }
+    return {
+        "basis": basis,
+        "label": label_map.get(basis, "데이터 보강 대기"),
+        "source": live_price.get("source") or live_price.get("dataSource") or "db",
+        "updatedAt": live_price.get("updatedAt") or live_price.get("timestamp") or "",
+        "lastGoodAt": live_price.get("lastGoodAt") or live_price.get("updatedAt") or "",
+        "stale": bool(live_price.get("stale") or basis == "last_good"),
+        "missingFields": live_price.get("missingFields", []) if isinstance(live_price.get("missingFields"), list) else [],
+    }
+
+
+def candidate_public_evidence_summary(candidate: dict) -> dict:
+    discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
+    evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    strength = candidate_discovery_evidence_strength(candidate)
+    score = bounded_int(strength.get("score", evidence.get("score", 0)), 0, 100)
+    official_count = bounded_int(strength.get("officialCount", official.get("count", 0)), 0, 100)
+    material_news = bounded_int(strength.get("materialNews", trend.get("materialNewsCount", 0)), 0, 1_000)
+    base_reliability = max(
+        score,
+        90 if official_count > 0 else 0,
+        62 if material_news > 0 else 0,
+        bounded_int(validation.get("confidenceScore", 0), 0, 100),
+    )
+    impact_score = bounded_int(
+        max(
+            validation.get("score", 0),
+            reaction.get("score", 0),
+            76 if official_count > 0 else 0,
+            68 if material_news >= 2 else 0,
+            58 if material_news == 1 else 0,
+        ),
+        0,
+        100,
+    )
+    reasons = unique_texts(
+        [
+            *text_list(evidence.get("reasons", []), limit=4),
+            *text_list(discovery.get("evidenceReasons", []), limit=4),
+            *text_list(validation.get("reasons", []), limit=3),
+            candidate.get("headline", ""),
+        ],
+        limit=5,
+    )
+    return {
+        "score": score,
+        "grade": strength.get("grade", evidence.get("grade", "weak")),
+        "qualified": bool(strength.get("qualified")),
+        "strong": bool(strength.get("strong")),
+        "reliabilityScore": bounded_int(base_reliability, 0, 100),
+        "impactScore": impact_score,
+        "materialNews": material_news,
+        "officialCount": official_count,
+        "priceReactionScore": bounded_int(reaction.get("score", validation.get("reactionScore", 0)), 0, 100),
+        "riskFlags": candidate_public_risk_flags(candidate),
+        "reasons": reasons,
+        "weights": dict(EVIDENCE_SCORING_WEIGHTS),
+    }
+
+
+def candidate_public_next_action(candidate: dict) -> dict:
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    action_plan = candidate.get("actionPlan", {}) if isinstance(candidate.get("actionPlan"), dict) else {}
+    final_key = str(final_decision.get("actionKey") or final_decision.get("key") or action_plan.get("key") or "verify")
+    label = str(final_decision.get("action") or final_decision.get("label") or action_plan.get("label") or "확인")
+    summary = str(final_decision.get("summary") or action_plan.get("summary") or "저장된 근거와 가격 반응을 확인합니다.")
+    return {
+        "key": final_key,
+        "label": label,
+        "summary": summary,
+    }
+
+
+def enrich_candidate_public_evidence_fields(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return candidate
+    item = candidate
+    if not isinstance(item.get("evidenceSummary"), dict):
+        item["evidenceSummary"] = candidate_public_evidence_summary(item)
+    if not isinstance(item.get("riskFlags"), list):
+        item["riskFlags"] = item["evidenceSummary"].get("riskFlags", [])
+    if not isinstance(item.get("priceBasis"), dict):
+        item["priceBasis"] = candidate_public_price_basis(item)
+    if not isinstance(item.get("nextAction"), dict):
+        item["nextAction"] = candidate_public_next_action(item)
+    return item
 
 
 def candidate_core_eligible(candidate: dict) -> bool:
@@ -16930,6 +17206,24 @@ def ensure_dashboard_market_snapshot(payload: dict, mode: str = "") -> dict:
     summary["marketSession"] = session
     summary["baselineLabel"] = session["baselineLabel"]
     enriched_payload["summary"] = summary
+    candidates = enriched_payload.get("candidates")
+    if isinstance(candidates, list):
+        enriched_payload["candidates"] = [
+            enrich_candidate_public_evidence_fields(candidate) if isinstance(candidate, dict) else candidate
+            for candidate in candidates
+        ]
+    selected = enriched_payload.get("selected")
+    if isinstance(selected, dict):
+        enriched_payload["selected"] = enrich_candidate_public_evidence_fields(selected)
+    summary["evidencePipeline"] = [
+        "collect_evidence",
+        "normalize_evidence",
+        "analyze_evidence_with_openai",
+        "score_candidates",
+        "verify_price_reaction",
+        "write_dashboard_snapshot",
+    ]
+    summary["scoringWeights"] = dict(EVIDENCE_SCORING_WEIGHTS)
     return enriched_payload
 
 
@@ -18706,6 +19000,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/news-events/status":
             self.send_json(news_event_storage_status())
+            return
+
+        if parsed.path == "/api/evidence/status":
+            self.send_json(evidence_status())
             return
 
         if parsed.path == "/api/performance":
