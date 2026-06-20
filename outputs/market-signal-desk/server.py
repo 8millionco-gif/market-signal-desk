@@ -6207,6 +6207,34 @@ def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at
     return normalize_candidate_live_price_fields(item)
 
 
+def candidate_price_value_usable(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text or text in {"-", "미수신", "확인 대기", "가격 확인 필요", "가격확인 필요"}:
+        return False
+    if text.lower() in {"n/a", "na", "none", "null"}:
+        return False
+    if any(token in text for token in ("미수신", "확인 필요", "보강 대기")):
+        return False
+    return display_number_to_decimal(text) is not None or decimal_or_none(text) is not None
+
+
+def candidate_has_stored_price_value(candidate: dict) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    values = [
+        live_price.get("lastPrice"),
+        live_price.get("price"),
+        live_price.get("currentPrice"),
+        live_price.get("close"),
+        live_price.get("displayPrice"),
+        candidate.get("currentPrice"),
+        candidate.get("price"),
+        candidate.get("displayPrice"),
+    ]
+    return any(candidate_price_value_usable(value) for value in values)
+
+
 def candidate_has_fresh_live_price(candidate: dict) -> bool:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
@@ -6216,13 +6244,16 @@ def candidate_has_fresh_live_price(candidate: dict) -> bool:
 def candidate_has_usable_price_basis(candidate: dict) -> bool:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
-    if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice"):
+    if not candidate_has_stored_price_value(candidate):
+        return False
+    if str(live_price.get("source", "")) == "toss":
         return bool(
             freshness.get("usableForBaseline")
             or freshness.get("usableForReaction")
             or str(freshness.get("status", "")) == "closed-baseline"
+            or str(freshness.get("status", "")) == "last-good"
         )
-    return display_number_to_decimal(candidate.get("price")) is not None
+    return True
 
 
 def live_price_freshness_counts(candidates: list[dict]) -> dict:
@@ -11150,6 +11181,20 @@ def candidate_public_price_basis(candidate: dict) -> dict:
     evaluation_mode = candidate.get("evaluationMode", {}) if isinstance(candidate.get("evaluationMode"), dict) else {}
     market = str(candidate.get("market") or candidate.get("region") or "")
     retained = bool(live_price.get("retainedOnFailure") or live_price.get("retained"))
+    has_price = candidate_has_stored_price_value(candidate)
+    missing_fields = live_price.get("missingFields", []) if isinstance(live_price.get("missingFields"), list) else []
+    if not has_price:
+        return {
+            "basis": "data_wait",
+            "label": "데이터 보강 대기",
+            "source": live_price.get("source") or live_price.get("dataSource") or "db",
+            "updatedAt": live_price.get("updatedAt") or live_price.get("timestamp") or "",
+            "lastGoodAt": live_price.get("lastGoodAt") or "",
+            "stale": True,
+            "usable": False,
+            "missingFields": unique_texts([*missing_fields, "price"], limit=8),
+            "message": "DB에 저장된 가격 기준이 없어 진입 후보가 아니라 데이터 보강 대상으로 분리합니다.",
+        }
     basis = normalize_price_basis(
         live_price.get("basis")
         or freshness.get("basis")
@@ -11163,14 +11208,40 @@ def candidate_public_price_basis(candidate: dict) -> dict:
         "closed_baseline": "장마감 기준가",
         "last_good": "마지막 정상값",
     }
+    explicit_stale = bool(live_price.get("stale") or freshness.get("isStale"))
+    stale = price_basis_is_stale(basis, retained, explicit_stale, market)
+    if basis == "closed_baseline":
+        stale = False
+        message = str(
+            live_price.get("message")
+            or freshness.get("message")
+            or "저장된 장마감 기준가로 다음 거래일 후보를 평가합니다."
+        )
+    elif basis == "last_good":
+        stale = True
+        retained = True
+        message = str(
+            live_price.get("message")
+            or freshness.get("message")
+            or "일시 수신 실패로 DB의 마지막 정상 가격을 유지합니다."
+        )
+    else:
+        message = str(
+            live_price.get("message")
+            or freshness.get("message")
+            or "서버가 저장한 실시간 가격 기준입니다."
+        )
     return {
         "basis": basis,
         "label": label_map.get(basis, "데이터 보강 대기"),
         "source": live_price.get("source") or live_price.get("dataSource") or "db",
         "updatedAt": live_price.get("updatedAt") or live_price.get("timestamp") or "",
         "lastGoodAt": live_price.get("lastGoodAt") or live_price.get("updatedAt") or "",
-        "stale": bool(live_price.get("stale") or basis == "last_good"),
-        "missingFields": live_price.get("missingFields", []) if isinstance(live_price.get("missingFields"), list) else [],
+        "stale": stale,
+        "usable": basis in {"live", "closed_baseline", "last_good"},
+        "retainedOnFailure": retained,
+        "missingFields": unique_texts(missing_fields, limit=8),
+        "message": message,
     }
 
 
@@ -11215,12 +11286,16 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         100,
     )
     price_basis_key = str(price_basis.get("basis") or "")
-    usable_price_basis = price_basis_key in {"live", "closed_baseline", "last_good"}
-    price_reaction_component = max(
-        reaction_score,
-        62 if price_basis_key == "live" else 0,
-        55 if price_basis_key == "closed_baseline" else 0,
-        42 if price_basis_key == "last_good" else 0,
+    usable_price_basis = bool(price_basis.get("usable")) and price_basis_key in {"live", "closed_baseline", "last_good"}
+    price_reaction_component = (
+        max(
+            reaction_score,
+            62 if price_basis_key == "live" else 0,
+            55 if price_basis_key == "closed_baseline" else 0,
+            42 if price_basis_key == "last_good" else 0,
+        )
+        if usable_price_basis
+        else 0
     )
     market_raw = display_number_to_decimal(
         score_detail.get("marketEnvironmentScore")
