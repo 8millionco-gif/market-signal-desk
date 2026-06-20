@@ -6561,8 +6561,7 @@ def enrich_candidates_with_toss_candles(candidates: list[dict]) -> tuple[list[di
 
     def candle_fetch_priority(pair: tuple[int, dict]) -> tuple[int, int, int]:
         index, candidate = pair
-        live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-        has_live_price = str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+        has_live_price = candidate_has_toss_last_price(candidate)
         change_missing = not candidate_data_has_change(candidate)
         has_candles = candidate_data_source_ok(candidate.get("liveCandles", {}))
         selected_boost = 0 if index == 0 else 1
@@ -6667,8 +6666,7 @@ def retained_depth_payload(candidate: dict, key: str, message: str) -> dict | No
 
 def candidate_depth_fetch_priority(pair: tuple[int, dict], target_key: str) -> tuple[int, int, int, int, int]:
     index, candidate = pair
-    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-    has_live_price = str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+    has_live_price = candidate_has_toss_last_price(candidate)
     has_change = candidate_data_has_change(candidate)
     has_target = candidate_data_source_ok(candidate.get(target_key, {}))
     completeness = (
@@ -8242,7 +8240,12 @@ def candidate_data_record_age_seconds(record: dict) -> int | None:
 
 def candidate_has_toss_last_price(candidate: dict) -> bool:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
-    return str(live_price.get("source", "")) == "toss" and bool(live_price.get("lastPrice"))
+    if str(live_price.get("source", "")) != "toss":
+        return False
+    return any(
+        candidate_price_value_usable(live_price.get(key))
+        for key in ("lastPrice", "price", "currentPrice", "close", "displayPrice")
+    )
 
 
 def stored_candidate_data_latest_records(fast: bool = False) -> dict[str, dict]:
@@ -8286,7 +8289,7 @@ def merge_candidate_data_snapshots_into_candidates(candidates: list[dict], mode:
 
         has_current_price = candidate_has_toss_last_price(item)
         record_live_price = record.get("livePrice", {}) if isinstance(record.get("livePrice"), dict) else {}
-        has_record_price = str(record_live_price.get("source", "")) == "toss" and bool(record_live_price.get("lastPrice"))
+        has_record_price = candidate_has_toss_last_price(record)
         current_live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
         current_timestamp = str(current_live_price.get("timestamp") or current_live_price.get("updatedAt") or "")
         record_timestamp = candidate_data_record_timestamp(record)
@@ -12422,7 +12425,7 @@ def market_data_record_has_price(record: dict | None) -> bool:
     if not isinstance(record, dict):
         return False
     row = market_data_record_payload_row(record)
-    return bool(row.get("lastPrice") or row.get("price") or row.get("close"))
+    return market_data_latest_payload_price_value(row) is not None
 
 
 def market_data_record_has_change(record: dict | None) -> bool:
@@ -12474,6 +12477,7 @@ def candidate_prefetch_gap_profile(
     has_candidate_price = candidate_has_toss_last_price(latest) if isinstance(latest, dict) else False
     has_market_price = market_data_record_has_price(price_record)
     has_price = has_candidate_price or has_market_price
+    price_source = "candidate" if has_candidate_price else ("market_data_latest" if has_market_price else "missing")
     has_change = (candidate_data_has_change(latest) if isinstance(latest, dict) else False) or market_data_record_has_change(price_record)
     has_candles = (
         candidate_data_source_ok(latest.get("liveCandles", {}) if isinstance(latest, dict) else {})
@@ -12549,6 +12553,8 @@ def candidate_prefetch_gap_profile(
         "score": bounded_int(gap_score, 0, 160),
         "reasons": unique_texts(reasons, limit=8),
         "priceReady": has_price,
+        "priceMissing": not has_price,
+        "priceSource": price_source,
         "changeReady": has_change,
         "depthReady": has_depth,
         "freshestAgeSeconds": freshest_age,
@@ -12628,6 +12634,21 @@ def candidate_prefetch_record_from_candidate(candidate: dict, source: str) -> di
         ],
         limit=10,
     )
+    live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
+    price_value = ""
+    for value in (
+        live_price.get("lastPrice"),
+        live_price.get("price"),
+        live_price.get("currentPrice"),
+        live_price.get("close"),
+        live_price.get("displayPrice"),
+        candidate.get("currentPrice"),
+        candidate.get("price"),
+        candidate.get("displayPrice"),
+    ):
+        if candidate_price_value_usable(value):
+            price_value = value
+            break
 
     return {
         "symbol": symbol,
@@ -12651,7 +12672,7 @@ def candidate_prefetch_record_from_candidate(candidate: dict, source: str) -> di
         ),
         "evidenceGrade": discovery.get("evidenceGrade") or candidate.get("evidenceGrade", ""),
         "qualityTier": discovery.get("qualityTier") or candidate.get("qualityTier", ""),
-        "price": candidate.get("price", ""),
+        "price": str(price_value) if price_value not in {None, ""} else "",
         "change": candidate.get("change", ""),
         "updated": candidate.get("updated", ""),
         "lastSeenAt": candidate.get("updated") or candidate.get("collectedAt") or candidate.get("generatedAt") or "",
@@ -12707,7 +12728,8 @@ def candidate_prefetch_records_from_market_data(records: dict[str, dict], source
             or normalized
         )
         market = str(row.get("market") or record.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", normalized) else "KR"))
-        last_price = row.get("lastPrice") or row.get("price") or row.get("close") or ""
+        last_price = market_data_latest_payload_price_value(row) or ""
+        has_price = candidate_price_value_usable(last_price)
         change = change_from_toss_price_row(row) or str(
             row.get("changeDisplay")
             or row.get("change")
@@ -12722,10 +12744,10 @@ def candidate_prefetch_records_from_market_data(records: dict[str, dict], source
             "market": market,
             "category": "overseas" if market == "US" else "domestic",
             "headline": f"{name} 저장 가격 재확인",
-            "themes": ["저장 가격", str(row.get("basis") or record.get("basis") or "last_good")],
+            "themes": ["저장 가격" if has_price else "가격 보강", str(row.get("basis") or record.get("basis") or "last_good")],
             "stateKey": "watching",
-            "stateLabel": "가격 보강",
-            "stateReason": "DB에 저장된 가격 레코드를 기반으로 수집 큐에 유지",
+            "stateLabel": "가격 보강" if has_price else "데이터 보강 대기",
+            "stateReason": "DB 저장 가격을 기준으로 수집 큐에 유지" if has_price else "DB 가격 레코드는 있으나 실제 가격값이 없어 가격 수집을 우선합니다.",
             "retainScore": 45,
             "monitorScore": 50,
             "totalScore": 45,
@@ -16941,6 +16963,7 @@ def run_price_collection_cycle(
                 mode=selected_mode,
                 stage=f"price-collector-{selected_scope}-{trigger}",
             )
+            latest_read_status = market_data_latest_status(fast=True)
             price_status = statuses.get("prices", {})
             status = {
                 "enabled": True,
@@ -16959,6 +16982,10 @@ def run_price_collection_cycle(
                 "queue": queue_status,
                 "statuses": statuses,
                 "marketDataLatest": latest_status,
+                "marketDataLatestStatus": latest_read_status,
+                "storedPriceValueCount": latest_read_status.get("priceValueCount", 0),
+                "dataWaitPriceCount": latest_read_status.get("dataWaitPriceCount", 0),
+                "missingPriceValueCount": latest_read_status.get("missingPriceValueCount", 0),
                 "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
                 "message": "후보 풀 가격/등락률을 서버에서 수집해 DB 최신값 저장소에 반영했습니다.",
             }
