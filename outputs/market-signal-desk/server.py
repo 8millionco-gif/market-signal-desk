@@ -1670,7 +1670,10 @@ def candidate_market_data_latest_record(
 
 def normalize_price_basis(value: object, market: str = "", retained: bool = False) -> str:
     raw = str(value or "").strip().lower().replace("-", "_")
-    if raw in {"live", "closed_baseline", "last_good"}:
+    session = market_session_context(market)
+    if raw in {"live", "realtime", "real_time", "intraday"}:
+        return "closed_baseline" if session.get("isClosedOrPreopen") else "live"
+    if raw in {"closed_baseline", "last_good"}:
         return raw
     if raw in {"closed", "close", "baseline", "snapshot_baseline", "closedbaseline"}:
         return "closed_baseline"
@@ -1678,7 +1681,6 @@ def normalize_price_basis(value: object, market: str = "", retained: bool = Fals
         return "last_good"
     if retained:
         return "last_good"
-    session = market_session_context(market)
     return "closed_baseline" if session.get("isClosedOrPreopen") else "live"
 
 
@@ -1739,6 +1741,8 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 or str(live_price.get("basis", "")).strip() == "last_good"
             )
             basis = normalize_price_basis(live_price.get("basis"), str(candidate.get("market", "")), retained_on_failure)
+            if basis == "closed_baseline":
+                retained_on_failure = False
             row_stale = price_basis_is_stale(basis, retained_on_failure, bool(live_price.get("stale")))
             volume_value = None
             for volume_key in (
@@ -1812,6 +1816,18 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             previous_row = market_data_record_payload_row(previous_record) if previous_record else {}
             previous_price = previous_row.get("lastPrice") if isinstance(previous_row, dict) else None
             if previous_price:
+                market = str(candidate.get("market", ""))
+                session = market_session_context(market)
+                previous_basis = normalize_price_basis(
+                    previous_row.get("basis") or previous_record.get("basis"),
+                    market,
+                    bool(previous_row.get("retainedOnFailure") or previous_record.get("retainedOnFailure")),
+                )
+                fallback_basis = "closed_baseline" if session.get("isClosedOrPreopen") else "last_good"
+                if previous_basis == "closed_baseline":
+                    fallback_basis = "closed_baseline"
+                fallback_retained = fallback_basis == "last_good"
+                fallback_stale = price_basis_is_stale(fallback_basis, fallback_retained, fallback_retained)
                 previous_metadata = previous_record.get("metadata", {}) if isinstance(previous_record.get("metadata"), dict) else {}
                 previous_payload = previous_record.get("payload", {}) if isinstance(previous_record.get("payload"), dict) else {}
                 previous_payload_metadata = previous_payload.get("metadata", {}) if isinstance(previous_payload.get("metadata"), dict) else {}
@@ -1825,31 +1841,36 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 )
                 missing_fields = unique_texts(
                     list(completeness_row.get("missing", []) if isinstance(completeness_row.get("missing"), list) else [])
-                    + ["price"]
+                    + (["price"] if fallback_retained else [])
+                )
+                fallback_message = (
+                    "비정규 시간이라 서버 DB의 직전 정규장 기준가를 유지합니다."
+                    if fallback_basis == "closed_baseline"
+                    else "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다."
                 )
                 retained_row = {
                     **previous_row,
                     **base_row,
                     "updatedAt": now_text,
                     "lastGoodAt": previous_updated,
-                    "basis": "last_good",
-                    "stale": True,
-                    "retained": True,
-                    "retainedOnFailure": True,
+                    "basis": fallback_basis,
+                    "stale": fallback_stale,
+                    "retained": fallback_retained,
+                    "retainedOnFailure": fallback_retained,
                     "missingFields": missing_fields,
-                    "dataSource": "last-good-retained",
+                    "dataSource": "closed-baseline-retained" if fallback_basis == "closed_baseline" else "last-good-retained",
                     "dataCompleteness": completeness_row,
-                    "message": "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다.",
+                    "message": fallback_message,
                 }
                 metadata = {
                     **previous_metadata,
                     **previous_payload_metadata,
                     **base_metadata,
                     "eventType": "prices",
-                    "retained": True,
-                    "retainedOnFailure": True,
+                    "retained": fallback_retained,
+                    "retainedOnFailure": fallback_retained,
                     "lastGoodAt": previous_updated,
-                    "basis": "last_good",
+                    "basis": fallback_basis,
                     "missingFields": missing_fields,
                 }
                 retained_record = {
@@ -1865,12 +1886,13 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                     },
                     "updatedAt": now_text,
                     "lastGoodAt": previous_updated,
-                    "stale": True,
+                    "stale": fallback_stale,
                     "missingFields": missing_fields,
                 }
                 rows.append((previous_key, retained_record))
                 updated_by_type["prices_retained"] = updated_by_type.get("prices_retained", 0) + 1
-                retained_price_count += 1
+                if fallback_retained:
+                    retained_price_count += 1
                 candidate_stored = True
             else:
                 skipped_price_count += 1
@@ -2026,7 +2048,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
     closed_baseline_price_count = 0
     missing_price_timestamp_count = 0
     missing_field_counts: dict[str, int] = {}
-    basis_counts: dict[str, int] = {}
+    basis_counts: dict[str, int] = {"live": 0, "closed_baseline": 0, "last_good": 0, "unknown": 0}
     latest_price_at = ""
     for item in price_items:
         row = market_data_record_payload_row(item)
@@ -5314,13 +5336,37 @@ def retained_toss_live_price(candidate: dict, now_text: str) -> dict | None:
         return None
     if not live_price.get("lastPrice"):
         return None
+    market = str(candidate.get("market", ""))
+    session = market_session_context(market)
+    basis = normalize_price_basis(
+        live_price.get("basis"),
+        market,
+        bool(live_price.get("retainedOnFailure") or live_price.get("missedInLastFetch")),
+    )
+    if session.get("isClosedOrPreopen"):
+        basis = "closed_baseline"
+        retained_on_failure = False
+        stale = False
+        message = "비정규 시간이라 직전 토스 가격을 장마감 기준가로 유지합니다."
+    else:
+        basis = "last_good"
+        retained_on_failure = True
+        stale = True
+        message = "이번 토스 응답에 종목이 없어 직전 토스 현재가를 유지합니다."
     retained = dict(live_price)
     retained.update({
-        "retained": True,
+        "retained": retained_on_failure,
         "missedInLastFetch": True,
-        "message": "이번 토스 응답에 종목이 없어 직전 토스 현재가를 유지합니다.",
+        "basis": basis,
+        "stale": stale,
+        "retainedOnFailure": retained_on_failure,
+        "message": message,
     })
-    retained["freshness"] = live_price_freshness(retained, now_text, str(candidate.get("market", "")))
+    if retained_on_failure:
+        retained["missingFields"] = unique_texts(list(retained.get("missingFields", []) if isinstance(retained.get("missingFields"), list) else []) + ["price"])
+    else:
+        retained.pop("missingFields", None)
+    retained["freshness"] = live_price_freshness(retained, now_text, market)
     return retained
 
 
