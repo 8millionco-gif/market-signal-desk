@@ -3407,6 +3407,16 @@ def evidence_status() -> dict:
     disclosure_count = bounded_int(by_kind.get("disclosure", 0), 0, 10_000_000)
     price_count = bounded_int(market_status.get("priceCount", 0), 0, 10_000_000)
     usable_price_count = bounded_int(market_status.get("usablePriceCount", 0), 0, 10_000_000)
+    raw_price_coverage = market_status.get("priceCoverage")
+    if isinstance(raw_price_coverage, (int, float)):
+        price_coverage = max(0.0, min(1.0, float(raw_price_coverage)))
+    elif price_count > 0:
+        price_coverage = max(0.0, min(1.0, round(usable_price_count / price_count, 4)))
+    else:
+        price_coverage = 0.0
+    price_coverage_percent = market_status.get("priceCoveragePercent")
+    if not price_coverage_percent:
+        price_coverage_percent = display_percent_abs(Decimal(str(price_coverage * 100))) if price_count > 0 else "0%"
     market_index_count = bounded_int(by_kind.get("market_index", 0), 0, 10_000_000)
     fx_count = bounded_int(by_kind.get("fx", 0), 0, 10_000_000)
     chart_count = bounded_int(by_kind.get("chart", 0), 0, 10_000_000)
@@ -3461,7 +3471,8 @@ def evidence_status() -> dict:
         "latestAt": latest_at,
         "openAiPendingCount": openai_pending,
         "stalePriceCount": stale_prices,
-        "priceCoverage": market_status.get("priceCoverage"),
+        "priceCoverage": price_coverage,
+        "priceCoveragePercent": price_coverage_percent,
         "basisCounts": market_status.get("basisCounts", {}),
         "basisCoverage": market_status.get("basisCoverage", {}),
         "requiredKinds": required_kinds,
@@ -3485,6 +3496,8 @@ def evidence_status() -> dict:
             "itemCount": market_status.get("itemCount", 0),
             "priceCount": market_status.get("priceCount", 0),
             "usablePriceCount": usable_price_count,
+            "priceCoverage": price_coverage,
+            "priceCoveragePercent": price_coverage_percent,
             "stalePriceCount": stale_prices,
             "latestAt": market_status.get("latestAt", ""),
             "latestPriceAt": market_status.get("latestPriceAt", ""),
