@@ -107,6 +107,7 @@ SIGNAL_NEWS_EVENT_MAX_ITEMS = max(
 NEWS_EVENTS_KV_KEY = "news_events_latest"
 SIGNAL_MARKET_DATA_LATEST_ENABLED = os.getenv("SIGNAL_MARKET_DATA_LATEST_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_LIVE_PRICE_DB_ONLY = os.getenv("SIGNAL_LIVE_PRICE_DB_ONLY", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_MARKET_DATA_LATEST_AUTO_REPAIR = os.getenv("SIGNAL_MARKET_DATA_LATEST_AUTO_REPAIR", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = max(
     1,
     min(
@@ -1941,6 +1942,9 @@ def market_data_latest_data(fast: bool = False) -> dict:
         data["items"] = {}
     if not isinstance(data.get("summary"), dict):
         data["summary"] = {}
+    data, normalized_count = normalize_market_data_latest_payload(data)
+    if normalized_count and SIGNAL_MARKET_DATA_LATEST_AUTO_REPAIR and not fast:
+        market_data_latest_write(data)
     return data
 
 
@@ -2115,22 +2119,205 @@ def normalize_price_basis(value: object, market: str = "", retained: bool = Fals
     session = market_session_context(market)
     if raw in {"live", "realtime", "real_time", "intraday"}:
         return "closed_baseline" if session.get("isClosedOrPreopen") else "live"
-    if raw in {"closed_baseline", "last_good"}:
-        return raw
-    if raw in {"closed", "close", "baseline", "snapshot_baseline", "closedbaseline"}:
-        return "closed_baseline"
-    if raw in {"lastgood", "retained", "retained_failure", "retained_on_failure"}:
+    if raw in {"last_good", "lastgood", "retained", "retained_failure", "retained_on_failure"}:
         return "last_good"
+    if raw in {"closed_baseline", "closed", "close", "baseline", "snapshot_baseline", "closedbaseline"}:
+        return "closed_baseline" if session.get("isClosedOrPreopen") else "last_good"
     if retained:
         return "last_good"
     return "closed_baseline" if session.get("isClosedOrPreopen") else "live"
 
 
-def price_basis_is_stale(basis: str, retained: bool = False, explicit_stale: bool = False) -> bool:
-    normalized = normalize_price_basis(basis, retained=retained)
+def price_basis_is_stale(basis: str, retained: bool = False, explicit_stale: bool = False, market: str = "") -> bool:
+    normalized = normalize_price_basis(basis, market=market, retained=retained)
     if normalized == "closed_baseline":
         return False
     return bool(retained or explicit_stale or normalized == "last_good")
+
+
+def market_data_latest_record_market(record: dict, row: dict | None = None) -> str:
+    row = row if isinstance(row, dict) else market_data_record_payload_row(record)
+    metadata = record.get("metadata", {}) if isinstance(record.get("metadata"), dict) else {}
+    payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
+    payload_metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    for value in (
+        row.get("market"),
+        record.get("market"),
+        metadata.get("market"),
+        payload_metadata.get("market"),
+    ):
+        market = str(value or "").strip().upper()
+        if market:
+            return market
+    currency = str(row.get("currency") or record.get("currency") or "").strip().upper()
+    if currency == "USD":
+        return "US"
+    symbol = str(row.get("symbol") or record.get("symbol") or "").strip().upper()
+    if symbol and re.fullmatch(r"[A-Z.]{1,6}", symbol):
+        return "US"
+    return "KR"
+
+
+def market_data_latest_payload_price_value(row: dict) -> object:
+    for key in ("lastPrice", "price", "currentPrice", "close", "displayPrice"):
+        value = row.get(key)
+        if value not in {None, ""}:
+            return value
+    return None
+
+
+def normalize_market_data_latest_payload(data: dict) -> tuple[dict, int]:
+    if not isinstance(data, dict):
+        return market_data_latest_empty(), 0
+    if not isinstance(data.get("items"), dict):
+        data["items"] = {}
+    if not isinstance(data.get("summary"), dict):
+        data["summary"] = {}
+
+    normalized_count = 0
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    for item in data.get("items", {}).values():
+        if not isinstance(item, dict):
+            continue
+        event_type = str(item.get("eventType", "")).strip().lower()
+        if event_type not in {"price", "prices"}:
+            continue
+        payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+        row = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        if not isinstance(row, dict):
+            continue
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        payload_metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        market = market_data_latest_record_market(item, row)
+        session = market_session_context(market)
+        has_price = market_data_latest_payload_price_value(row) not in {None, ""}
+        original = json.dumps(
+            {
+                "itemBasis": item.get("basis"),
+                "rowBasis": row.get("basis"),
+                "metadataBasis": metadata.get("basis"),
+                "payloadMetadataBasis": payload_metadata.get("basis"),
+                "itemStale": item.get("stale"),
+                "rowStale": row.get("stale"),
+                "itemRetained": item.get("retainedOnFailure"),
+                "rowRetained": row.get("retainedOnFailure"),
+                "missing": row.get("missingFields"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        raw_basis = row.get("basis") or item.get("basis") or metadata.get("basis") or payload_metadata.get("basis")
+        raw_basis_text = str(raw_basis or "").strip().lower().replace("-", "_")
+        retained_flag = bool(
+            item.get("retainedOnFailure")
+            or row.get("retainedOnFailure")
+            or item.get("retained")
+            or row.get("retained")
+            or raw_basis_text in {"last_good", "lastgood", "retained", "retained_failure", "retained_on_failure"}
+        )
+        explicit_stale = bool(item.get("stale") or row.get("stale"))
+        if not has_price:
+            basis = "last_good"
+            stale = True
+            retained_flag = True
+        elif session.get("isClosedOrPreopen"):
+            basis = "closed_baseline"
+            stale = False
+            retained_flag = False
+        elif retained_flag or explicit_stale:
+            basis = "last_good"
+            stale = True
+            retained_flag = True
+        else:
+            basis = normalize_price_basis(raw_basis, market, False)
+            stale = price_basis_is_stale(basis, False, explicit_stale, market)
+            retained_flag = basis == "last_good"
+
+        row["market"] = row.get("market") or market
+        item["market"] = item.get("market") or market
+        row["basis"] = basis
+        item["basis"] = basis
+        metadata["basis"] = basis
+        payload_metadata["basis"] = basis
+        row["stale"] = stale
+        item["stale"] = stale
+        metadata["stale"] = stale
+        payload_metadata["stale"] = stale
+        row["retainedOnFailure"] = retained_flag
+        item["retainedOnFailure"] = retained_flag
+        metadata["retainedOnFailure"] = retained_flag
+        payload_metadata["retainedOnFailure"] = retained_flag
+        if basis == "closed_baseline":
+            row["retained"] = False
+            item["retained"] = False
+            for target in (row, item, metadata, payload_metadata):
+                missing_fields = target.get("missingFields")
+                if isinstance(missing_fields, list):
+                    target["missingFields"] = [field for field in missing_fields if str(field) != "price"]
+            row["message"] = row.get("message") or "비정규 시간이라 서버 DB의 직전 정규장 기준가를 유지합니다."
+        elif basis == "last_good":
+            row["retained"] = True
+            item["retained"] = True
+            missing_fields = unique_texts(
+                list(row.get("missingFields") if isinstance(row.get("missingFields"), list) else [])
+                + list(item.get("missingFields") if isinstance(item.get("missingFields"), list) else [])
+                + ["price"]
+            )
+            row["missingFields"] = missing_fields
+            item["missingFields"] = missing_fields
+            metadata["missingFields"] = missing_fields
+            payload_metadata["missingFields"] = missing_fields
+            row["message"] = row.get("message") or "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다."
+        else:
+            row["retained"] = False
+            item["retained"] = False
+
+        last_good_at = str(
+            row.get("lastGoodAt")
+            or item.get("lastGoodAt")
+            or row.get("updatedAt")
+            or row.get("timestamp")
+            or item.get("updatedAt")
+            or item.get("collectedAt")
+            or ""
+        ).strip()
+        if has_price and not last_good_at:
+            last_good_at = now_text
+        if last_good_at:
+            row["lastGoodAt"] = last_good_at
+            item["lastGoodAt"] = last_good_at
+            metadata["lastGoodAt"] = last_good_at
+            payload_metadata["lastGoodAt"] = last_good_at
+        payload["metadata"] = payload_metadata
+        item["metadata"] = metadata
+        item["payload"] = payload
+        updated = json.dumps(
+            {
+                "itemBasis": item.get("basis"),
+                "rowBasis": row.get("basis"),
+                "metadataBasis": metadata.get("basis"),
+                "payloadMetadataBasis": payload_metadata.get("basis"),
+                "itemStale": item.get("stale"),
+                "rowStale": row.get("stale"),
+                "itemRetained": item.get("retainedOnFailure"),
+                "rowRetained": row.get("retainedOnFailure"),
+                "missing": row.get("missingFields"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if updated != original:
+            normalized_count += 1
+
+    if normalized_count:
+        summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+        previous_total = int(summary.get("basisNormalizedTotal") or 0)
+        summary["basisNormalizedCount"] = normalized_count
+        summary["basisNormalizedTotal"] = previous_total + normalized_count
+        summary["basisNormalizedAt"] = now_text
+        summary["basisNormalization"] = "auto-repair"
+        data["summary"] = summary
+    return data, normalized_count
 
 
 def update_market_data_latest_from_candidates(candidates: list[dict], mode: str = "", stage: str = "selected") -> dict:
@@ -2185,7 +2372,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
             basis = normalize_price_basis(live_price.get("basis"), str(candidate.get("market", "")), retained_on_failure)
             if basis == "closed_baseline":
                 retained_on_failure = False
-            row_stale = price_basis_is_stale(basis, retained_on_failure, bool(live_price.get("stale")))
+            row_stale = price_basis_is_stale(basis, retained_on_failure, bool(live_price.get("stale")), str(candidate.get("market", "")))
             volume_value = None
             for volume_key in (
                 "volume",
@@ -2269,7 +2456,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 if previous_basis == "closed_baseline":
                     fallback_basis = "closed_baseline"
                 fallback_retained = fallback_basis == "last_good"
-                fallback_stale = price_basis_is_stale(fallback_basis, fallback_retained, fallback_retained)
+                fallback_stale = price_basis_is_stale(fallback_basis, fallback_retained, fallback_retained, market)
                 previous_metadata = previous_record.get("metadata", {}) if isinstance(previous_record.get("metadata"), dict) else {}
                 previous_payload = previous_record.get("payload", {}) if isinstance(previous_record.get("payload"), dict) else {}
                 previous_payload_metadata = previous_payload.get("metadata", {}) if isinstance(previous_payload.get("metadata"), dict) else {}
@@ -2475,6 +2662,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
             data["summary"] = {}
     else:
         data = market_data_latest_data()
+    data, basis_normalized_count = normalize_market_data_latest_payload(data)
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
     price_items = [
@@ -2508,7 +2696,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         )
         for field in missing_fields:
             missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
-        if price_basis_is_stale(basis, retained_flag, explicit_stale):
+        if price_basis_is_stale(basis, retained_flag, explicit_stale, str(row.get("market") or item.get("market") or "")):
             retained_price_count += 1
             stale_price_count += 1
             last_good_at = str(row.get("lastGoodAt") or item.get("lastGoodAt") or row.get("timestamp") or item.get("collectedAt") or "").strip()
@@ -2614,6 +2802,9 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
         "basisCounts": basis_counts,
+        "basisNormalizedCount": basis_normalized_count,
+        "basisNormalizedTotal": summary.get("basisNormalizedTotal", 0),
+        "basisNormalizedAt": summary.get("basisNormalizedAt", ""),
         "basisCoverage": {
             "live": basis_counts.get("live", 0),
             "closedBaseline": basis_counts.get("closed_baseline", 0),
@@ -2723,7 +2914,7 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
     retained_flag = bool(row.get("retainedOnFailure") or record.get("retainedOnFailure"))
     explicit_stale = bool(row.get("stale") or record.get("stale"))
     basis = normalize_price_basis(row.get("basis") or record.get("basis"), market, retained_flag)
-    is_stale = price_basis_is_stale(basis, retained_flag, explicit_stale)
+    is_stale = price_basis_is_stale(basis, retained_flag, explicit_stale, market)
     if basis == "closed_baseline":
         message = "서버 DB에 저장된 장마감 기준가를 후보 판단에 반영했습니다."
     elif basis == "last_good":
