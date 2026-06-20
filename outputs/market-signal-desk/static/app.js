@@ -3994,6 +3994,28 @@ function renderStorageStatus() {
     ? `${marketData.itemCount ?? 0}개 · ${marketData.readSource === "postgres" ? "DB 읽기" : marketData.readSource === "filesystem" ? "파일 fallback" : "비어 있음"}${marketSourceText ? ` · ${marketSourceText}` : ""}`
     : "꺼짐";
   const marketLatestText = marketData.latestAt ? timeLabel(marketData.latestAt) : "-";
+  const priceReadiness = status.priceReadiness ?? marketData.readiness ?? {};
+  const storedCandidateCount = Number(status.storedCandidateCount ?? candidateData.itemCount ?? 0);
+  const storedPriceCount = Number(status.storedPriceCount ?? marketData.priceCount ?? marketData.storedPriceCount ?? 0);
+  const usablePriceCount = Number(status.usablePriceCount ?? marketData.usablePriceCount ?? priceReadiness.usablePriceCount ?? 0);
+  const priceCoverageValue = status.priceCoverage ?? marketData.priceCoverage ?? priceReadiness.priceCoverage ?? 0;
+  const priceCoverageText = status.priceCoveragePercent || marketData.priceCoveragePercent || priceReadiness.priceCoveragePercent || evidenceCoverageText(priceCoverageValue);
+  const basisCounts = status.basisCounts ?? marketData.basisCounts ?? {};
+  const livePriceCount = Number(status.livePriceCount ?? basisCounts.live ?? priceReadiness.livePriceCount ?? 0);
+  const closedBaselinePriceCount = Number(status.closedBaselinePriceCount ?? basisCounts.closed_baseline ?? priceReadiness.closedBaselinePriceCount ?? 0);
+  const lastGoodPriceCount = Number(status.lastGoodPriceCount ?? basisCounts.last_good ?? priceReadiness.lastGoodPriceCount ?? 0);
+  const unknownBasisCount = Number(status.unknownBasisCount ?? basisCounts.unknown ?? priceReadiness.unknownBasisCount ?? 0);
+  const basisStatusText = [
+    livePriceCount ? `실시간 ${livePriceCount}` : "",
+    closedBaselinePriceCount ? `장마감 ${closedBaselinePriceCount}` : "",
+    lastGoodPriceCount ? `마지막값 ${lastGoodPriceCount}` : "",
+    unknownBasisCount ? `unknown ${unknownBasisCount}` : ""
+  ].filter(Boolean).join(" · ") || "기준 없음";
+  const priceReadinessText = usablePriceCount > 0
+    ? `판단 ${usablePriceCount}/${storedCandidateCount || storedPriceCount || "-"} · ${priceCoverageText}`
+    : storedPriceCount > 0
+    ? `저장 ${storedPriceCount} · 판단 가능값 없음`
+    : "가격 저장 대기";
   const candidateDataText = candidateData.enabled
     ? `${candidateData.itemCount ?? 0}종목 · ${candidateData.readSource === "postgres" ? "DB 읽기" : candidateData.readSource === "filesystem" ? "파일 fallback" : "비어 있음"}`
     : "꺼짐";
@@ -4052,6 +4074,8 @@ function renderStorageStatus() {
     ["뉴스 저장", Boolean(newsEvents.persistent), newsEvents.persistent ? "DB 기준" : newsEvents.enabled ? "파일 fallback" : "꺼짐"],
     ["뉴스 최신", Boolean(newsLatest.collectedAt), newsLatestText],
     ["최신 수집값", Boolean(marketData.enabled && Number(marketData.itemCount ?? 0) > 0), marketDataText],
+    ["가격 커버리지", usablePriceCount > 0, priceReadinessText],
+    ["가격 기준", usablePriceCount > 0 && unknownBasisCount === 0, basisStatusText],
     ["최신값 갱신", Boolean(marketData.latestAt), marketLatestText],
     ["후보 데이터", Boolean(candidateData.enabled && Number(candidateData.itemCount ?? 0) > 0), candidateDataText],
     ["진입 데이터", Boolean(Number(candidateData.entryReadyCount ?? 0) > 0), candidateReadyText],
@@ -4142,6 +4166,7 @@ function renderEvidenceStatus() {
   const depthCount = chartCount + orderbookCount + tradeCount;
   const openAiPending = Number(status.openAiPendingCount ?? status.openAi?.pendingCount ?? 0);
   const stalePriceCount = Number(status.stalePriceCount ?? marketData.stalePriceCount ?? 0);
+  const usablePriceCount = Number(marketData.usablePriceCount ?? status.usablePriceCount ?? priceCount ?? 0);
   const liveCount = Number(basisCounts.live ?? 0);
   const closedCount = Number(basisCounts.closed_baseline ?? 0);
   const lastGoodCount = Number(basisCounts.last_good ?? 0);
@@ -4160,7 +4185,7 @@ function renderEvidenceStatus() {
     ["저장", Boolean(status.persistent), status.persistent ? "Postgres" : status.implementation || "미확인"],
     ["전체 근거", totalCount > 0, evidenceCountText(totalCount)],
     ["뉴스/트렌드", evidenceKindReady(status, "news"), evidenceCountText(newsCount)],
-    ["가격 기준", priceCount > 0 && stalePriceCount < priceCount, `${evidenceCoverageText(priceCoverage)} · ${basisText}`],
+    ["가격 기준", usablePriceCount > 0, `${evidenceCoverageText(priceCoverage)} · ${basisText}`],
     ["시장 환경", evidenceKindReady(status, "marketContext"), evidenceCountText(marketContextCount)],
     ["공시/IR", evidenceKindReady(status, "disclosure"), disclosureCount ? evidenceCountText(disclosureCount) : "부족"],
     ["심화 데이터", depthCount > 0, `차트 ${chartCount} · 호가 ${orderbookCount} · 체결 ${tradeCount}`],
