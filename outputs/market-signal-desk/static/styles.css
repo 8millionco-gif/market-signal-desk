@@ -693,6 +693,52 @@ h3 {
   background: rgba(255, 207, 92, 0.035);
 }
 
+.feed-limit-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(108, 166, 255, 0.16);
+  border-radius: 8px;
+  color: inherit;
+  background: rgba(108, 166, 255, 0.055);
+  text-align: left;
+}
+
+.feed-limit-panel:hover {
+  border-color: rgba(108, 166, 255, 0.3);
+  background: rgba(108, 166, 255, 0.09);
+}
+
+.feed-limit-panel span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.feed-limit-panel strong {
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.feed-limit-panel em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-limit-panel b {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 900;
+}
+
 .logo-mark {
   display: grid;
   place-items: center;
@@ -2715,5 +2761,13 @@ h3 {
 
   .feed-action {
     max-width: 100%;
+  }
+
+  .feed-limit-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .feed-limit-panel em {
+    white-space: normal;
   }
 }

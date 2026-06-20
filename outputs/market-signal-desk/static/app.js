@@ -70,6 +70,7 @@ const state = {
   strategy: "core",
   query: "",
   dashboard: null,
+  feedExpanded: false,
   stockSearch: {
     query: "",
     loading: false,
@@ -193,6 +194,8 @@ const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 12;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 16;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1489,6 +1492,60 @@ function filteredCandidates() {
   }
   rememberVisibleCandidates(strategy, actualCandidates);
   return sortCandidatesForStrategy([...actualCandidates, ...retainedCandidates], strategy);
+}
+
+function candidateFeedBaseLimit() {
+  return state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
+}
+
+function visibleFeedCandidates(candidates = []) {
+  const items = Array.isArray(candidates) ? candidates : [];
+  const queryActive = Boolean(state.query.trim());
+  const baseLimit = candidateFeedBaseLimit();
+  const canToggle = !queryActive && items.length > baseLimit;
+  if (!canToggle || state.feedExpanded) {
+    return {
+      items,
+      hiddenCount: 0,
+      baseLimit,
+      canToggle,
+      expanded: Boolean(state.feedExpanded && canToggle)
+    };
+  }
+
+  const visible = items.slice(0, baseLimit);
+  if (state.selectedSymbol && !visible.some((item) => item.symbol === state.selectedSymbol)) {
+    const selected = items.find((item) => item.symbol === state.selectedSymbol);
+    if (selected) {
+      visible.splice(Math.max(0, baseLimit - 1), 1, selected);
+    }
+  }
+
+  return {
+    items: visible,
+    hiddenCount: Math.max(0, items.length - visible.length),
+    baseLimit,
+    canToggle,
+    expanded: false
+  };
+}
+
+function candidateFeedToggleMarkup(feedView, totalCount) {
+  if (!feedView?.canToggle) return "";
+  const hiddenText = feedView.expanded
+    ? "상위 후보만 압축해서 다시 봅니다."
+    : `${feedView.hiddenCount}개 후보는 서버와 DB에서 계속 관찰 중입니다.`;
+  const actionText = feedView.expanded ? "상위만 보기" : `전체 ${totalCount}개 보기`;
+  const titleText = feedView.expanded ? "전체 후보 표시 중" : `상위 ${feedView.items.length}개 표시`;
+  return `
+    <button class="feed-limit-panel" type="button" data-feed-toggle>
+      <span>
+        <strong>${escapeHtml(titleText)}</strong>
+        <em>${escapeHtml(hiddenText)}</em>
+      </span>
+      <b>${escapeHtml(actionText)}</b>
+    </button>
+  `;
 }
 
 function candidateDisplayMemoryKey(strategy = state.strategy) {
@@ -4924,6 +4981,7 @@ function renderPrinciples() {
 function applySearchQuery(query) {
   state.query = String(query ?? "").trim();
   state.selectedLookup = null;
+  state.feedExpanded = false;
   if (els.searchInput) {
     els.searchInput.value = state.query;
   }
@@ -5019,6 +5077,7 @@ function candidateSignalMeta(item) {
 
 function renderFeed() {
   const candidates = filteredCandidates();
+  const feedView = visibleFeedCandidates(candidates);
   renderStrategyCounts();
   const selectionChanged = syncSelectedToVisibleCandidates(candidates);
   renderQuickSearch();
@@ -5040,7 +5099,7 @@ function renderFeed() {
     return;
   }
 
-  els.candidateFeed.innerHTML = candidates
+  const feedItemsHtml = feedView.items
     .map((item) => {
       const active = item.symbol === state.selectedSymbol ? "active" : "";
       const retained = item.displayRetained ? "retained" : "";
@@ -5081,6 +5140,7 @@ function renderFeed() {
       `;
     })
     .join("");
+  els.candidateFeed.innerHTML = `${feedItemsHtml}${candidateFeedToggleMarkup(feedView, candidates.length)}`;
 
   if (selectionChanged && state.view === "signals") {
     window.requestAnimationFrame(() => {
@@ -5101,6 +5161,14 @@ function renderFeed() {
       refreshLivePrices();
     });
   });
+
+  const toggleButton = els.candidateFeed.querySelector("[data-feed-toggle]");
+  if (toggleButton) {
+    toggleButton.addEventListener("click", () => {
+      state.feedExpanded = !state.feedExpanded;
+      renderFeed();
+    });
+  }
 }
 
 function strategyLabel(value) {
@@ -6697,6 +6765,7 @@ document.querySelectorAll(".tab").forEach((button) => {
     button.classList.add("active");
     state.filter = button.dataset.filter;
     state.selectedLookup = null;
+    state.feedExpanded = false;
     renderFeed();
     renderTradeDecisionStatus();
     renderDetail();
@@ -6710,6 +6779,7 @@ document.querySelectorAll(".strategy-button").forEach((button) => {
     button.classList.add("active");
     state.strategy = button.dataset.strategy || "action";
     state.selectedLookup = null;
+    state.feedExpanded = false;
     renderFeed();
     renderTradeDecisionStatus();
     renderDetail();
@@ -6720,6 +6790,7 @@ document.querySelectorAll(".strategy-button").forEach((button) => {
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   state.selectedLookup = null;
+  state.feedExpanded = false;
   if (state.searchTimer) {
     window.clearTimeout(state.searchTimer);
   }
