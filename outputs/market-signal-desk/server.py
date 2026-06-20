@@ -19411,7 +19411,10 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/storage/status":
-            self.send_json(snapshot_storage_status())
+            query = parse_qs(parsed.query)
+            fresh = query.get("fresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
+            full = query.get("full", ["0"])[0].lower() in {"1", "true", "yes", "on"}
+            self.send_json(snapshot_storage_status(fast=not (fresh or full)))
             return
 
         if parsed.path == "/api/collector/prices/status":
