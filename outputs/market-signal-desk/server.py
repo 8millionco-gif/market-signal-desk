@@ -11413,12 +11413,74 @@ def latest_discovery_candidate_prefetch_records(limit: int) -> list[dict]:
     return candidate_prefetch_records_from_candidates(candidates, "latest-discovery", limit=limit)
 
 
+def dashboard_snapshot_candidate_prefetch_records(mode: str, limit: int) -> list[dict]:
+    try:
+        detail = cached_dashboard_detail(mode)
+    except Exception:
+        return []
+    dashboard_payload = detail.get("dashboard", {}) if isinstance(detail, dict) and isinstance(detail.get("dashboard"), dict) else {}
+    candidates = dashboard_payload.get("candidates", []) if isinstance(dashboard_payload.get("candidates"), list) else []
+    return candidate_prefetch_records_from_candidates(candidates, "dashboard-snapshot", limit=limit)
+
+
+def candidate_prefetch_records_from_market_data(records: dict[str, dict], source: str, limit: int | None = None) -> list[dict]:
+    output: list[dict] = []
+    for symbol, record in records.items():
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or not isinstance(record, dict):
+            continue
+        row = market_data_record_payload_row(record)
+        name = str(
+            row.get("name")
+            or row.get("stockName")
+            or row.get("symbolName")
+            or row.get("shortName")
+            or record.get("name")
+            or normalized
+        )
+        market = str(row.get("market") or record.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", normalized) else "KR"))
+        last_price = row.get("lastPrice") or row.get("price") or row.get("close") or ""
+        change = change_from_toss_price_row(row) or str(
+            row.get("changeDisplay")
+            or row.get("change")
+            or row.get("changeRate")
+            or row.get("fluctuationRatio")
+            or ""
+        )
+        updated_at = market_data_record_timestamp(record)
+        output.append({
+            "symbol": normalized,
+            "name": name,
+            "market": market,
+            "category": "overseas" if market == "US" else "domestic",
+            "headline": f"{name} 저장 가격 재확인",
+            "themes": ["저장 가격", str(row.get("basis") or record.get("basis") or "last_good")],
+            "stateKey": "watching",
+            "stateLabel": "가격 보강",
+            "stateReason": "DB에 저장된 가격 레코드를 기반으로 수집 큐에 유지",
+            "retainScore": 45,
+            "monitorScore": 50,
+            "totalScore": 45,
+            "triggerReadiness": 35,
+            "price": str(last_price),
+            "change": change,
+            "updated": updated_at,
+            "lastSeenAt": updated_at,
+            "prefetchSource": source,
+        })
+        if limit is not None and len(output) >= max(0, limit):
+            break
+    return output
+
+
 def candidate_prefetch_record_priority(record: dict) -> tuple[int, int, int, int]:
     source_priority = {
-        "current-discovery": 4,
-        "latest-discovery": 3,
-        "candidate-data": 2,
-        "pool": 1,
+        "current-discovery": 6,
+        "latest-discovery": 5,
+        "dashboard-snapshot": 4,
+        "candidate-data": 3,
+        "pool": 2,
+        "market-data-latest": 1,
     }.get(str(record.get("prefetchSource", "")), 0)
     return (
         source_priority,
@@ -11453,22 +11515,38 @@ def candidate_prefetch_queue_records(limit: int, seed_candidates: list[dict] | N
 
     scan_limit = max(selected_limit, min(SIGNAL_CANDIDATE_POOL_SCAN_LIMIT, max(selected_limit * 4, selected_limit)))
     pool_records = candidate_pool_retainable_records(limit=scan_limit)
+    stored_latest_map = stored_candidate_data_latest_records(fast=True)
+    if not stored_latest_map:
+        stored_latest_map = stored_candidate_data_latest_records(fast=False)
     stored_records = candidate_prefetch_records_from_candidates(
-        list(stored_candidate_data_latest_records().values()),
+        list(stored_latest_map.values()),
         "candidate-data",
         limit=scan_limit,
     )
     latest_records = latest_discovery_candidate_prefetch_records(scan_limit)
+    snapshot_records = dashboard_snapshot_candidate_prefetch_records(auto_signal_mode(), scan_limit)
+    market_price_map = stored_market_data_latest_records("toss", "prices", fast=True)
+    if not market_price_map:
+        market_price_map = stored_market_data_latest_records("toss", "prices", fast=False)
+    market_price_records = candidate_prefetch_records_from_market_data(
+        market_price_map,
+        "market-data-latest",
+        limit=scan_limit,
+    )
     seed_records = candidate_prefetch_records_from_candidates(seed_candidates, "current-discovery", limit=scan_limit)
 
     source_counts = {
         "pool": len(pool_records),
         "candidateData": len(stored_records),
+        "candidateDataRaw": len(stored_latest_map),
         "latestDiscovery": len(latest_records),
+        "dashboardSnapshot": len(snapshot_records),
+        "marketDataLatest": len(market_price_records),
+        "marketDataLatestRaw": len(market_price_map),
         "currentDiscovery": len(seed_records),
     }
     records_by_symbol: dict[str, dict] = {}
-    for source_records in (pool_records, stored_records, latest_records, seed_records):
+    for source_records in (pool_records, stored_records, latest_records, snapshot_records, market_price_records, seed_records):
         for record in source_records:
             symbol = str(record.get("symbol", "")).strip().upper()
             if not symbol:
@@ -11491,11 +11569,11 @@ def candidate_prefetch_queue_records(limit: int, seed_candidates: list[dict] | N
             "message": "보강할 후보 종목이 아직 없습니다.",
         }
 
-    candidate_records = stored_candidate_data_latest_records()
-    market_records = stored_market_data_latest_records("toss", "prices")
-    candle_records = stored_market_data_latest_records("toss", "candles")
-    orderbook_records = stored_market_data_latest_records("toss", "orderbook")
-    trade_records = stored_market_data_latest_records("toss", "trades")
+    candidate_records = stored_latest_map or stored_candidate_data_latest_records(fast=False)
+    market_records = market_price_map or stored_market_data_latest_records("toss", "prices", fast=False)
+    candle_records = stored_market_data_latest_records("toss", "candles", fast=True) or stored_market_data_latest_records("toss", "candles", fast=False)
+    orderbook_records = stored_market_data_latest_records("toss", "orderbook", fast=True) or stored_market_data_latest_records("toss", "orderbook", fast=False)
+    trade_records = stored_market_data_latest_records("toss", "trades", fast=True) or stored_market_data_latest_records("toss", "trades", fast=False)
     now = datetime.now(KST)
     ranked: list[dict] = []
     reason_counts: dict[str, int] = {}
