@@ -385,6 +385,11 @@ PRICE_COLLECTOR_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
+DB_LAST_ERROR_AT = ""
+DB_LAST_ERROR_TYPE = ""
+DB_LAST_CONNECT_ATTEMPT_AT = ""
+DB_LAST_SUCCESS_AT = ""
+DB_SCHEMA_LAST_CHECKED_AT = ""
 DB_FAILURE_BACKOFF_UNTIL = 0.0
 DB_PAYLOAD_UNSET = object()
 DB_MIGRATION_STATUS: dict[str, object] = {
@@ -494,9 +499,79 @@ def database_fast_read_allowed() -> bool:
     return DB_FAILURE_BACKOFF_UNTIL <= time.time()
 
 
+def db_diag_now() -> str:
+    return datetime.now(KST).isoformat(timespec="seconds")
+
+
 def set_db_error(error: Exception | str) -> None:
-    global DB_LAST_ERROR
-    DB_LAST_ERROR = str(error)[:240]
+    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE
+    message = str(error)[:240]
+    DB_LAST_ERROR = message
+    if message:
+        DB_LAST_ERROR_AT = db_diag_now()
+        DB_LAST_ERROR_TYPE = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
+    else:
+        DB_LAST_ERROR_AT = ""
+        DB_LAST_ERROR_TYPE = ""
+
+
+def database_retry_seconds() -> int:
+    return max(0, int(DB_FAILURE_BACKOFF_UNTIL - time.time() + 0.999))
+
+
+def database_url_diagnostics() -> dict:
+    if not DATABASE_URL:
+        return {
+            "configured": False,
+            "scheme": "",
+            "host": "",
+            "hostKind": "missing",
+            "database": "",
+            "usernameConfigured": False,
+            "passwordConfigured": False,
+            "internalRecommended": True,
+            "message": "Render Web Service 환경변수에 Postgres Internal Database URL을 연결하세요.",
+        }
+    try:
+        parsed = urlparse(DATABASE_URL)
+    except Exception:
+        return {
+            "configured": True,
+            "scheme": "invalid",
+            "host": "",
+            "hostKind": "invalid",
+            "database": "",
+            "usernameConfigured": False,
+            "passwordConfigured": False,
+            "internalRecommended": True,
+            "message": "DATABASE_URL 형식을 확인하세요.",
+        }
+    host = parsed.hostname or ""
+    host_lower = host.lower()
+    if host_lower.endswith(".internal") or (host_lower.startswith("dpg-") and ".render.com" not in host_lower):
+        host_kind = "render-internal"
+        message = "Internal Database URL 형태로 보입니다."
+    elif "render.com" in host_lower:
+        host_kind = "render-external"
+        message = "Render External URL 형태일 수 있습니다. 같은 프로젝트/리전이면 Internal Database URL을 권장합니다."
+    elif host_lower in {"localhost", "127.0.0.1"}:
+        host_kind = "local"
+        message = "로컬 DB 주소입니다. Render 운영 환경에서는 Internal Database URL이 필요합니다."
+    else:
+        host_kind = "unknown"
+        message = "DB 호스트 유형을 자동 판별하지 못했습니다. Render Internal Database URL인지 확인하세요."
+    safe_host = host if len(host) <= 18 else f"{host[:8]}...{host[-7:]}"
+    return {
+        "configured": True,
+        "scheme": parsed.scheme,
+        "host": safe_host,
+        "hostKind": host_kind,
+        "database": parsed.path.lstrip("/")[:48],
+        "usernameConfigured": bool(parsed.username),
+        "passwordConfigured": bool(parsed.password),
+        "internalRecommended": host_kind != "render-internal",
+        "message": message,
+    }
 
 
 def psycopg_modules():
@@ -506,7 +581,8 @@ def psycopg_modules():
 
 
 def db_connect_with_retry():
-    global DB_FAILURE_BACKOFF_UNTIL
+    global DB_FAILURE_BACKOFF_UNTIL, DB_LAST_CONNECT_ATTEMPT_AT, DB_LAST_SUCCESS_AT
+    DB_LAST_CONNECT_ATTEMPT_AT = db_diag_now()
     backoff_remaining = DB_FAILURE_BACKOFF_UNTIL - time.time()
     if backoff_remaining > 0:
         raise RuntimeError(f"database temporarily unavailable; retry in {int(backoff_remaining) + 1}s")
@@ -519,6 +595,7 @@ def db_connect_with_retry():
                 connect_timeout=SIGNAL_DB_CONNECT_TIMEOUT_SECONDS,
             )
             DB_FAILURE_BACKOFF_UNTIL = 0.0
+            DB_LAST_SUCCESS_AT = db_diag_now()
             return psycopg, Jsonb, conn
         except Exception as error:
             last_error = error
@@ -545,7 +622,8 @@ def safe_read_json_file(path: Path):
 
 
 def ensure_database_schema() -> bool:
-    global DB_SCHEMA_READY
+    global DB_SCHEMA_READY, DB_SCHEMA_LAST_CHECKED_AT
+    DB_SCHEMA_LAST_CHECKED_AT = db_diag_now()
     if not database_storage_enabled():
         return False
     if DB_SCHEMA_READY:
@@ -2929,7 +3007,12 @@ def database_status(fast: bool = False) -> dict:
     counts = {}
     if enabled:
         if fast:
-            ready = database_fast_read_allowed()
+            if database_fast_read_allowed():
+                ready = True
+            elif not DB_SCHEMA_READY and database_retry_seconds() == 0:
+                ready = ensure_database_schema()
+            else:
+                ready = False
         else:
             ready = ensure_database_schema()
             counts = db_storage_counts() if ready and not fast else {}
@@ -2946,11 +3029,18 @@ def database_status(fast: bool = False) -> dict:
     else:
         message = "DB 저장소가 비활성화되어 파일 저장소를 사용합니다."
         next_action = "운영 전 DB 저장소 검토"
+    retry_seconds = database_retry_seconds()
+    url_info = database_url_diagnostics()
+    migration_ran = bool(DB_MIGRATION_STATUS.get("ran"))
+    migration_done = bool(DB_MIGRATION_STATUS.get("done"))
     return {
         "backend": SIGNAL_STORAGE_BACKEND,
         "urlConfigured": bool(DATABASE_URL),
+        "url": url_info,
         "enabled": enabled,
         "ready": ready,
+        "schemaReady": bool(DB_SCHEMA_READY),
+        "schemaCheckedAt": DB_SCHEMA_LAST_CHECKED_AT,
         "implementation": "postgres" if enabled else "filesystem",
         "persistent": bool(ready),
         "volatileFallback": not bool(ready),
@@ -2958,10 +3048,29 @@ def database_status(fast: bool = False) -> dict:
         "requested": requested,
         "autoMigrate": SIGNAL_DB_AUTO_MIGRATE,
         "migration": dict(DB_MIGRATION_STATUS),
+        "migrationRan": migration_ran,
+        "migrationDone": migration_done,
         "counts": counts,
         "message": message,
         "nextAction": next_action,
         "error": "" if ready else DB_LAST_ERROR,
+        "lastError": "" if ready else DB_LAST_ERROR,
+        "lastErrorAt": "" if ready else DB_LAST_ERROR_AT,
+        "lastErrorType": "" if ready else DB_LAST_ERROR_TYPE,
+        "lastConnectAttemptAt": DB_LAST_CONNECT_ATTEMPT_AT,
+        "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
+        "nextRetrySeconds": retry_seconds,
+        "backoffActive": retry_seconds > 0,
+        "checks": {
+            "databaseUrlConfigured": bool(DATABASE_URL),
+            "storageBackendRequestsDb": requested,
+            "storageBackendEnabled": enabled,
+            "schemaReady": bool(DB_SCHEMA_READY),
+            "migrationRan": migration_ran,
+            "migrationDone": migration_done,
+            "primaryReady": ready,
+            "usingInternalUrl": url_info.get("hostKind") == "render-internal",
+        },
     }
 
 

@@ -3742,6 +3742,7 @@ function renderStorageStatus() {
   const status = state.storageStatus;
   if (!status) return;
   const database = status.database ?? {};
+  const databaseUrl = database.url ?? {};
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
   const rawEvents = status.rawEvents ?? {};
@@ -3777,6 +3778,26 @@ function renderStorageStatus() {
       ? "Postgres 준비"
       : shortText(database.error || "DB 연결 확인", 28)
     : "미연결";
+  const dbHostText = databaseUrl.configured
+    ? `${databaseUrl.hostKind || "unknown"}${databaseUrl.host ? ` · ${databaseUrl.host}` : ""}`
+    : "DATABASE_URL 미설정";
+  const dbRetryText = Number(database.nextRetrySeconds ?? 0) > 0
+    ? `${database.nextRetrySeconds}초 후 재시도`
+    : database.ready
+    ? "대기 없음"
+    : database.lastConnectAttemptAt
+    ? "즉시 재시도 가능"
+    : "시도 전";
+  const dbSchemaText = database.schemaReady
+    ? "준비됨"
+    : database.schemaCheckedAt
+    ? `확인 실패 · ${timeLabel(database.schemaCheckedAt)}`
+    : "확인 전";
+  const dbLastErrorText = database.lastError
+    ? `${database.lastErrorType || "Error"} · ${shortText(database.lastError, 34)}`
+    : database.ready
+    ? "없음"
+    : "-";
   const migrationText = migration.enabled
     ? migration.error
       ? shortText(migration.error, 28)
@@ -3858,6 +3879,10 @@ function renderStorageStatus() {
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
+    ["DB URL", Boolean(database.urlConfigured && !databaseUrl.internalRecommended), dbHostText],
+    ["스키마", Boolean(database.schemaReady), dbSchemaText],
+    ["재시도", Boolean(database.ready || Number(database.nextRetrySeconds ?? 0) === 0), dbRetryText],
+    ["DB 오류", Boolean(database.ready || !database.lastError), dbLastErrorText],
     ["후보 기준", candidateStorageReady, storageBasisText(candidateData)],
     ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
