@@ -197,8 +197,8 @@ const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
 const CANDIDATE_FEED_VISIBLE_LIMIT = 6;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 10;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 20;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 8;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 12;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -2062,7 +2062,14 @@ function liveDataCoverage(item) {
 }
 
 function liveDataCoverageChips(item, compact = false) {
-  return liveDataCoverage(item)
+  const entries = liveDataCoverage(item);
+  const displayEntries = compact
+    ? [
+        entries.find((entry) => entry.key === "price"),
+        ...entries.filter((entry) => entry.key !== "price" && entry.tone === "ok")
+      ].filter(Boolean).slice(0, 2)
+    : entries;
+  return displayEntries
     .map(
       (entry) => `
         <span class="live-data-chip ${escapeHtml(entry.tone)}" title="${escapeHtml(entry.title)}">
@@ -3555,8 +3562,12 @@ function renderMetrics() {
       domestic || overseas
         ? `선별 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
         : "";
+    const briefDecisionText =
+      coreCount || reviewCount || waitCompressionCount || portfolioCompressionCount
+        ? `핵심 ${coreCount} · 검토 ${reviewCount} · 대기 ${waitCompressionCount} · 보유 ${portfolioCompressionCount}`
+        : "";
     const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
-    const briefText = [cacheText || sourceLabel, briefSplitText, briefMaterialText].filter(Boolean).join(" · ");
+    const briefText = [cacheText || sourceLabel, briefSplitText, briefDecisionText, briefMaterialText].filter(Boolean).join(" · ");
     els.candidateSource.textContent = briefText || sourceLabel;
     els.candidateSource.title = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
   }
