@@ -66,6 +66,7 @@ SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATU
 SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
 SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS = max(16, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS", "256") or "256"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
+SIGNAL_DB_MIGRATION_RETRY_SECONDS = max(5, int(os.getenv("SIGNAL_DB_MIGRATION_RETRY_SECONDS", "45") or "45"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
     1,
@@ -406,6 +407,7 @@ DB_LAST_CONNECT_ATTEMPT_AT = ""
 DB_LAST_SUCCESS_AT = ""
 DB_SCHEMA_LAST_CHECKED_AT = ""
 DB_FAILURE_BACKOFF_UNTIL = 0.0
+DB_MIGRATION_LAST_ATTEMPT_AT = 0.0
 DB_PAYLOAD_UNSET = object()
 DB_SHARED_CONNECTION = None
 DB_SHARED_CONNECTION_CREATED_AT = 0.0
@@ -604,8 +606,23 @@ def database_backoff_active() -> bool:
 
 
 def maybe_migrate_files_to_database_once() -> None:
-    if SIGNAL_DB_AUTO_MIGRATE and not DB_MIGRATION_DONE and not DB_MIGRATION_STATUS.get("ran"):
-        migrate_files_to_database()
+    global DB_MIGRATION_LAST_ATTEMPT_AT
+    if not SIGNAL_DB_AUTO_MIGRATE or DB_MIGRATION_DONE:
+        return
+    if not database_storage_enabled() or not DB_SCHEMA_READY:
+        return
+    migration_ran = bool(DB_MIGRATION_STATUS.get("ran"))
+    migration_done = bool(DB_MIGRATION_STATUS.get("done"))
+    migration_error = str(DB_MIGRATION_STATUS.get("error") or "").strip()
+    if migration_done and not migration_error:
+        return
+    if migration_ran and not migration_error:
+        return
+    now = time.time()
+    if DB_MIGRATION_LAST_ATTEMPT_AT and now - DB_MIGRATION_LAST_ATTEMPT_AT < SIGNAL_DB_MIGRATION_RETRY_SECONDS:
+        return
+    DB_MIGRATION_LAST_ATTEMPT_AT = now
+    migrate_files_to_database()
 
 
 def database_url_diagnostics() -> dict:
@@ -1002,6 +1019,21 @@ def db_kv_cache_store_many(payloads: dict[str, object]) -> None:
         db_kv_cache_store(key, payload)
 
 
+def db_kv_cache_forget(keys: list[str]) -> None:
+    if SIGNAL_DB_KV_READ_CACHE_SECONDS <= 0:
+        return
+    with DB_KV_READ_CACHE_LOCK:
+        for key in keys:
+            DB_KV_READ_CACHE.pop(str(key or "").strip(), None)
+
+
+def clear_storage_status_cache() -> None:
+    with STORAGE_STATUS_CACHE_LOCK:
+        STORAGE_STATUS_CACHE["payload"] = None
+        STORAGE_STATUS_CACHE["created_at"] = datetime.min.replace(tzinfo=timezone.utc)
+        STORAGE_STATUS_CACHE["expires_at"] = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def short_text(value: object, limit: int) -> str:
     text = str(value or "")
     limit = max(0, int(limit))
@@ -1065,7 +1097,7 @@ def db_storage_counts() -> dict:
 
 
 def migrate_files_to_database(force: bool = False) -> dict:
-    global DB_MIGRATION_DONE, DB_MIGRATION_STATUS
+    global DB_MIGRATION_DONE, DB_MIGRATION_STATUS, DB_MIGRATION_LAST_ATTEMPT_AT
     if not SIGNAL_DB_AUTO_MIGRATE and not force:
         DB_MIGRATION_STATUS = {
             **DB_MIGRATION_STATUS,
@@ -1101,6 +1133,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "enabled": bool(SIGNAL_DB_AUTO_MIGRATE or force),
             "done": False,
             "ran": True,
+            "attemptedAt": db_diag_now(),
             "candidatePool": "missing",
             "candidateData": "missing",
             "marketData": "missing",
@@ -1113,6 +1146,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "snapshotLimit": max(0, SIGNAL_DB_MIGRATE_RUN_LIMIT),
             "error": "",
         }
+        DB_MIGRATION_LAST_ATTEMPT_AT = time.time()
         try:
             psycopg, Jsonb = psycopg_modules()
             candidate_pool = safe_read_json_file(CANDIDATE_POOL_FILE)
@@ -1279,6 +1313,14 @@ def migrate_files_to_database(force: bool = False) -> dict:
             status["done"] = True
             DB_MIGRATION_DONE = True
             DB_MIGRATION_STATUS = status
+            db_kv_cache_forget([
+                "candidate_pool",
+                CANDIDATE_DATA_KV_KEY,
+                MARKET_DATA_LATEST_KV_KEY,
+                NEWS_EVENTS_KV_KEY,
+                "discovery_latest",
+            ])
+            clear_storage_status_cache()
             set_db_error("")
             return DB_MIGRATION_STATUS
         except Exception as error:
@@ -3569,6 +3611,12 @@ def database_status(fast: bool = False) -> dict:
             ready = ensure_database_schema()
             counts = db_storage_counts() if ready and not fast else {}
     requested = database_storage_requested()
+    if ready:
+        maybe_migrate_files_to_database_once()
+        migration_done_after_check = bool(DB_MIGRATION_STATUS.get("done"))
+        migration_error_after_check = str(DB_MIGRATION_STATUS.get("error") or "").strip()
+        if migration_done_after_check and not migration_error_after_check and counts:
+            counts = db_storage_counts() if not fast else counts
     if ready:
         message = "Postgres DB를 기준 저장소로 사용 중입니다."
         next_action = "운영 가능"
