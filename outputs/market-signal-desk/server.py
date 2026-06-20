@@ -4079,7 +4079,7 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
 
     if source == "toss":
         if closed_baseline_allowed:
-            status, label = "closed-baseline", "마감가 기준"
+            status, label = "closed-baseline", "장마감 기준가"
             session_reason = str(session.get("label") or "비정규 시간")
             message = f"{session_reason}이라 직전 정규장 마감가와 저장된 가격 기준으로 분석합니다. 실시간 진입 판단은 개장 후 확인하세요."
         elif age_seconds is None:
@@ -5499,7 +5499,7 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
         else:
             reasons.append("가격 확인 필요")
     elif freshness_status == "closed-baseline":
-        reasons.append("장 시간 외 마감가 기준")
+        reasons.append("장마감 기준가")
     elif freshness_status in {"delayed", "stale", "unknown"}:
         reasons.append(f"가격 {freshness.get('label', '지연')}")
 
@@ -5542,7 +5542,7 @@ def candidate_price_readiness(candidate: dict) -> dict:
     if entry_ready:
         key, label, message = "entry_ready", "실시간 평가 가능", "가격·등락률·거래 반응 데이터가 모두 확인되었습니다."
     elif display_ready and status == "closed-baseline":
-        key, label, message = "closed_baseline", "마감가 기준", "직전 정규장 가격 기준은 확보됐지만 실시간 진입은 개장 후 확인합니다."
+        key, label, message = "closed_baseline", "장마감 기준가", "직전 정규장 마감 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다."
     elif display_ready:
         key, label, message = "display_ready", "후보 분석 가능", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
     elif price_ok and not change_ok:
@@ -5582,9 +5582,9 @@ def candidate_evaluation_mode(candidate: dict) -> dict:
         },
         "closed_baseline": {
             "key": "closed_baseline",
-            "label": "장마감 기준",
+            "label": "장마감 기준가",
             "status": "baseline",
-            "message": "직전 정규장 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다.",
+            "message": "직전 정규장 마감 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다.",
             "tradeEligible": False,
             "rankEligible": True,
         },
@@ -5661,8 +5661,8 @@ def candidate_trade_data_gate(candidate: dict) -> dict:
         label = "실시간 진입 검증 완료"
         reason = "서버가 가격·등락률·거래 반응을 모두 확보했습니다."
     elif closed_baseline:
-        label = "장마감 기준 관찰"
-        reason = "직전 정규장 가격 기준은 확보됐지만 신규 진입은 개장 후 실시간 반응을 확인합니다."
+        label = "장마감 기준가 관찰"
+        reason = "직전 정규장 마감 가격 기준으로 후보를 평가합니다. 신규 진입은 개장 후 실시간 가격·거래량 반응을 확인합니다."
     elif display_ready:
         label = "반응 검증 대기"
         reason = "가격과 재료는 확보됐지만 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
@@ -5724,7 +5724,7 @@ def enforce_trade_data_gate_on_candidate(candidate: dict) -> dict:
     if compression and (str(compression.get("tier", "")) in {"core", "entry"} or bool(compression.get("tradeReady"))):
         compression.update({
             "tier": "wait",
-            "label": "장마감 관찰" if gate.get("closedBaseline") else "보강 대기",
+            "label": "장마감 기준가 관찰" if gate.get("closedBaseline") else "보강 대기",
             "tradeReady": False,
             "entryReady": False,
             "reason": reason,

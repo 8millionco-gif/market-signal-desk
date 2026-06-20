@@ -1719,7 +1719,7 @@ function evaluationModeForDisplay(item) {
   const primaryBlocker = mode.primaryBlocker || readiness.primaryBlocker || blockerReasons[0] || "";
   const fallback = {
     entry_ready: ["실시간 평가 가능", "ready", "서버가 가격·등락률·거래 반응을 확보했습니다."],
-    closed_baseline: ["장마감 기준", "baseline", "직전 정규장 가격 기준입니다. 신규 진입은 개장 후 확인합니다."],
+    closed_baseline: ["장마감 기준가", "baseline", "직전 정규장 마감 가격 기준입니다. 신규 진입은 개장 후 확인합니다."],
     display_ready: ["후보 분석 가능", "analysis", "가격과 재료는 확보됐지만 거래 반응 보강 전까지 진입 후보로 올리지 않습니다."],
     collecting_change: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
     change_wait: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
@@ -1953,12 +1953,13 @@ function reactionStageForDisplay(item) {
   let label = decision.label || reaction.decisionLabel || "가격 확인 필요";
   let tone = decision.tone || "wait";
   let summary = decision.summary || reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
+  const isBaseline = evaluation.status === "baseline";
   if (evaluation.status === "collecting" || evaluation.status === "blocked") {
     label = evaluation.label;
     tone = "wait";
     summary = evaluation.message;
-  } else if (evaluation.status === "baseline") {
-    label = "장마감 기준";
+  } else if (isBaseline) {
+    label = "장마감 기준가";
     tone = "wait";
     summary = evaluation.message;
   }
@@ -1967,22 +1968,22 @@ function reactionStageForDisplay(item) {
     else if (decision.key === "confirmed") tone = "buy";
     else if (decision.key === "watch") tone = "watch";
     else tone = "wait";
-  } else if (gate === "blocked") {
+  } else if (!isBaseline && gate === "blocked") {
     label = "오늘 제외";
     tone = "risk";
     summary = reaction.nextCheck || "재료 대비 가격 또는 거래량 반응이 부정적이라 신규 진입을 막습니다.";
-  } else if (reaction.entryReady || reaction.supportsEntry || (gate === "confirmed" && !reaction.entryBlock)) {
+  } else if (!isBaseline && (reaction.entryReady || reaction.supportsEntry || (gate === "confirmed" && !reaction.entryBlock))) {
     label = "가격 반응 확인";
     tone = "buy";
     summary = reaction.nextCheck || "뉴스 재료와 가격 움직임이 같은 방향으로 확인됩니다.";
-  } else if (reaction.entryBlock || gate === "wait") {
+  } else if (!isBaseline && (reaction.entryBlock || gate === "wait")) {
     label = "가격 확인 필요";
     tone = "wait";
     summary = reaction.nextCheck || "실시간 가격·거래량·수급 중 부족한 조건을 확인한 뒤 판단합니다.";
-  } else if (gate === "watch") {
+  } else if (!isBaseline && gate === "watch") {
     label = "관찰 유지";
     summary = reaction.nextCheck || "일부 반응은 있으나 진입 판단 전 가격 흐름을 더 확인합니다.";
-  } else if (hasPositivePrice && hasVolume) {
+  } else if (!isBaseline && hasPositivePrice && hasVolume) {
     label = "반응 관찰";
     summary = reaction.nextCheck || "가격과 거래량 단서는 있으나 확인 개수가 아직 부족합니다.";
   }
@@ -2030,7 +2031,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
   }
   if (evaluation.status === "baseline" && !selectedHoldingFor(item)) {
-    return { key: "wait", label: "장마감 기준", detail: evaluation.message };
+    return { key: "wait", label: "장마감 기준가", detail: evaluation.message };
   }
   if (evaluation.status === "analysis" && decision.actionKey === "verify") {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
@@ -2040,7 +2041,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   }
   if (decision.actionKey === "buy" || decision.actionKey === "add" || gate.key === "actionable") {
     if (freshness.isBaseline) {
-      return { key: "wait", label: "개장 후 확인", detail: freshness.message || "마감가 기준 분석입니다. 개장 후 가격·거래량 반응을 확인하세요." };
+      return { key: "wait", label: "장마감 기준가", detail: freshness.message || "장마감 기준가 분석입니다. 개장 후 가격·거래량 반응을 확인하세요." };
     }
     if (!freshness.isFresh) {
       return { key: "wait", label: "가격 확인 필요", detail: freshness.message || "토스 현재가를 다시 확인한 뒤 진입 여부를 판단합니다." };
@@ -5740,8 +5741,8 @@ function tradeNowGuide(item, plan) {
     if (freshness.isBaseline) {
       return {
         tone: "wait",
-        title: "개장 후 확인",
-        summary: freshness.message || "마감가 기준 분석입니다. 개장 후 가격·거래량 반응을 확인하세요.",
+        title: "장마감 기준가",
+        summary: freshness.message || "장마감 기준가 분석입니다. 개장 후 가격·거래량 반응을 확인하세요.",
         current,
         focus: entry
       };
