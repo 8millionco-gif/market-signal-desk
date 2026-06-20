@@ -339,6 +339,7 @@ DB_MIGRATION_STATUS: dict[str, object] = {
     "marketData": "pending",
     "newsEventsLatest": "pending",
     "newsEventsInserted": 0,
+    "rawEventsInserted": 0,
     "discoveryLatest": "pending",
     "snapshotsInserted": 0,
     "snapshotsScanned": 0,
@@ -658,6 +659,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "marketData": "disabled",
             "newsEventsLatest": "disabled",
             "newsEventsInserted": 0,
+            "rawEventsInserted": 0,
             "discoveryLatest": "disabled",
             "error": "",
         }
@@ -686,6 +688,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             "marketData": "missing",
             "newsEventsLatest": "missing",
             "newsEventsInserted": 0,
+            "rawEventsInserted": 0,
             "discoveryLatest": "missing",
             "snapshotsInserted": 0,
             "snapshotsScanned": 0,
@@ -698,6 +701,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
             candidate_data = safe_read_json_file(CANDIDATE_DATA_FILE)
             market_latest = safe_read_json_file(MARKET_DATA_LATEST_FILE)
             news_latest = safe_read_json_file(NEWS_EVENTS_FILE)
+            raw_latest = safe_read_json_file(RAW_EVENTS_FILE)
             discovery_latest = safe_read_json_file(DISCOVERY_LATEST_FILE)
             run_paths = []
             if RUNS_DIR.exists() and SIGNAL_DB_MIGRATE_RUN_LIMIT != 0:
@@ -777,6 +781,40 @@ def migrate_files_to_database(force: bool = False) -> dict:
                             )
                             news_events_inserted += max(0, cur.rowcount)
                     status["newsEventsInserted"] = news_events_inserted
+
+                    raw_events_inserted = 0
+                    raw_events = []
+                    if isinstance(raw_latest, dict) and isinstance(raw_latest.get("events"), list):
+                        raw_events = [event for event in raw_latest.get("events", []) if isinstance(event, dict)]
+                    elif isinstance(raw_latest, list):
+                        raw_events = [event for event in raw_latest if isinstance(event, dict)]
+                    for event in raw_events:
+                        event_id = str(event.get("id", "")).strip()
+                        source = str(event.get("source", "")).strip()
+                        event_type = str(event.get("eventType", "")).strip()
+                        collected_at = str(event.get("collectedAt", "")).strip()
+                        if not event_id or not source or not event_type or not collected_at:
+                            continue
+                        cur.execute(
+                            """
+                            INSERT INTO signal_raw_events (
+                                id, source, event_type, symbol, query, collected_at, payload
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (id) DO NOTHING
+                            """,
+                            (
+                                event_id,
+                                source,
+                                event_type,
+                                event.get("symbol", ""),
+                                event.get("query", ""),
+                                collected_at,
+                                Jsonb(event.get("payload", {})),
+                            ),
+                        )
+                        raw_events_inserted += max(0, cur.rowcount)
+                    status["rawEventsInserted"] = raw_events_inserted
 
                     if isinstance(discovery_latest, dict) and discovery_latest:
                         cur.execute(
@@ -2538,7 +2576,7 @@ def database_status() -> dict:
         "counts": counts,
         "message": message,
         "nextAction": next_action,
-        "error": DB_LAST_ERROR,
+        "error": "" if ready and counts else DB_LAST_ERROR,
     }
 
 
@@ -5581,6 +5619,27 @@ def candidate_source_wait_reason(source_value: object, data_label: str) -> str:
     return f"{data_label} 수집 대기"
 
 
+def candidate_has_closed_baseline_context(value: dict) -> bool:
+    if not isinstance(value, dict):
+        return False
+    readiness = value.get("priceReadiness", {}) if isinstance(value.get("priceReadiness"), dict) else {}
+    evaluation = value.get("evaluationMode", {}) if isinstance(value.get("evaluationMode"), dict) else {}
+    trade_gate = value.get("tradeDataGate", {}) if isinstance(value.get("tradeDataGate"), dict) else {}
+    freshness = value.get("freshness", {}) if isinstance(value.get("freshness"), dict) else {}
+    completeness = value.get("dataCompleteness", {}) if isinstance(value.get("dataCompleteness"), dict) else {}
+    completeness_freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else {}
+    return bool(
+        str(readiness.get("key", "")) == "closed_baseline"
+        or str(evaluation.get("key", "")) == "closed_baseline"
+        or bool(trade_gate.get("closedBaseline"))
+        or bool(completeness.get("closedMarketBaseline"))
+        or str(freshness.get("status", "")) == "closed-baseline"
+        or str(completeness_freshness.get("status", "")) == "closed-baseline"
+        or str(value.get("dataGateLabel", "")) == "다음 장 우선 관찰"
+        or "장마감 기준가" in str(value.get("dataGateReason", ""))
+    )
+
+
 def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = None) -> list[str]:
     if not isinstance(candidate, dict):
         return []
@@ -8546,6 +8605,11 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
     completeness = candidate.get("dataCompleteness", {}) if isinstance(candidate.get("dataCompleteness"), dict) else candidate_data_completeness(candidate)
     price_readiness = candidate_price_readiness(candidate)
     evaluation_mode = candidate_evaluation_mode(candidate)
+    closed_baseline_mode = candidate_has_closed_baseline_context({
+        **candidate,
+        "priceReadiness": price_readiness,
+        "evaluationMode": evaluation_mode,
+    })
     display_data_ready = bool(completeness.get("displayReady"))
     entry_data_ready = bool(completeness.get("entryReady"))
     missing_data = completeness.get("missing", []) if isinstance(completeness.get("missing"), list) else []
@@ -8584,6 +8648,9 @@ def candidate_final_decision(candidate: dict, score_detail: dict, total: int, re
         action_key, action, tone = "verify", evaluation_mode["label"], "wait"
         missing_text = ", ".join(str(item) for item in missing_data[:4]) if missing_data else "필수 데이터"
         summary = evaluation_mode["message"] or f"{missing_text} 확인 전까지 신규 진입 판단을 확정하지 않습니다."
+    elif closed_baseline_mode:
+        action_key, action, tone = "watch", "다음 장 관찰", "wait"
+        summary = "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보로 유지합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
     elif not entry_data_ready:
         action_key, action, tone = "verify", evaluation_mode["label"], "wait"
         summary = evaluation_mode["message"]
@@ -8896,6 +8963,10 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     action_key = str(final_decision.get("actionKey", "verify"))
     gate_key = str(gate.get("key", "defer"))
+    closed_baseline_mode = candidate_has_closed_baseline_context({
+        **candidate,
+        "priceReadiness": price_readiness,
+    })
     material_news = bounded_int(evidence_strength.get("materialNews", 0), 0, 100)
     official_positive = bounded_int(official.get("positiveCount", 0), 0, 100)
     if material_news >= 2 or official_positive > 0:
@@ -8937,6 +9008,9 @@ def candidate_signal_validation_profile(candidate: dict) -> dict:
         blockers.append("리스크 또는 제외 판단이 우선")
     elif not price_readiness["displayReady"]:
         key, label, priority = "insufficient", price_readiness["label"], 3
+    elif closed_baseline_mode and has_material_evidence:
+        key, label, priority = "evidence_wait", "다음 장 관찰", 2
+        blockers.append("장 시작 후 가격·거래량 반응 확인 전")
     elif not price_readiness["entryReady"] and has_material_evidence:
         key, label, priority = "evidence_wait", price_readiness["label"], 2
         blockers.append("실시간 가격·거래량·수급 반응 확인 전")
@@ -9819,6 +9893,7 @@ def candidate_pool_monitor_profile(record: dict) -> dict:
     reaction_gate = str(record.get("reactionGate", ""))
     validation_key = str(record.get("validationKey", ""))
     final_action = str(record.get("finalActionKey", ""))
+    closed_baseline_mode = candidate_has_closed_baseline_context(record)
     performance_measured = bounded_int(record.get("performanceMeasuredCount", 0), 0, 100_000)
     performance_average = (
         decimal_or_none(record.get("performanceAverageChangeRate"))
@@ -9855,6 +9930,9 @@ def candidate_pool_monitor_profile(record: dict) -> dict:
     if final_action in {"buy", "add"} or state_key == "entry_candidate":
         label = "핵심 재검토"
         reason = "최종 판단 또는 후보 풀 상태가 진입 후보에 가까움"
+    elif closed_baseline_mode and evidence >= 55:
+        label = "다음 장 관찰"
+        reason = "장마감 기준가와 전일 등락률 기준으로 유지하고 장 시작 후 가격·거래량 반응 확인"
     elif evidence >= 65 and reaction_gate != "confirmed":
         label = "반응 대기"
         reason = "근거는 있으나 가격·거래량 반응 확인 전"
@@ -14733,6 +14811,22 @@ def snapshot_storage_status() -> dict:
     news_events = news_event_storage_status()
     candidate_data = candidate_data_snapshot_status()
     market_data = market_data_latest_status()
+    migration_attempt = None
+    if db_status["enabled"] and db_status["ready"]:
+        needs_file_promotion = any([
+            candidate_data.get("readSource") == "filesystem" and bounded_int(candidate_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
+            market_data.get("readSource") == "filesystem" and bounded_int(market_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
+            news_events.get("implementation") == "filesystem" and bounded_int(news_events.get("count", 0), 0, 10_000_000) > 0,
+            raw_events.get("implementation") == "filesystem" and bounded_int(raw_events.get("count", 0), 0, 10_000_000) > 0,
+        ])
+        if needs_file_promotion:
+            migration_attempt = migrate_files_to_database(force=True)
+            if not migration_attempt.get("error"):
+                db_status = database_status()
+                raw_events = raw_event_storage_status()
+                news_events = news_event_storage_status()
+                candidate_data = candidate_data_snapshot_status()
+                market_data = market_data_latest_status()
     analysis_ready = bool(
         bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
         and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
@@ -14776,6 +14870,7 @@ def snapshot_storage_status() -> dict:
             "newsEvents": news_events,
             "candidateData": candidate_data,
             "marketData": market_data,
+            "migrationAttempt": migration_attempt or {},
             "message": message,
             "error": error,
         }
@@ -14816,6 +14911,7 @@ def snapshot_storage_status() -> dict:
         "newsEvents": news_events,
         "candidateData": candidate_data,
         "marketData": market_data,
+        "migrationAttempt": migration_attempt or {},
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
