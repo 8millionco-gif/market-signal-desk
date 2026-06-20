@@ -55,8 +55,12 @@ SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2
 SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
+SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
+    0,
+    int(os.getenv("SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS", "2") or "2"),
+)
 SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_DB_CONNECTION_TTL_SECONDS = max(10, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "120") or "120"))
+SIGNAL_DB_CONNECTION_TTL_SECONDS = max(10, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "45") or "45"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
@@ -516,9 +520,43 @@ def db_diag_now() -> str:
     return datetime.now(KST).isoformat(timespec="seconds")
 
 
+def db_error_classification(error: Exception | str) -> dict:
+    message = str(error)[:240]
+    lower_message = message.lower()
+    error_type = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
+    lower_type = error_type.lower()
+    stale_patterns = (
+        "unexpected eof",
+        "ssl error",
+        "consuming input failed",
+        "connection reset",
+        "could not receive data",
+        "could not send data",
+        "connection already closed",
+        "connection is closed",
+    )
+    stale_connection = any(pattern in lower_message for pattern in stale_patterns)
+    connection_failure = (
+        stale_connection
+        or "operationalerror" in lower_type
+        or "interfaceerror" in lower_type
+        or "connection failed" in lower_message
+        or "connection refused" in lower_message
+        or "server closed the connection" in lower_message
+        or "terminating connection" in lower_message
+    )
+    return {
+        "message": message,
+        "type": error_type,
+        "connectionFailure": connection_failure,
+        "staleConnection": stale_connection,
+    }
+
+
 def set_db_error(error: Exception | str) -> None:
     global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE, DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
-    message = str(error)[:240]
+    classification = db_error_classification(error)
+    message = classification["message"]
     if message.startswith("database temporarily unavailable"):
         DB_LAST_BACKOFF_MESSAGE = message
         DB_LAST_BACKOFF_AT = db_diag_now()
@@ -527,19 +565,20 @@ def set_db_error(error: Exception | str) -> None:
     DB_LAST_ERROR = message
     if message:
         DB_LAST_ERROR_AT = db_diag_now()
-        DB_LAST_ERROR_TYPE = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
-        lower_message = message.lower()
-        error_type = DB_LAST_ERROR_TYPE.lower()
-        connection_failure = (
-            "operationalerror" in error_type
-            or "interfaceerror" in error_type
-            or "connection failed" in lower_message
-            or "connection refused" in lower_message
-            or "server closed the connection" in lower_message
-            or "terminating connection" in lower_message
-            or "connection is closed" in lower_message
-        )
-        if connection_failure:
+        DB_LAST_ERROR_TYPE = classification["type"]
+        if classification["connectionFailure"]:
+            if classification["staleConnection"]:
+                close_db_shared_connection()
+                backoff_seconds = SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS
+                DB_FAILURE_BACKOFF_UNTIL = max(
+                    DB_FAILURE_BACKOFF_UNTIL,
+                    time.time() + backoff_seconds,
+                )
+                DB_LAST_BACKOFF_MESSAGE = (
+                    f"database connection refreshed; retry in {backoff_seconds}s"
+                )
+                DB_LAST_BACKOFF_AT = db_diag_now()
+                return
             DB_FAILURE_BACKOFF_UNTIL = max(
                 DB_FAILURE_BACKOFF_UNTIL,
                 time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
@@ -700,6 +739,7 @@ def db_connection_reuse_status() -> dict:
     return {
         "enabled": SIGNAL_DB_REUSE_CONNECTION,
         "ttlSeconds": SIGNAL_DB_CONNECTION_TTL_SECONDS,
+        "staleBackoffSeconds": SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS,
         "hasConnection": DB_SHARED_CONNECTION is not None and not db_connection_closed(DB_SHARED_CONNECTION),
         "ageSeconds": age_seconds,
         "message": "짧은 DB 작업은 재사용 커넥션으로 직렬화해 Render Postgres 연결 폭주를 줄입니다.",
@@ -3499,6 +3539,11 @@ def database_status(fast: bool = False) -> dict:
         "lastError": "" if ready else DB_LAST_ERROR,
         "lastErrorAt": "" if ready else DB_LAST_ERROR_AT,
         "lastErrorType": "" if ready else DB_LAST_ERROR_TYPE,
+        "lastErrorClassification": (
+            {"connectionFailure": False, "staleConnection": False}
+            if ready
+            else db_error_classification(DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)
+        ),
         "lastBackoffMessage": "" if ready else DB_LAST_BACKOFF_MESSAGE,
         "lastBackoffAt": "" if ready else DB_LAST_BACKOFF_AT,
         "lastConnectAttemptAt": DB_LAST_CONNECT_ATTEMPT_AT,
