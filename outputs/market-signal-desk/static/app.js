@@ -3456,163 +3456,63 @@ function renderMarket() {
   els.marketNote.textContent = [fxText, indexText, liveText, snapshotText, cacheText, market.note].filter(Boolean).join("  ·  ");
 }
 
+function candidateBriefForMain(summary = {}) {
+  const discovery = state.dashboard?.integrations?.discovery ?? {};
+  const cache = state.dashboard?.cache ?? {};
+  const compressionCounts = summary.candidateCompressionCounts ?? {};
+  const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
+  const sourceLabel = candidateSourceLabel(summary);
+  const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
+  const actionCount = Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const waitCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
+  const candidateCount = Number(summary.candidateCount ?? 0);
+  const liveCount = Number(priceBasis.live ?? 0);
+  const closedCount = Number(priceBasis.closed_baseline ?? 0);
+  const lastGoodCount = Number(priceBasis.last_good ?? 0);
+  const materialNews = Number(
+    summary.selectedMaterialNewsCount ??
+      summary.materialNewsCount ??
+      discovery.selectedMaterialNewsItemCount ??
+      discovery.materialNewsItemCount ??
+      0
+  );
+  const priceText =
+    liveCount > 0
+      ? `실시간 ${liveCount}`
+      : closedCount > 0
+        ? `장마감 ${closedCount}`
+        : lastGoodCount > 0
+          ? `마지막값 ${lastGoodCount}`
+          : "가격 보강";
+  const sourceText = cache.cached
+    ? cache.source === "browser_cache"
+      ? "브라우저 저장본"
+      : cache.source === "discovery_latest"
+        ? "저장 발굴본"
+        : "저장 스냅샷"
+    : sourceLabel;
+  const line = [
+    sourceText,
+    candidateCount ? `후보 ${candidateCount}` : "",
+    `핵심 ${coreCount}`,
+    actionCount ? `진입 ${actionCount}` : "",
+    waitCount ? `대기 ${waitCount}` : "",
+    materialNews ? `재료 ${materialNews}` : "",
+    priceText
+  ].filter(Boolean).join(" · ");
+  return {
+    line: shortText(line || sourceLabel, 64),
+    title: line || sourceLabel
+  };
+}
+
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
-  const discovery = state.dashboard?.integrations?.discovery ?? {};
-  const actions = candidateActionSummary(state.dashboard?.candidates ?? []);
-  const hiddenCount = (state.dashboard?.candidates ?? []).filter(isHiddenOpportunity).length;
-  const hiddenOpportunityCount = Number(summary.hiddenOpportunityCount ?? 0);
-  const averageOpportunityScore = Number(summary.averageOpportunityScore ?? 0);
   els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
   if (els.candidateSource) {
-    const sourceLabel = candidateSourceLabel(summary);
-    const scanned = summary.scannedCount ?? discovery.scannedCount;
-    const newsCount = summary.discoveryNewsCount ?? discovery.newsItemCount;
-    const materialNews = summary.selectedMaterialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? summary.materialNewsCount ?? discovery.materialNewsItemCount;
-    const filtered = summary.filteredNewsCount ?? discovery.filteredNewsCount;
-    const domestic = summary.domesticSelected ?? discovery.domesticSelected;
-    const overseas = summary.overseasSelected ?? discovery.overseasSelected;
-    const target = summary.selectionLimit ?? discovery.selectionLimit ?? summary.targetCandidateCount ?? discovery.targetCandidateCount;
-    const domesticShortfall = Number(summary.domesticShortfall ?? discovery.domesticShortfall ?? 0);
-    const overseasShortfall = Number(summary.overseasShortfall ?? discovery.overseasShortfall ?? 0);
-    const shortfallText =
-      domesticShortfall || overseasShortfall
-        ? ` · 부족 국내 ${domesticShortfall} · 해외 ${overseasShortfall}`
-        : "";
-    const splitText =
-      domestic || overseas
-        ? ` · 선별폭 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}${shortfallText}`
-        : "";
-    const actionText = actions.buy || actions.wait || actions.exclude ? ` · 진입 ${actions.buy} · 대기 ${actions.wait} · 제외 ${actions.exclude}` : "";
-    const hiddenText = hiddenCount ? ` · 숨은 ${hiddenCount}` : "";
-    const opportunityText = hiddenOpportunityCount ? ` · 기회 ${hiddenOpportunityCount} · 평균 ${averageOpportunityScore}/18` : "";
-    const groups = summary.decisionGroups ?? {};
-    const gates = summary.qualityGateCounts ?? {};
-    const reactions = summary.priceReactionCounts ?? {};
-    const reactionGates = summary.priceReactionGateCounts ?? {};
-    const decisions = summary.finalDecisionCounts ?? {};
-    const compressionCounts = summary.candidateCompressionCounts ?? {};
-    const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
-    const reviewCount = Number(summary.reviewCandidateCount ?? compressionCounts.review ?? 0);
-    const waitCompressionCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
-    const portfolioCompressionCount = Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
-    const excludeCompressionCount = Number(summary.excludeCandidateCompressionCount ?? compressionCounts.exclude ?? 0);
-    const validationCounts = summary.signalValidationCounts ?? {};
-    const confirmedSignals = Number(summary.confirmedSignalCount ?? validationCounts.confirmed ?? 0);
-    const evidenceWaitSignals = Number(summary.evidenceWaitSignalCount ?? validationCounts.evidence_wait ?? 0);
-    const reactionOnlySignals = Number(summary.reactionOnlySignalCount ?? validationCounts.reaction_only ?? 0);
-    const blockedSignals = Number(summary.blockedSignalCount ?? validationCounts.blocked ?? 0);
-    const confidence = summary.averageDataConfidence;
-    const sourceReliability = summary.averageSourceReliability;
-    const averageReaction = summary.averagePriceReaction;
-    const officialCounts = summary.officialEventCounts ?? {};
-    const officialCandidates = Number(summary.officialEventCandidateCount ?? 0);
-    const officialRisk = Number(summary.officialRiskCandidateCount ?? officialCounts.highRisk ?? 0);
-    const gateText =
-      gates.actionable || gates.watch || gates.defer || gates.exclude
-        ? ` · 실전 ${gates.actionable ?? 0} · 관찰 ${gates.watch ?? 0} · 대기 ${gates.defer ?? 0} · 제외 ${gates.exclude ?? 0}`
-        : "";
-    const confidenceText = confidence != null ? ` · 평균 신뢰 ${confidence}/100` : "";
-    const sourceReliabilityCounts = summary.sourceReliabilityCounts ?? {};
-    const sourceReliabilityText =
-      sourceReliability != null
-        ? ` · 원천신뢰 ${sourceReliability}/100 · 높음 ${sourceReliabilityCounts.high ?? 0} · 부족 ${sourceReliabilityCounts.poor ?? 0}`
-        : "";
-    const reactionText =
-      reactions.strong || reactions.confirmed || reactions.weak || reactions.missing
-        ? ` · 가격반응 강 ${reactions.strong ?? 0} · 확인 ${reactions.confirmed ?? 0} · 약 ${reactions.weak ?? 0} · 부족 ${reactions.missing ?? 0}`
-        : "";
-    const reactionGateText =
-      reactionGates.confirmed || reactionGates.watch || reactionGates.wait || reactionGates.blocked || summary.priceReactionEntryBlockedCount
-        ? ` · 반응게이트 확인 ${reactionGates.confirmed ?? 0} · 관찰 ${reactionGates.watch ?? 0} · 대기 ${reactionGates.wait ?? 0} · 차단 ${reactionGates.blocked ?? 0} · 진입차단 ${summary.priceReactionEntryBlockedCount ?? 0}`
-        : "";
-    const evaluationCounts = summary.evaluationModeCounts ?? {};
-    const realtimeEvaluationReady = Number(summary.tradeEvaluationReadyCount ?? evaluationCounts.entry_ready ?? 0);
-    const baselineEvaluation = Number(summary.baselineEvaluationCount ?? evaluationCounts.closed_baseline ?? 0);
-    const serverCollecting = Number(
-      summary.serverCollectingCount ??
-      ((evaluationCounts.collecting_change ?? 0) + (evaluationCounts.collecting_price ?? 0) + (evaluationCounts.collecting ?? 0))
-    );
-    const unavailableEvaluation = Number(summary.unavailableEvaluationCount ?? evaluationCounts.unavailable ?? 0);
-    const evaluationText =
-      realtimeEvaluationReady || baselineEvaluation || serverCollecting || unavailableEvaluation
-        ? ` · 평가 실시간 ${realtimeEvaluationReady} · 마감기준 ${baselineEvaluation} · 서버수집 ${serverCollecting} · 불가 ${unavailableEvaluation}`
-        : "";
-    const priceReadiness = summary.priceReadinessCounts ?? {};
-    const entryDataReady = Number(summary.entryDataReadyCount ?? priceReadiness.entry_ready ?? 0);
-    const closedBaselineCount = Number(summary.closedBaselineCandidateCount ?? priceReadiness.closed_baseline ?? 0);
-    const displayDataReady = Number(summary.displayDataReadyCount ?? 0);
-    const priceWaitCount = Number(summary.priceBasisWaitCount ?? priceReadiness.price_wait ?? 0);
-    const changeWaitCount = Number(summary.changeWaitCount ?? priceReadiness.change_wait ?? 0);
-    const priceReadyText =
-      evaluationText
-        ? evaluationText
-        : entryDataReady || closedBaselineCount || displayDataReady || priceWaitCount || changeWaitCount
-        ? ` · 가격준비 진입 ${entryDataReady} · 장마감 ${closedBaselineCount} · 표시 ${displayDataReady} · 가격대기 ${priceWaitCount} · 등락대기 ${changeWaitCount}`
-        : "";
-    const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
-    const portfolioLinked = Number(summary.portfolioLinkedCandidateCount ?? 0);
-    const portfolioText = portfolioLinked
-      ? ` · 보유연결 ${portfolioLinked} · 추가 ${decisions.add ?? 0} · 보유 ${decisions.hold ?? 0} · 매도 ${decisions.trim ?? 0} · 손절 ${decisions.stop ?? 0}`
-      : "";
-    const officialText = officialCandidates
-      ? ` · 공식 ${officialCandidates} · 긍정 ${officialCounts.positive ?? 0} · 리스크 ${officialRisk}`
-      : "";
-    const compressionText =
-      coreCount || reviewCount || waitCompressionCount || portfolioCompressionCount || excludeCompressionCount
-        ? ` · 압축 핵심 ${coreCount}/${summary.coreCandidateLimit ?? 3} · 검토 ${reviewCount} · 대기 ${waitCompressionCount} · 보유 ${portfolioCompressionCount} · 제외 ${excludeCompressionCount}`
-        : "";
-    const validationText =
-      confirmedSignals || evidenceWaitSignals || reactionOnlySignals || blockedSignals
-        ? ` · 검증 확인 ${confirmedSignals} · 반응대기 ${evidenceWaitSignals} · 가격선행 ${reactionOnlySignals} · 차단 ${blockedSignals}`
-        : "";
-    const poolCounts = summary.candidatePoolStatusCounts ?? {};
-    const poolTotal = Number(summary.candidatePoolCount ?? 0);
-    const poolActive = Number(summary.candidatePoolActiveCount ?? 0);
-    const poolPerformance = Number(summary.candidatePoolPerformanceMeasuredCount ?? 0);
-    const poolText =
-      poolTotal || poolActive
-        ? ` · 후보풀 ${poolActive}/${poolTotal} · 풀성과 ${poolPerformance}건 · 승률 ${summary.candidatePoolPerformanceHitRate ?? "-"} · 풀재점검 ${summary.candidatePoolRetainedScanCount ?? 0} · 풀선정 ${summary.candidatePoolSelectedCount ?? 0} · 진입 ${poolCounts.entry_candidate ?? 0} · 검증 ${poolCounts.validating ?? 0} · 관찰 ${poolCounts.watching ?? 0} · 눌림 ${poolCounts.pullback_wait ?? 0} · 개선 ${summary.candidatePoolImprovingCount ?? 0} · 약화 ${summary.candidatePoolWeakeningCount ?? 0}`
-        : "";
-    const groupText =
-      groups.action || groups.hidden || groups.momentum
-        ? ` · 그룹 진입 ${groups.action ?? 0} · 숨은 ${groups.hidden ?? 0} · 모멘텀 ${groups.momentum ?? 0}`
-        : "";
-    const qualityPrimary = summary.qualitySelectedPrimary ?? discovery.qualitySelectedPrimary;
-    const qualityReserve = summary.qualitySelectedReserve ?? discovery.qualitySelectedReserve;
-    const qualityFallback = summary.qualitySelectedFallback ?? discovery.qualitySelectedFallback;
-    const qualityRejected = summary.qualityRejectedCount ?? discovery.qualityRejectedCount;
-    const evidenceStrong = Number(summary.evidenceStrongCount ?? discovery.evidenceStrongCount ?? 0);
-    const evidenceQualified = Number(summary.evidenceQualifiedCount ?? discovery.evidenceQualifiedCount ?? 0);
-    const evidenceThin = Number(summary.evidenceThinCount ?? discovery.evidenceThinCount ?? 0);
-    const evidenceRisk = Number(summary.evidenceRiskCount ?? discovery.evidenceRiskCount ?? 0);
-    const evidenceWeak = Number(summary.evidenceWeakCount ?? discovery.evidenceWeakCount ?? 0);
-    const evidenceAverage = summary.averageEvidenceScore ?? discovery.averageEvidenceScore;
-    const qualityText =
-      qualityPrimary != null || qualityReserve != null || qualityFallback != null || qualityRejected != null
-        ? ` · 품질 1차 ${qualityPrimary ?? 0} · 보조 ${qualityReserve ?? 0}${qualityFallback ? ` · 예비 ${qualityFallback}` : ""} · 제외 ${qualityRejected ?? 0}`
-        : "";
-    const evidenceText =
-      evidenceStrong || evidenceQualified || evidenceThin || evidenceRisk || evidenceWeak
-        ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
-        : "";
-    const cache = state.dashboard?.cache ?? {};
-    const cacheText = cache.cached
-      ? `${cache.source === "discovery_latest" ? "저장 발굴본" : "저장 스냅샷"}${cache.createdAt ? ` · ${timeLabel(cache.createdAt)}` : ""}`
-      : "";
-    const briefSplitText =
-      domestic || overseas
-        ? `선별 ${target ?? "-"} · 국내 ${domestic ?? 0}/${summary.domesticLimit ?? discovery.domesticLimit ?? 10} · 해외 ${overseas ?? 0}/${summary.overseasLimit ?? discovery.overseasLimit ?? 10}`
-        : "";
-    const briefDecisionText =
-      coreCount || reviewCount || waitCompressionCount || portfolioCompressionCount
-        ? `핵심 ${coreCount} · 검토 ${reviewCount} · 대기 ${waitCompressionCount} · 보유 ${portfolioCompressionCount}`
-        : "";
-    const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
-    const visibleSelectionText = briefDecisionText || briefSplitText;
-    const briefText = [cacheText || sourceLabel, visibleSelectionText, briefMaterialText].filter(Boolean).join(" · ");
-    els.candidateSource.textContent = shortText(briefText || sourceLabel, 84);
-    els.candidateSource.title = briefText || sourceLabel;
+    const brief = candidateBriefForMain(summary);
+    els.candidateSource.textContent = brief.line;
+    els.candidateSource.title = brief.title;
   }
   renderCandidateSourceDetail();
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
