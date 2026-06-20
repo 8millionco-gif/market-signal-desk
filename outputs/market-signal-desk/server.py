@@ -15859,7 +15859,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
     missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
     price_coverage = (
-        round(stored_price_count / stored_candidate_count, 4)
+        min(1, round(stored_price_count / stored_candidate_count, 4))
         if stored_candidate_count > 0
         else 0
     )
