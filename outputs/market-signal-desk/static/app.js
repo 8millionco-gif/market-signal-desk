@@ -43,7 +43,7 @@ function detectedAnalysisMode(date = new Date()) {
   const { weekday, hour, minute } = koreaTimeParts(date);
   const minutes = hour * 60 + minute;
   if (["Sat", "Sun"].includes(weekday)) return "close";
-  if (minutes <= 15 * 60 + 30) return "intraday";
+  if (minutes >= 9 * 60 && minutes < 15 * 60 + 30) return "intraday";
   return "close";
 }
 

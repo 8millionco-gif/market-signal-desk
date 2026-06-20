@@ -50,6 +50,9 @@ SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "3") or "3"))
+SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "10") or "10"))
+SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
@@ -77,6 +80,7 @@ SIGNAL_NEWS_EVENT_MAX_ITEMS = max(
 )
 NEWS_EVENTS_KV_KEY = "news_events_latest"
 SIGNAL_MARKET_DATA_LATEST_ENABLED = os.getenv("SIGNAL_MARKET_DATA_LATEST_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_LIVE_PRICE_DB_ONLY = os.getenv("SIGNAL_LIVE_PRICE_DB_ONLY", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_MARKET_DATA_LATEST_MAX_ITEMS = max(
     1,
     min(
@@ -430,6 +434,29 @@ def psycopg_modules():
     return psycopg, json_module.Jsonb
 
 
+def db_connect_with_retry():
+    last_error: Exception | None = None
+    for attempt in range(SIGNAL_DB_CONNECT_RETRIES):
+        try:
+            psycopg, Jsonb = psycopg_modules()
+            return psycopg, Jsonb, psycopg.connect(
+                DATABASE_URL,
+                connect_timeout=SIGNAL_DB_CONNECT_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            last_error = error
+            set_db_error(error)
+            if attempt + 1 < SIGNAL_DB_CONNECT_RETRIES:
+                time.sleep(SIGNAL_DB_RETRY_DELAY_SECONDS * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("database connection failed")
+
+
+def db_connection():
+    return db_connect_with_retry()[2]
+
+
 def safe_read_json_file(path: Path):
     try:
         if path.exists():
@@ -456,7 +483,7 @@ def ensure_database_schema() -> bool:
             return True
         try:
             psycopg, _jsonb = psycopg_modules()
-            with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
@@ -595,7 +622,7 @@ def db_storage_counts() -> dict:
         return {}
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM signal_kv")
                 kv_count = cur.fetchone()[0]
@@ -709,7 +736,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
                 run_paths = sorted(RUNS_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
                 if limit:
                     run_paths = run_paths[:limit]
-            with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with db_connection() as conn:
                 with conn.cursor() as cur:
                     def upsert_file_kv_if_db_empty(key: str, payload: object, status_key: str, item_key: str = "items") -> None:
                         if isinstance(payload, dict) and payload_item_count(payload, item_key) > 0:
@@ -906,7 +933,7 @@ def db_read_kv(key: str, fallback):
         return fallback
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT payload FROM signal_kv WHERE key = %s", (key,))
                 row = cur.fetchone()
@@ -923,7 +950,7 @@ def db_write_kv(key: str, payload) -> bool:
         return False
     try:
         psycopg, Jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1016,7 +1043,7 @@ def db_write_snapshot(snapshot: dict, file_name: str = "") -> bool:
         return False
     try:
         psycopg, Jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1098,7 +1125,7 @@ def db_write_raw_event(event: dict) -> bool:
         return False
     try:
         psycopg, Jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1528,6 +1555,26 @@ def market_data_latest_status() -> dict:
     data = market_data_latest_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+    price_items = [
+        item
+        for item in items.values()
+        if isinstance(item, dict) and str(item.get("eventType", "")).strip().lower() in {"price", "prices"}
+    ]
+    fresh_price_count = 0
+    delayed_price_count = 0
+    stale_price_count = 0
+    missing_price_timestamp_count = 0
+    for item in price_items:
+        timestamp = str(item.get("updatedAt") or item.get("collectedAt") or "").strip()
+        age_seconds = seconds_since_timestamp(timestamp)
+        if age_seconds is None:
+            missing_price_timestamp_count += 1
+        elif age_seconds <= max(SIGNAL_LIVE_PRICE_POLL_SECONDS * 2, 30):
+            fresh_price_count += 1
+        elif age_seconds <= SIGNAL_LIVE_PRICE_DELAYED_SECONDS:
+            delayed_price_count += 1
+        else:
+            stale_price_count += 1
     probe = kv_payload_read_probe(MARKET_DATA_LATEST_KV_KEY, MARKET_DATA_LATEST_FILE)
     storage = probe["readSource"]
     persistent = storage == "postgres"
@@ -1556,6 +1603,11 @@ def market_data_latest_status() -> dict:
         "persistent": persistent,
         "volatileFallback": not persistent,
         "itemCount": len(items),
+        "priceCount": len(price_items),
+        "freshPriceCount": fresh_price_count,
+        "delayedPriceCount": delayed_price_count,
+        "stalePriceCount": stale_price_count,
+        "missingPriceTimestampCount": missing_price_timestamp_count,
         "bySource": summary.get("bySource", {}),
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
@@ -2006,7 +2058,7 @@ def db_raw_event_counts() -> dict:
         return {}
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM signal_raw_events")
                 total_count = cur.fetchone()[0]
@@ -2146,7 +2198,7 @@ def db_write_news_events(events: list[dict]) -> bool:
         return False
     try:
         psycopg, Jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 for event in events:
                     published_at = str(event.get("publishedAt", "")).strip() or None
@@ -2265,7 +2317,7 @@ def db_news_event_counts() -> dict:
         return {}
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM signal_news_events")
                 total_count = cur.fetchone()[0]
@@ -2417,7 +2469,7 @@ def db_recent_scheduler_runs(limit: int) -> list[dict]:
         return []
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -2452,7 +2504,7 @@ def db_scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
         return False
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -2476,7 +2528,7 @@ def db_snapshot_detail(run_id: str) -> dict | None:
         return None
     try:
         psycopg, _jsonb = psycopg_modules()
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT payload FROM signal_snapshots WHERE id = %s", (run_id,))
                 row = cur.fetchone()
@@ -2510,7 +2562,7 @@ def db_latest_snapshot_detail(mode: str | None = None) -> dict | None:
         if mode:
             where_clause = "WHERE mode = %s"
             params = (mode,)
-        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
@@ -3391,6 +3443,12 @@ def enrich_market_with_indices(market: dict) -> tuple[dict, dict]:
 
     try:
         payload = fetch_market_indices()
+        write_raw_event(
+            "market-index",
+            "indices",
+            {"data": payload},
+            metadata={"provider": market_index_provider_label(), "count": len(payload.get("indices", {}))},
+        )
         indices = payload.get("indices", {})
         errors = payload.get("errors", {})
         for key, item in indices.items():
@@ -3450,6 +3508,12 @@ def enrich_market_with_fx(market: dict) -> tuple[dict, dict]:
 
     try:
         fx = fetch_usd_krw_rate()
+        write_raw_event(
+            "fx",
+            "usdkrw",
+            {"data": fx},
+            metadata={"provider": fx.get("provider", ""), "pair": "USD/KRW"},
+        )
         enriched["usdKrw"] = fx["display"]
         enriched["usdKrwSource"] = {
             "source": "fx-api",
@@ -3481,6 +3545,109 @@ def enrich_market_with_fx(market: dict) -> tuple[dict, dict]:
             "detail": str(error)[:240],
             "sampleValue": sample_value,
         }
+
+
+def latest_market_data_item(source_values: set[str], event_values: set[str]) -> dict | None:
+    data = market_data_latest_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    latest_item = None
+    latest_timestamp = ""
+    normalized_sources = {str(item).strip().lower() for item in source_values}
+    normalized_events = {str(item).strip().lower() for item in event_values}
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", "")).strip().lower()
+        event_type = str(item.get("eventType", "")).strip().lower()
+        if normalized_sources and source not in normalized_sources:
+            continue
+        if normalized_events and event_type not in normalized_events:
+            continue
+        timestamp = str(item.get("updatedAt") or item.get("collectedAt") or "")
+        if latest_item is None or timestamp >= latest_timestamp:
+            latest_item = item
+            latest_timestamp = timestamp
+    return latest_item
+
+
+def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
+    enriched = dict(market)
+    item = latest_market_data_item({"market-index"}, {"indices"})
+    if not item:
+        return enriched, {
+            "source": "stored-missing",
+            "enabled": MARKET_INDEX_LIVE,
+            "message": "DB에 저장된 지수 최신값이 없어 기존 지수 표시를 유지합니다.",
+        }
+    payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+    data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+    indices = data.get("indices", {}) if isinstance(data.get("indices"), dict) else {}
+    errors = data.get("errors", {}) if isinstance(data.get("errors"), dict) else {}
+    for key, index_item in indices.items():
+        if isinstance(index_item, dict) and index_item.get("change"):
+            enriched[key] = index_item["change"]
+    latest_timestamp = max(
+        [str(index_item.get("timestamp", "")) for index_item in indices.values() if isinstance(index_item, dict) and index_item.get("timestamp")],
+        default=str(item.get("updatedAt") or item.get("collectedAt") or ""),
+    )
+    enriched["indexDetails"] = indices
+    enriched["indexSource"] = {
+        "source": "market-data-latest",
+        "provider": market_index_provider_label(),
+        "count": len(indices),
+        "timestamp": latest_timestamp,
+        "errors": errors,
+    }
+    return enriched, {
+        "source": "market-data-latest",
+        "enabled": True,
+        "provider": market_index_provider_label(),
+        "count": len(indices),
+        "errors": errors,
+        "timestamp": latest_timestamp,
+        "updatedAt": str(item.get("updatedAt") or item.get("collectedAt") or ""),
+        "message": "DB에 저장된 최신 지수 값을 사용합니다.",
+    }
+
+
+def enrich_market_with_stored_latest_fx(market: dict) -> tuple[dict, dict]:
+    enriched = dict(market)
+    sample_value = str(enriched.get("usdKrw", "")).strip()
+    item = latest_market_data_item({"fx"}, {"usdkrw"})
+    if not item:
+        enriched["usdKrwSource"] = {
+            "source": "stored-missing",
+            "message": "DB에 저장된 환율 최신값이 없어 기존 환율 표시를 유지합니다.",
+            "sampleValue": sample_value,
+        }
+        return enriched, {
+            "source": "stored-missing",
+            "enabled": FX_LIVE_RATES,
+            "message": "DB에 저장된 환율 최신값이 없습니다.",
+            "sampleValue": sample_value,
+        }
+    payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+    fx = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+    display = str(fx.get("display") or fx.get("value") or fx.get("rate") or "").strip()
+    if display:
+        enriched["usdKrw"] = display
+    timestamp = str(fx.get("timestamp") or item.get("updatedAt") or item.get("collectedAt") or "")
+    enriched["usdKrwSource"] = {
+        "source": "market-data-latest",
+        "provider": fx.get("provider", "fx"),
+        "timestamp": timestamp,
+        "sampleValue": sample_value,
+    }
+    return enriched, {
+        "source": "market-data-latest",
+        "enabled": True,
+        "provider": fx.get("provider", "fx"),
+        "value": display,
+        "timestamp": timestamp,
+        "sampleValue": sample_value,
+        "updatedAt": str(item.get("updatedAt") or item.get("collectedAt") or ""),
+        "message": "DB에 저장된 최신 환율 값을 사용합니다.",
+    }
 
 
 def price_rows(payload: dict) -> list[dict]:
@@ -4190,6 +4357,11 @@ def market_session_context(market: str = "", now: datetime | None = None) -> dic
         "holiday": "",
         "timestamp": kst_now.isoformat(timespec="seconds"),
     }
+
+
+def auto_signal_mode(now: datetime | None = None) -> str:
+    context = market_session_context("KR", now)
+    return "intraday" if context.get("isRegular") else "close"
 
 
 def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "", market: str = "") -> dict:
@@ -11943,8 +12115,8 @@ def search_analysis_error_status(source: str, error: Exception, fallback_message
 def analyze_stock_lookup(symbol: str) -> dict:
     watched = set(watchlist())
     data = seed_data()
-    market, index_status = enrich_market_with_indices(data.get("market", {}))
-    market, fx_status = enrich_market_with_fx(market)
+    market, index_status = enrich_market_with_stored_latest_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_stored_latest_fx(market)
     candidate, lookup_status = lookup_candidate_for_symbol(symbol, watched)
     candidates = [candidate]
     portfolio = safe_portfolio_status()
@@ -13437,11 +13609,15 @@ def integration_failure_status(fallback: dict, error: Exception, message: str) -
 
 def normalize_signal_mode(mode: str | None = None, default: str = "close") -> str:
     selected = str(mode or default or "close").strip().lower()
+    if selected in {"auto", "자동"}:
+        return auto_signal_mode()
     if selected == "preopen":
         return "close"
     if selected in {"close", "intraday"}:
         return selected
     fallback = str(default or "close").strip().lower()
+    if fallback in {"auto", "자동"}:
+        return auto_signal_mode()
     return fallback if fallback in {"close", "intraday"} else "close"
 
 
@@ -15213,8 +15389,8 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
     if not raw_candidates:
         return None
 
-    market, index_status = enrich_market_with_indices(data.get("market", {}))
-    market, fx_status = enrich_market_with_fx(market)
+    market, index_status = enrich_market_with_stored_latest_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_stored_latest_fx(market)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15335,8 +15511,8 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     if not raw_candidates:
         return None
 
-    market, index_status = enrich_market_with_indices(data.get("market", {}))
-    market, fx_status = enrich_market_with_fx(market)
+    market, index_status = enrich_market_with_stored_latest_indices(data.get("market", {}))
+    market, fx_status = enrich_market_with_stored_latest_fx(market)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15686,7 +15862,132 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
     return status
 
 
+def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: str = "price") -> dict:
+    mode = normalize_signal_mode(mode)
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    base_payload, base_source = dashboard_base_for_live_prices(mode)
+    base_candidates = [
+        copy.deepcopy(item)
+        for item in base_payload.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    ]
+    base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode)
+    base_candidates, market_data_merge_status = merge_market_data_latest_into_candidates(base_candidates)
+    base_candidates, live_state_status = merge_live_state_into_candidates(base_candidates, mode)
+    watched = set(watchlist())
+    for item in base_candidates:
+        item["isWatched"] = str(item.get("symbol", "")) in watched
+
+    candidates = [price_only_candidate_update(candidate) for candidate in base_candidates]
+    base_integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
+    selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
+    market_data_status = market_data_latest_status()
+    freshness_counts = live_price_freshness_counts(candidates)
+    requested = unique_symbols(symbols) or unique_symbols([str(item.get("symbol", "")) for item in candidates])
+    requested = requested[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    requested_set = set(requested)
+    missing_requested = [
+        symbol
+        for symbol in requested
+        if symbol not in {str(item.get("symbol", "")).strip().upper() for item in candidates}
+    ]
+    refreshed_count = len([
+        item
+        for item in candidates
+        if not requested_set or str(item.get("symbol", "")).strip().upper() in requested_set
+    ])
+    summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
+    summary.update({
+        "livePriceUpdatedAt": now_text,
+        "livePriceFreshnessCounts": freshness_counts,
+        "livePriceRequestedCount": len(requested),
+        "livePriceTossRequestedCount": 0,
+        "livePriceTossReceivedCount": 0,
+        "livePriceBatchCount": 0,
+        "livePriceBatchErrorCount": 0,
+        "livePriceRefreshedCount": refreshed_count,
+        "livePriceCandidateCount": len(candidates),
+        "livePriceStoredCandidateCount": len(candidates),
+        "livePriceStoredFallbackCount": 0,
+        "livePriceRetainedCount": market_data_merge_status.get("priceMergedCount", 0),
+        "livePriceMissingCount": len(missing_requested),
+        "livePriceMissingSymbols": missing_requested,
+        "liveStateMergedCount": live_state_status.get("mergedCount", 0),
+        "candidateDataMergedCount": candidate_data_merge_status.get("mergedCount", 0),
+        "marketDataMergedCount": market_data_merge_status.get("mergedCount", 0),
+        "marketDataPriceMergedCount": market_data_merge_status.get("priceMergedCount", 0),
+        "marketDataChangeMergedCount": market_data_merge_status.get("changeMergedCount", 0),
+        "marketDataLatestCount": market_data_status.get("itemCount", 0),
+        "marketDataLatestAt": market_data_status.get("latestAt", ""),
+        "candidateMarketDataLatestUpdatedCount": 0,
+        "candidateMarketDataLatestStored": False,
+        "stableDecisionCount": selection_status.get("stableDecisionCount", 0),
+        "finalDecisionStabilitySeconds": selection_status.get("finalDecisionStabilitySeconds", 0),
+    })
+    integrations = base_integrations
+    integrations["selection"] = selection_status
+    integrations["livePrice"] = {
+        "source": "db-market-data-latest",
+        "baseSource": base_source,
+        "dbOnly": True,
+        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
+        "requestedCount": len(requested),
+        "refreshedCount": refreshed_count,
+        "candidateCount": len(candidates),
+        "storedCandidateCount": len(candidates),
+        "freshnessCounts": freshness_counts,
+        "candidateDataRead": candidate_data_merge_status,
+        "marketDataRead": market_data_merge_status,
+        "stateRead": live_state_status,
+        "marketDataLatest": market_data_status,
+        "selectionCycle": "price-only",
+        "updatedAt": now_text,
+        "message": "화면 갱신은 DB 최신 가격만 읽고 후보 순위와 최종 판단은 서버 판단 주기까지 유지합니다.",
+    }
+    toss_status = copy.deepcopy(integrations.get("toss", {})) if isinstance(integrations.get("toss"), dict) else {}
+    toss_status.update({
+        "config": toss_config_status(),
+        "prices": {
+            "source": "db-market-data-latest",
+            "enabled": TOSS_LIVE_PRICES,
+            "requestedCount": 0,
+            "receivedCount": market_data_merge_status.get("priceMergedCount", 0),
+            "priceCount": market_data_merge_status.get("priceMergedCount", 0),
+            "missingCount": len(missing_requested),
+            "missingSymbols": missing_requested,
+            "message": "Toss 가격 수집은 서버 봇/스케줄러가 수행하고, 웹은 DB에 저장된 최신값만 읽습니다.",
+        },
+        "candles": {"source": "db-market-data-latest", "message": "차트 데이터는 서버 저장값을 사용합니다."},
+        "orderbook": {"source": "db-market-data-latest", "message": "호가 데이터는 서버 저장값을 사용합니다."},
+        "trades": {"source": "db-market-data-latest", "message": "체결 데이터는 서버 저장값을 사용합니다."},
+    })
+    integrations["toss"] = toss_status
+    integrations["marketDataMerge"] = market_data_merge_status
+    integrations["marketDataLatest"] = market_data_status
+    return {
+        "mode": mode,
+        "source": "db-live-price",
+        "baseSource": base_source,
+        "selectionCycle": "price-only",
+        "detail": "price",
+        "updatedAt": now_text,
+        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "symbols": requested,
+        "requestedCount": len(requested),
+        "refreshedCount": refreshed_count,
+        "candidateCount": len(candidates),
+        "summary": summary,
+        "integrations": integrations,
+        "candidates": candidates,
+        "selected": None,
+        "message": "DB 최신 스냅샷에서 가격·등락률 필드만 읽었습니다.",
+    }
+
+
 def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "price") -> dict:
+    if SIGNAL_LIVE_PRICE_DB_ONLY:
+        return dashboard_live_price_payload_from_db(symbols, mode, detail)
     base_payload, base_source = dashboard_base_for_live_prices(mode)
     base_candidates = [
         copy.deepcopy(item)
@@ -16862,7 +17163,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard/live-prices":
             query = parse_qs(parsed.query)
-            mode = normalize_signal_mode(query.get("mode", ["close"])[0])
+            mode = normalize_signal_mode(query.get("mode", ["auto"])[0])
             symbols = [
                 symbol.strip()
                 for symbol in query.get("symbols", [""])[0].split(",")
@@ -16878,7 +17179,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard":
             query = parse_qs(parsed.query)
-            mode = normalize_signal_mode(query.get("mode", ["close"])[0])
+            mode = normalize_signal_mode(query.get("mode", ["auto"])[0])
             force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
             if not force_refresh:
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
