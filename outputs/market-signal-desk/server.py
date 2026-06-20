@@ -1149,11 +1149,29 @@ def clear_storage_status_cache() -> None:
         STORAGE_STATUS_CACHE["expires_at"] = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def reset_database_connection_state() -> tuple[dict, int]:
+def clear_database_retry_state(reset_schema: bool = False) -> None:
     global DB_SCHEMA_READY, DB_SCHEMA_LAST_CHECKED_AT
     global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE
     global DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
     global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
+    close_db_shared_connection()
+    with DB_KV_READ_CACHE_LOCK:
+        DB_KV_READ_CACHE.clear()
+    if reset_schema:
+        DB_SCHEMA_READY = False
+        DB_SCHEMA_LAST_CHECKED_AT = ""
+    DB_LAST_ERROR = ""
+    DB_LAST_ERROR_AT = ""
+    DB_LAST_ERROR_TYPE = ""
+    DB_LAST_BACKOFF_MESSAGE = ""
+    DB_LAST_BACKOFF_AT = ""
+    DB_FAILURE_BACKOFF_UNTIL = 0.0
+    DB_CONSECUTIVE_FAILURES = 0
+    DB_LAST_FAILURE_KIND = ""
+    clear_storage_status_cache()
+
+
+def reset_database_connection_state() -> tuple[dict, int]:
     if not DATABASE_URL:
         return {
             "ok": False,
@@ -1169,20 +1187,7 @@ def reset_database_connection_state() -> tuple[dict, int]:
             "storage": snapshot_storage_status(fast=False),
         }, 400
 
-    close_db_shared_connection()
-    with DB_KV_READ_CACHE_LOCK:
-        DB_KV_READ_CACHE.clear()
-    DB_SCHEMA_READY = False
-    DB_SCHEMA_LAST_CHECKED_AT = ""
-    DB_LAST_ERROR = ""
-    DB_LAST_ERROR_AT = ""
-    DB_LAST_ERROR_TYPE = ""
-    DB_LAST_BACKOFF_MESSAGE = ""
-    DB_LAST_BACKOFF_AT = ""
-    DB_FAILURE_BACKOFF_UNTIL = 0.0
-    DB_CONSECUTIVE_FAILURES = 0
-    DB_LAST_FAILURE_KIND = ""
-    clear_storage_status_cache()
+    clear_database_retry_state(reset_schema=True)
 
     ready = ensure_database_schema()
     storage = snapshot_storage_status(fast=False)
@@ -1495,6 +1500,7 @@ def migrate_files_to_database(force: bool = False) -> dict:
 
 
 def run_database_migration() -> tuple[dict, int]:
+    started_at = db_diag_now()
     if not DATABASE_URL:
         return {
             "ok": False,
@@ -1509,17 +1515,28 @@ def run_database_migration() -> tuple[dict, int]:
             "message": "SIGNAL_STORAGE_BACKEND가 DB 사용 모드가 아닙니다.",
             "storage": snapshot_storage_status(),
         }, 400
+
+    clear_database_retry_state(reset_schema=False)
+
     if not ensure_database_schema():
         return {
             "ok": False,
             "error": "database-unavailable",
             "message": "DB 스키마를 준비하지 못했습니다.",
+            "manualRetry": {
+                "backoffCleared": True,
+                "startedAt": started_at,
+            },
             "storage": snapshot_storage_status(),
         }, 503
     migration = migrate_files_to_database(force=True)
     ok = not migration.get("error")
     return {
         "ok": ok,
+        "manualRetry": {
+            "backoffCleared": True,
+            "startedAt": started_at,
+        },
         "migration": migration,
         "storage": snapshot_storage_status(),
     }, 200 if ok else 500
