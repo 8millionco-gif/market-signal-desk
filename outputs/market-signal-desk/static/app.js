@@ -2917,46 +2917,40 @@ function candidateSourceLabel(summary = {}) {
 function candidateSourceDetailRows(summary = {}) {
   const cache = state.dashboard?.cache ?? {};
   const discovery = state.dashboard?.integrations?.discovery ?? {};
-  const storage = state.storageStatus ?? {};
-  const stockMaster = state.stockMasterStatus ?? {};
-  const generated = stockMaster.generated ?? {};
-  const activeMaster = stockMaster.active ?? {};
-  const browserRecovered = Boolean(cache.cached && cache.source === "browser_cache");
-  const storageLabel =
-    browserRecovered
-      ? "브라우저"
-      : storage.implementation === "database" || storage.mode === "database"
-      ? "DB"
-      : storage.implementation === "filesystem" || storage.mode === "filesystem"
-        ? "파일"
-        : "미확인";
-  const storageOk = Boolean(browserRecovered || storage.persistent || storage.implementation === "database" || storage.mode === "database" || storage.recentRunCount);
   const sourceLabel = candidateSourceLabel(summary);
   const cachedAt = cache.createdAt || summary.dashboardCacheCreatedAt || summary.storedDiscoveryCreatedAt || state.dashboard?.generatedAt || "";
   const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
-  const filtered = Number(summary.filteredNewsCount ?? discovery.filteredNewsCount ?? 0);
-  const generatedCount = Number(generated.count ?? 0);
-  const activeCount = Number(activeMaster.count ?? 0);
-  const masterCount = activeCount || generatedCount;
-  const masterStorage = stockMasterStorageLabel(stockMaster.storage);
-  const masterGeneratedAt = generated.generatedAt ? ` · ${timeLabel(generated.generatedAt)}` : "";
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
-  const refreshPolicy = cache.cached || summary.candidateSourceStored ? "저장 우선 · 수동 실행만 재분석" : "저장 없음 · 필요 시 실시간 생성";
+  const compressionCounts = summary.candidateCompressionCounts ?? {};
+  const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
+  const actionCount = Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const waitCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
+  const portfolioCount = Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
+  const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
+  const liveCount = Number(priceBasis.live ?? 0);
+  const closedCount = Number(priceBasis.closed_baseline ?? 0);
+  const lastGoodCount = Number(priceBasis.last_good ?? 0);
+  const priceText =
+    liveCount > 0
+      ? `실시간 ${liveCount}개`
+      : closedCount > 0
+        ? `장마감 기준가 ${closedCount}개`
+        : lastGoodCount > 0
+          ? `마지막 정상값 ${lastGoodCount}개`
+          : "가격 보강 중";
   const live = state.livePrice ?? {};
   const liveText = live.loading
     ? "갱신 중"
     : live.updatedAt
       ? `${timeLabel(live.updatedAt)} · ${live.error ? live.message || "갱신 실패" : live.message || "토스 현재가 반영"}`
       : "대기";
+  const basisText = live.updatedAt && !live.error ? liveText : priceText;
   return [
-    ["후보 출처", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}`],
-    ["기준 시각", Boolean(cachedAt), cachedAt ? timeLabel(cachedAt) : "-"],
-    ["갱신 방식", cache.cached || summary.candidateSourceStored, refreshPolicy],
-    ["장중 가격", Boolean(live.updatedAt && !live.error), liveText],
-    ["발굴 근거", scanned > 0, `${scanned}종목 · 재료뉴스 ${materialNews}건 · 제외 ${filtered}건`],
-    ["저장 상태", storageOk, browserRecovered ? "브라우저 마지막 성공본으로 복구" : `${storageLabel} · 기록 ${storage.recentRunCount ?? 0}건`],
-    ["검색 마스터", masterCount > 0, `${masterCount}개 · ${masterStorage}${masterGeneratedAt}`]
+    ["후보 기준", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}${cachedAt ? ` · ${timeLabel(cachedAt)}` : ""}`],
+    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}`],
+    ["가격 기준", liveCount + closedCount + lastGoodCount > 0 || Boolean(live.updatedAt), basisText],
+    ["재료 근거", scanned > 0 || materialNews > 0, scanned > 0 ? `${scanned}종목 점검 · 재료뉴스 ${materialNews}건` : "수집 대기"]
   ];
 }
 
@@ -3602,9 +3596,6 @@ function renderMetrics() {
       evidenceStrong || evidenceQualified || evidenceThin || evidenceRisk || evidenceWeak
         ? ` · 발굴 근거 강 ${evidenceStrong} · 검증 ${evidenceQualified} · 약 ${evidenceThin} · 리스크 ${evidenceRisk} · 부족 ${evidenceWeak}${evidenceAverage != null ? ` · 평균 ${evidenceAverage}/100` : ""}`
         : "";
-    const detail = scanned
-      ? ` · ${scanned}종목 점검${splitText}${poolText}${hiddenText}${opportunityText}${compressionText}${validationText}${gateText}${priceReadyText}${confidenceText}${sourceReliabilityText}${reactionText}${reactionGateText}${averageReactionText}${officialText}${portfolioText}${groupText}${qualityText}${evidenceText}${actionText}${newsCount ? ` · 뉴스 ${newsCount}건` : ""}${materialNews ? ` · 재료뉴스 ${materialNews}건` : ""}${filtered ? ` · 뉴스 제외 ${filtered}건` : ""}`
-      : "";
     const cache = state.dashboard?.cache ?? {};
     const cacheText = cache.cached
       ? `${cache.source === "discovery_latest" ? "저장 발굴본" : "저장 스냅샷"}${cache.createdAt ? ` · ${timeLabel(cache.createdAt)}` : ""}`
@@ -3618,9 +3609,10 @@ function renderMetrics() {
         ? `핵심 ${coreCount} · 검토 ${reviewCount} · 대기 ${waitCompressionCount} · 보유 ${portfolioCompressionCount}`
         : "";
     const briefMaterialText = materialNews ? `재료뉴스 ${materialNews}건` : newsCount ? `뉴스 ${newsCount}건` : "";
-    const briefText = [cacheText || sourceLabel, briefSplitText, briefDecisionText, briefMaterialText].filter(Boolean).join(" · ");
-    els.candidateSource.textContent = briefText || sourceLabel;
-    els.candidateSource.title = [cacheText, `${sourceLabel}${detail}`].filter(Boolean).join(" · ");
+    const visibleSelectionText = briefDecisionText || briefSplitText;
+    const briefText = [cacheText || sourceLabel, visibleSelectionText, briefMaterialText].filter(Boolean).join(" · ");
+    els.candidateSource.textContent = shortText(briefText || sourceLabel, 84);
+    els.candidateSource.title = briefText || sourceLabel;
   }
   renderCandidateSourceDetail();
   els.metricCandidates.textContent = summary.candidateCount ?? 0;
