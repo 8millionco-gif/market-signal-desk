@@ -754,7 +754,10 @@ def db_connect_with_retry():
             if attempt + 1 < SIGNAL_DB_CONNECT_RETRIES:
                 time.sleep(SIGNAL_DB_RETRY_DELAY_SECONDS * (attempt + 1))
     if last_error is not None:
-        DB_FAILURE_BACKOFF_UNTIL = time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS
+        DB_FAILURE_BACKOFF_UNTIL = max(
+            DB_FAILURE_BACKOFF_UNTIL,
+            time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
+        )
         raise last_error
     raise RuntimeError("database connection failed")
 
@@ -16947,8 +16950,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
                 or database_payload.get("lastErrorClassification", {}).get("staleConnection")
             )
             if transient:
-                retry_seconds = bounded_int(database_payload.get("nextRetrySeconds", 0), 0, ttl_seconds)
-                ttl_seconds = min(ttl_seconds, max(1, retry_seconds or SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS or 2))
+                retry_seconds = bounded_int(database_payload.get("nextRetrySeconds", 0), 0, 3600)
+                ttl_seconds = max(ttl_seconds, retry_seconds or SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS or 2)
         return max(0, int(ttl_seconds))
 
     if fast and SIGNAL_STORAGE_STATUS_CACHE_SECONDS > 0:
