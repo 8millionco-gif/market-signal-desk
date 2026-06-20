@@ -1807,6 +1807,10 @@ h3 {
   margin-bottom: 12px;
 }
 
+.reaction-detail-toggle .reaction-live-grid {
+  margin-top: 0;
+}
+
 .reaction-live-grid div {
   min-width: 0;
   min-height: 82px;
@@ -1922,6 +1926,10 @@ h3 {
   padding: 0;
 }
 
+.support-detail-section:not([open]) {
+  background: rgba(18, 22, 31, 0.74);
+}
+
 .support-detail-section summary {
   display: flex;
   align-items: center;
@@ -1963,6 +1971,24 @@ h3 {
   color: var(--soft);
   background: rgba(36, 42, 55, 0.9);
   font-size: 12px;
+}
+
+.support-detail-section:not([open]) summary {
+  min-height: 56px;
+  padding: 14px 18px;
+}
+
+.support-detail-section:not([open]) summary em {
+  color: var(--muted);
+}
+
+.support-detail-section:not([open]) summary strong {
+  font-size: 15px;
+}
+
+.support-detail-section:not([open]) summary b {
+  color: var(--muted);
+  background: rgba(24, 29, 39, 0.92);
 }
 
 .support-detail-section[open] summary {

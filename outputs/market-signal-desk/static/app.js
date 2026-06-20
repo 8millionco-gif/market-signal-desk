@@ -196,9 +196,9 @@ const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 6;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 8;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 12;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 5;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 6;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 10;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -6321,17 +6321,17 @@ function priceReactionSection(item) {
         <strong data-reaction-card-label>${escapeHtml(stage.label)}</strong>
         <span data-reaction-card-meta>${escapeHtml(priceMeta(item))}</span>
       </div>
-      <div class="reaction-live-grid" data-reaction-live-grid>
-        ${reactionLiveGridHtml(item)}
-      </div>
       <details class="support-detail-section reaction-detail-toggle">
         <summary>
           <span>
-            <em>세부 조건</em>
-            <strong>가격·거래량 확인</strong>
+            <em>가격 검증</em>
+            <strong>실시간·거래량 세부 조건</strong>
           </span>
           <b>보기</b>
         </summary>
+        <div class="reaction-live-grid" data-reaction-live-grid>
+          ${reactionLiveGridHtml(item)}
+        </div>
         <div class="reaction-check-grid" data-reaction-check-grid>
           ${reactionCheckGridHtml(stage)}
         </div>
@@ -6396,10 +6396,10 @@ function supportingDetailSection(item) {
     <details class="detail-section support-detail-section">
       <summary>
         <span>
-          <em>추가 확인</em>
+          <em>보조 정보</em>
           <strong>공시·출처·연관 종목</strong>
         </span>
-        <b>펼치기</b>
+        <b>보기</b>
       </summary>
       <div class="support-grid">
         <div class="support-block">
