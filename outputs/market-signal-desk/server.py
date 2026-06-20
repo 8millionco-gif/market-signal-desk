@@ -1651,10 +1651,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
     }
 
 
-def stored_market_data_latest_records(source: str = "", event_type: str = "", fast: bool = False) -> dict[str, dict]:
-    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
-        return {}
-    data = market_data_latest_data(fast=fast)
+def market_data_latest_records_from_data(data: dict, source: str = "", event_type: str = "") -> dict[str, dict]:
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     source_filter = str(source or "").strip().lower()
     type_filter = str(event_type or "").strip().lower()
@@ -1678,6 +1675,13 @@ def stored_market_data_latest_records(source: str = "", event_type: str = "", fa
             if not previous or str(item.get("updatedAt") or item.get("collectedAt") or "") >= str(previous.get("updatedAt") or previous.get("collectedAt") or ""):
                 records[normalized] = item
     return records
+
+
+def stored_market_data_latest_records(source: str = "", event_type: str = "", fast: bool = False) -> dict[str, dict]:
+    if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
+        return {}
+    data = market_data_latest_data(fast=fast)
+    return market_data_latest_records_from_data(data, source, event_type)
 
 
 def market_data_record_payload_row(record: dict) -> dict:
@@ -1893,10 +1897,11 @@ def stored_trades_from_market_data_record(record: dict) -> dict | None:
 def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool = False) -> tuple[list[dict], dict]:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return candidates, {"enabled": False, "mergedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
-    records = stored_market_data_latest_records("toss", "prices", fast=fast)
-    candle_records = stored_market_data_latest_records("toss", "candles", fast=fast)
-    orderbook_records = stored_market_data_latest_records("toss", "orderbook", fast=fast)
-    trade_records = stored_market_data_latest_records("toss", "trades", fast=fast)
+    latest_data = market_data_latest_data(fast=fast)
+    records = market_data_latest_records_from_data(latest_data, "toss", "prices")
+    candle_records = market_data_latest_records_from_data(latest_data, "toss", "candles")
+    orderbook_records = market_data_latest_records_from_data(latest_data, "toss", "orderbook")
+    trade_records = market_data_latest_records_from_data(latest_data, "toss", "trades")
     if not (records or candle_records or orderbook_records or trade_records):
         return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 수집값이 아직 없습니다."}
 
@@ -15870,6 +15875,24 @@ def dashboard_payload_from_candidate_data_file(mode: str) -> tuple[dict, str] | 
     )
 
 
+def dashboard_payload_from_candidate_data_store(mode: str) -> tuple[dict, str] | None:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED or not database_fast_read_allowed():
+        return None
+    records = stored_candidate_data_latest_records(fast=True)
+    candidates = [item for item in records.values() if isinstance(item, dict)]
+    if not candidates:
+        return None
+    return (
+        minimal_live_price_dashboard_payload(
+            mode,
+            candidates,
+            "candidate_data_store",
+            datetime.now(KST).isoformat(timespec="seconds"),
+        ),
+        "candidate_data_store",
+    )
+
+
 def dashboard_payload_from_candidate_pool_file(mode: str) -> tuple[dict, str] | None:
     data = safe_read_json_file(CANDIDATE_POOL_FILE)
     if not isinstance(data, dict):
@@ -15886,6 +15909,25 @@ def dashboard_payload_from_candidate_pool_file(mode: str) -> tuple[dict, str] | 
             str(data.get("updatedAt", "")),
         ),
         "candidate_pool_file",
+    )
+
+
+def dashboard_payload_from_candidate_pool_store(mode: str) -> tuple[dict, str] | None:
+    if not database_fast_read_allowed():
+        return None
+    data = candidate_pool_data(fast=True)
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    candidates = [item for item in items.values() if isinstance(item, dict)]
+    if not candidates:
+        return None
+    return (
+        minimal_live_price_dashboard_payload(
+            mode,
+            candidates,
+            "candidate_pool_store",
+            str(data.get("updatedAt", "")),
+        ),
+        "candidate_pool_store",
     )
 
 
@@ -15953,6 +15995,8 @@ def seed_dashboard_payload_for_live_prices_fast(mode: str) -> dict:
 
 def dashboard_base_for_live_prices_fast(mode: str) -> tuple[dict, str]:
     for loader in (
+        dashboard_payload_from_candidate_data_store,
+        dashboard_payload_from_candidate_pool_store,
         dashboard_payload_from_dashboard_file,
         dashboard_payload_from_candidate_data_file,
         dashboard_payload_from_candidate_pool_file,
@@ -16158,9 +16202,32 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         for item in base_payload.get("candidates", [])
         if isinstance(item, dict) and str(item.get("symbol", "")).strip()
     ]
-    base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode, fast=True)
+    if base_source == "candidate_data_store":
+        candidate_data_merge_status = {
+            "enabled": True,
+            "source": "candidate_data_store",
+            "mergedCount": len(base_candidates),
+            "priceMergedCount": 0,
+            "changeMergedCount": 0,
+            "depthMergedCount": 0,
+            "message": "DB 후보 스냅샷을 기본 데이터로 사용해 재병합을 생략했습니다.",
+        }
+    elif base_source == "candidate_pool_store":
+        candidate_data_merge_status = {
+            "enabled": True,
+            "source": "candidate_pool_store",
+            "mergedCount": 0,
+            "message": "가격 폴링에서는 후보 풀 재분석 없이 시장 최신값만 보강합니다.",
+        }
+    else:
+        base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode, fast=True)
     base_candidates, market_data_merge_status = merge_market_data_latest_into_candidates(base_candidates, fast=True)
-    base_candidates, live_state_status = merge_live_state_into_candidates(base_candidates, mode, fast=True)
+    live_state_status = {
+        "enabled": SIGNAL_LIVE_STATE_STORAGE_ENABLED,
+        "source": "skipped-price-only",
+        "mergedCount": 0,
+        "message": "가격 폴링에서는 직전 라이브 상태 DB 재조회를 생략하고 후보/시장 최신 스냅샷만 사용합니다.",
+    }
     watched = set(watchlist())
     for item in base_candidates:
         item["isWatched"] = str(item.get("symbol", "")) in watched
@@ -16168,7 +16235,15 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
     candidates = [price_only_candidate_update(candidate) for candidate in base_candidates]
     base_integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
-    market_data_status = market_data_latest_status(fast=True)
+    market_data_status = {
+        "enabled": SIGNAL_MARKET_DATA_LATEST_ENABLED,
+        "storage": "postgres" if database_fast_read_allowed() else "filesystem",
+        "readSource": "market_data_latest",
+        "fast": True,
+        "itemCount": market_data_merge_status.get("availableCount", 0),
+        "priceCount": market_data_merge_status.get("availablePriceCount", 0),
+        "message": "가격 폴링 응답에서는 시장 최신값 병합 결과만 요약합니다.",
+    }
     freshness_counts = live_price_freshness_counts(candidates)
     requested = unique_symbols(symbols) or unique_symbols([str(item.get("symbol", "")) for item in candidates])
     requested = requested[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
