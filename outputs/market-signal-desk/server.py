@@ -261,6 +261,18 @@ SIGNAL_DISCOVERY_BOT_ENABLED = os.getenv("SIGNAL_DISCOVERY_BOT_ENABLED", "1").lo
 SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS", "600"))
 SIGNAL_DISCOVERY_BOT_MODE = os.getenv("SIGNAL_DISCOVERY_BOT_MODE", "intraday").strip().lower() or "intraday"
 SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST = os.getenv("SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST", "0").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DASHBOARD_SNAPSHOT_ONLY = os.getenv("SIGNAL_DASHBOARD_SNAPSHOT_ONLY", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SIGNAL_DASHBOARD_ALLOW_GET_REFRESH = os.getenv("SIGNAL_DASHBOARD_ALLOW_GET_REFRESH", "0").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
 SIGNAL_CLOSE_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_CLOSE_RUN_WINDOW_MINUTES", "360"))
 SIGNAL_PREOPEN_RUN_TIME = os.getenv("SIGNAL_PREOPEN_RUN_TIME", "08:40")
@@ -12304,7 +12316,7 @@ def latest_discovery_candidate_prefetch_records(limit: int) -> list[dict]:
 
 def dashboard_snapshot_candidate_prefetch_records(mode: str, limit: int) -> list[dict]:
     try:
-        detail = cached_dashboard_detail(mode)
+        detail = cached_dashboard_detail(mode, include_discovery=False)
     except Exception:
         return []
     dashboard_payload = detail.get("dashboard", {}) if isinstance(detail, dict) and isinstance(detail.get("dashboard"), dict) else {}
@@ -16999,6 +17011,8 @@ def discovery_bot_config_status() -> dict:
         "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
         "mode": discovery_bot_mode(),
         "dashboardStoredDiscoveryFirst": SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST,
+        "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
+        "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
         "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
@@ -17385,6 +17399,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
                 else ""
             ),
             "dashboardReadMode": "db-snapshot-only" if candidate_data.get("persistent") and market_data.get("persistent") else "fallback",
+            "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
+            "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
             "storedCandidateCount": stored_candidate_count,
             "storedPriceCount": stored_price_count,
             "usablePriceCount": usable_price_count,
@@ -17461,6 +17477,8 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             else "DB 연결 실패로 표시할 최신 스냅샷이 부족합니다."
         ),
         "dashboardReadMode": "fallback",
+        "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
+        "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
         "storedCandidateCount": stored_candidate_count,
         "storedPriceCount": stored_price_count,
         "usablePriceCount": usable_price_count,
@@ -17669,13 +17687,13 @@ def dashboard_cache_detail(mode: str) -> dict | None:
     }
 
 
-def cached_dashboard_detail(mode: str) -> dict | None:
+def cached_dashboard_detail(mode: str, include_discovery: bool = True) -> dict | None:
     exact_details: list[dict] = []
     cache_detail = dashboard_cache_detail(mode)
     if cache_detail is not None:
         exact_details.append(cache_detail)
 
-    latest_discovery = discovery_latest_record(include_dashboard=True)
+    latest_discovery = discovery_latest_record(include_dashboard=True) if include_discovery else None
     if isinstance(latest_discovery, dict):
         discovery_dashboard = latest_discovery.get("dashboard", {})
         if (
@@ -17714,8 +17732,8 @@ def cached_dashboard_detail(mode: str) -> dict | None:
 
 
 
-def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
-    detail = cached_dashboard_detail(mode)
+def cached_dashboard_payload(mode: str, fallback_error: str = "", include_discovery: bool = True) -> dict | None:
+    detail = cached_dashboard_detail(mode, include_discovery=include_discovery)
     if not detail:
         return None
     dashboard_payload = detail.get("dashboard")
@@ -18464,6 +18482,13 @@ def live_price_fast_store_payloads() -> dict[str, dict]:
 
 
 def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None = None) -> tuple[dict, str]:
+    if SIGNAL_DASHBOARD_SNAPSHOT_ONLY:
+        cached_payload = cached_dashboard_payload(mode, include_discovery=False)
+        if cached_payload is not None:
+            cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
+            return cached_payload, str(cache.get("source") or "dashboard_cache")
+        return stored_snapshot_unavailable_dashboard_payload(mode), "snapshot_unavailable"
+
     store_payloads = store_payloads if isinstance(store_payloads, dict) else {}
     candidate_data_payload = store_payloads.get("candidateData") if isinstance(store_payloads.get("candidateData"), dict) else None
     candidate_pool_payload = store_payloads.get("candidatePool") if isinstance(store_payloads.get("candidatePool"), dict) else None
@@ -18480,6 +18505,13 @@ def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None =
 
 
 def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
+    if SIGNAL_DASHBOARD_SNAPSHOT_ONLY:
+        cached_payload = cached_dashboard_payload(mode, include_discovery=False)
+        if cached_payload is not None:
+            cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
+            return cached_payload, str(cache.get("source") or "dashboard_cache")
+        return stored_snapshot_unavailable_dashboard_payload(mode), "snapshot_unavailable"
+
     stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
     if stored_candidate_data_payload is not None:
         return stored_candidate_data_payload, "candidate_data_snapshots"
@@ -20126,10 +20158,24 @@ class AppHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             mode = normalize_signal_mode(query.get("mode", ["auto"])[0])
             force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
+            snapshot_only = SIGNAL_DASHBOARD_SNAPSHOT_ONLY
+            refresh_blocked = bool(force_refresh and snapshot_only and not SIGNAL_DASHBOARD_ALLOW_GET_REFRESH)
+            if refresh_blocked:
+                force_refresh = False
             if not force_refresh:
-                cached_payload = cached_dashboard_payload(mode)
+                cached_payload = cached_dashboard_payload(mode, include_discovery=not snapshot_only)
                 if cached_payload is not None:
+                    if refresh_blocked:
+                        cached_payload["cache"]["refreshIgnored"] = True
+                        cached_payload["cache"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
+                        if isinstance(cached_payload.get("summary"), dict):
+                            cached_payload["summary"]["refreshIgnored"] = True
+                            cached_payload["summary"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
                     self.send_json(cached_payload)
+                    return
+                if snapshot_only:
+                    fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
+                    self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
                 if stored_candidate_data_payload is not None:
@@ -20146,9 +20192,16 @@ class AppHandler(BaseHTTPRequestHandler):
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
                 self.send_json(payload)
             except Exception as error:
-                cached_payload = cached_dashboard_payload(mode, fallback_error=str(error)[:240])
+                cached_payload = cached_dashboard_payload(
+                    mode,
+                    fallback_error=str(error)[:240],
+                    include_discovery=not snapshot_only,
+                )
                 if cached_payload is not None:
                     self.send_json(cached_payload)
+                    return
+                if snapshot_only:
+                    self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=str(error)[:240]))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_candidate_data_payload is not None:
