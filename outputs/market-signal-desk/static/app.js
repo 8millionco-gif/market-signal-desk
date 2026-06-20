@@ -91,6 +91,7 @@ const state = {
   schedulerStatus: null,
   discoveryBotStatus: null,
   storageStatus: null,
+  evidenceStatus: null,
   stockMasterStatus: null,
   portfolioStatus: null,
   livePrice: {
@@ -158,6 +159,7 @@ const els = {
   discoveryBotStatus: document.querySelector("#discoveryBotStatus"),
   readinessStatus: document.querySelector("#readinessStatus"),
   storageStatus: document.querySelector("#storageStatus"),
+  evidenceStatus: document.querySelector("#evidenceStatus"),
   stockMasterStatus: document.querySelector("#stockMasterStatus"),
   portfolioStatus: document.querySelector("#portfolioStatus"),
   snapshotHistory: document.querySelector("#snapshotHistory"),
@@ -511,6 +513,28 @@ function statusFallbacks() {
         latest: {}
       }
     },
+    evidence: {
+      enabled: false,
+      implementation: "unavailable",
+      persistent: false,
+      operationReady: false,
+      decisionReady: false,
+      totalCount: 0,
+      byKind: {},
+      latestAt: "",
+      openAiPendingCount: 0,
+      stalePriceCount: 0,
+      priceCoverage: 0,
+      basisCounts: {},
+      requiredKinds: {},
+      optionalKinds: {},
+      readiness: {
+        operationReady: false,
+        decisionReady: false,
+        gaps: [],
+        nextAction: "근거 수집 상태 확인 필요"
+      }
+    },
     stockMaster: {
       ok: false,
       storage: "none",
@@ -577,6 +601,7 @@ async function loadDashboard(options = {}) {
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
     safeFetchJson("/api/discovery/status", fallbacks.discoveryBot),
     safeFetchJson("/api/storage/status", fallbacks.storage),
+    safeFetchJson("/api/evidence/status", fallbacks.evidence),
     safeFetchJson("/api/stocks/master/status", fallbacks.stockMaster),
     safeFetchJson("/api/portfolio/status", fallbacks.portfolio),
     safeFetchJson("/api/network/outbound-ip", fallbacks.network),
@@ -584,12 +609,13 @@ async function loadDashboard(options = {}) {
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, evidenceStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.authReadOnlyPublic = Boolean(authStatus?.readOnlyPublic);
     state.schedulerStatus = schedulerStatus;
     state.discoveryBotStatus = discoveryBotStatus;
     state.storageStatus = storageStatus;
+    state.evidenceStatus = evidenceStatus;
     state.stockMasterStatus = stockMasterStatus;
     state.portfolioStatus = portfolioStatus;
     state.networkStatus = networkStatus;
@@ -603,6 +629,7 @@ async function loadDashboard(options = {}) {
     renderDiscoveryBotStatus();
     renderReadinessStatus();
     renderStorageStatus();
+    renderEvidenceStatus();
     renderStockMasterStatus();
     renderPortfolioStatus();
     renderSnapshotHistory();
@@ -2894,6 +2921,7 @@ function render() {
   renderDiscoveryBotStatus();
   renderReadinessStatus();
   renderStorageStatus();
+  renderEvidenceStatus();
   renderStockMasterStatus();
   renderPortfolioStatus();
   renderSnapshotHistory();
@@ -4038,6 +4066,93 @@ function renderStorageStatus() {
   });
 }
 
+function evidenceCountText(value, suffix = "건") {
+  const count = Number(value ?? 0);
+  return `${Number.isFinite(count) ? count : 0}${suffix}`;
+}
+
+function evidenceKindCount(status, key) {
+  const byKind = status?.byKind ?? {};
+  const required = status?.requiredKinds ?? {};
+  const optional = status?.optionalKinds ?? {};
+  return Number(required[key]?.count ?? optional[key]?.count ?? byKind[key] ?? 0);
+}
+
+function evidenceKindReady(status, key) {
+  const required = status?.requiredKinds ?? {};
+  const optional = status?.optionalKinds ?? {};
+  const count = evidenceKindCount(status, key);
+  return Boolean(required[key]?.ready ?? optional[key]?.ready ?? count > 0);
+}
+
+function evidenceCoverageText(value) {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0%";
+  const percent = numeric <= 1 ? numeric * 100 : numeric;
+  return `${Math.round(percent)}%`;
+}
+
+function renderEvidenceStatus() {
+  if (!els.evidenceStatus) return;
+  const status = state.evidenceStatus;
+  if (!status) return;
+  const readiness = status.readiness ?? {};
+  const operationReady = Boolean(status.operationReady ?? readiness.operationReady);
+  const decisionReady = Boolean(status.decisionReady ?? readiness.decisionReady);
+  const marketData = status.marketData ?? {};
+  const basisCounts = status.basisCounts ?? marketData.basisCounts ?? {};
+  const priceCoverage = status.priceCoverage ?? marketData.priceCoverage ?? 0;
+  const totalCount = Number(status.totalCount ?? status.rawEvents?.count ?? 0);
+  const newsCount = evidenceKindCount(status, "news");
+  const priceCount = evidenceKindCount(status, "price") || Number(marketData.itemCount ?? marketData.storedPriceCount ?? 0);
+  const marketContextCount = evidenceKindCount(status, "marketContext");
+  const disclosureCount = evidenceKindCount(status, "disclosure");
+  const chartCount = evidenceKindCount(status, "chart");
+  const orderbookCount = evidenceKindCount(status, "orderbook");
+  const tradeCount = evidenceKindCount(status, "trade");
+  const depthCount = chartCount + orderbookCount + tradeCount;
+  const openAiPending = Number(status.openAiPendingCount ?? status.openAi?.pendingCount ?? 0);
+  const stalePriceCount = Number(status.stalePriceCount ?? marketData.stalePriceCount ?? 0);
+  const liveCount = Number(basisCounts.live ?? 0);
+  const closedCount = Number(basisCounts.closed_baseline ?? 0);
+  const lastGoodCount = Number(basisCounts.last_good ?? 0);
+  const unknownCount = Number(basisCounts.unknown ?? 0);
+  const basisText = [
+    liveCount ? `실시간 ${liveCount}` : "",
+    closedCount ? `마감 ${closedCount}` : "",
+    lastGoodCount ? `마지막값 ${lastGoodCount}` : "",
+    unknownCount ? `unknown ${unknownCount}` : ""
+  ].filter(Boolean).join(" · ") || "기준 없음";
+  const gaps = Array.isArray(readiness.gaps) ? readiness.gaps : [];
+  const nextAction = readiness.nextAction || status.nextAction || "근거 수집 상태 확인";
+  const rows = [
+    ["운영 판단", operationReady, operationReady ? "가능" : "보강 필요"],
+    ["최종 판단", decisionReady, decisionReady ? "가능" : "근거 보강"],
+    ["저장", Boolean(status.persistent), status.persistent ? "Postgres" : status.implementation || "미확인"],
+    ["전체 근거", totalCount > 0, evidenceCountText(totalCount)],
+    ["뉴스/트렌드", evidenceKindReady(status, "news"), evidenceCountText(newsCount)],
+    ["가격 기준", priceCount > 0 && stalePriceCount < priceCount, `${evidenceCoverageText(priceCoverage)} · ${basisText}`],
+    ["시장 환경", evidenceKindReady(status, "marketContext"), evidenceCountText(marketContextCount)],
+    ["공시/IR", evidenceKindReady(status, "disclosure"), disclosureCount ? evidenceCountText(disclosureCount) : "부족"],
+    ["심화 데이터", depthCount > 0, `차트 ${chartCount} · 호가 ${orderbookCount} · 체결 ${tradeCount}`],
+    ["OpenAI 대기", openAiPending === 0, evidenceCountText(openAiPending)],
+    ["누락", gaps.length === 0, gaps.length ? gaps.slice(0, 3).join(" · ") : "없음"],
+    ["최근 수집", Boolean(status.latestAt), status.latestAt ? timeLabel(status.latestAt) : "-"],
+    ["다음", decisionReady, nextAction]
+  ];
+  setHtmlIfChanged(els.evidenceStatus, rows
+    .map(([label, ok, value]) => {
+      const tone = ok ? "ok" : "warn";
+      return `
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong class="${tone}">${escapeHtml(value)}</strong>
+        </div>
+      `;
+    })
+    .join(""));
+}
+
 function stockMasterStorageLabel(value) {
   if (value === "database") return "DB 저장";
   if (value === "filesystem") return "파일 저장";
@@ -4158,8 +4273,10 @@ async function refreshStorageStatus() {
   });
   try {
     state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 10000);
+    state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 10000);
   } finally {
     renderStorageStatus();
+    renderEvidenceStatus();
   }
 }
 
@@ -4172,6 +4289,7 @@ async function runStorageMigration() {
   try {
     const payload = await postJson("/api/storage/migrate", {}, 60000);
     state.storageStatus = payload.storage ?? await safeFetchJson("/api/storage/status", statusFallbacks().storage, 10000);
+    state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 10000);
   } catch (error) {
     const current = state.storageStatus ?? statusFallbacks().storage;
     state.storageStatus = {
@@ -4189,6 +4307,7 @@ async function runStorageMigration() {
   } finally {
     finishActivity();
     renderStorageStatus();
+    renderEvidenceStatus();
   }
 }
 
@@ -4626,10 +4745,12 @@ async function runSchedulerMode(mode) {
     const payload = await postJson("/api/scheduler/run", { mode }, 60000);
     state.schedulerStatus = payload.status ?? state.schedulerStatus;
     state.storageStatus = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
+    state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 5000);
     state.stockMasterStatus = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
     maybeNotifySchedulerRun(state.schedulerStatus);
     renderSchedulerStatus();
     renderStorageStatus();
+    renderEvidenceStatus();
     renderStockMasterStatus();
     renderSnapshotHistory();
   } catch (error) {
@@ -4657,8 +4778,10 @@ async function runDiscoveryBot() {
   try {
     const payload = await postJson("/api/discovery/run", { mode: state.mode }, 70000);
     state.discoveryBotStatus = payload.status ?? state.discoveryBotStatus;
+    state.evidenceStatus = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 5000);
     state.stockMasterStatus = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
     renderDiscoveryBotStatus();
+    renderEvidenceStatus();
     renderStockMasterStatus();
   } catch (error) {
     state.discoveryBotStatus = {
@@ -6876,15 +6999,18 @@ function refreshAutoAnalysisMode() {
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
   const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
+  const evidence = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 5000);
   const stockMaster = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
   const portfolio = await safeFetchJson("/api/portfolio/status", statusFallbacks().portfolio, 5000);
   state.schedulerStatus = status;
   state.storageStatus = storage;
+  state.evidenceStatus = evidence;
   state.stockMasterStatus = stockMaster;
   state.portfolioStatus = portfolio;
   maybeNotifySchedulerRun(status);
   renderSchedulerStatus();
   renderStorageStatus();
+  renderEvidenceStatus();
   renderStockMasterStatus();
   renderPortfolioStatus();
   renderSnapshotHistory();
