@@ -132,6 +132,7 @@ TOSS_TRADES_MAX_CANDIDATES = max(
 TOSS_TRADES_COUNT = int(os.getenv("TOSS_TRADES_COUNT", "30"))
 TOSS_CANDLE_MAX_STALENESS_DAYS = int(os.getenv("TOSS_CANDLE_MAX_STALENESS_DAYS", "7"))
 SIGNAL_LIVE_PRICE_POLL_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_POLL_SECONDS", "10"))
+SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS", "12") or "12"))
 SIGNAL_LIVE_PRICE_FRESH_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_FRESH_SECONDS", str(max(30, SIGNAL_LIVE_PRICE_POLL_SECONDS * 3))))
 SIGNAL_LIVE_PRICE_DELAYED_SECONDS = int(os.getenv("SIGNAL_LIVE_PRICE_DELAYED_SECONDS", str(max(120, SIGNAL_LIVE_PRICE_POLL_SECONDS * 12))))
 SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS = int(os.getenv("SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 7)))
@@ -319,11 +320,13 @@ ANALYSIS_CACHE: dict[str, dict[str, object]] = {}
 FX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
+LIVE_PRICE_RESPONSE_CACHE: dict[tuple[str, str, tuple[str, ...]], dict[str, object]] = {}
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 GDELT_BACKOFF_UNTIL = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
+LIVE_PRICE_RESPONSE_CACHE_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
@@ -16298,6 +16301,35 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
 
 def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: str = "price") -> dict:
     mode = normalize_signal_mode(mode)
+    cache_symbols = tuple(unique_symbols(symbols)[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT])
+    cache_key = (mode, str(detail or "price"), cache_symbols)
+    now_utc = datetime.now(timezone.utc)
+    if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
+        with LIVE_PRICE_RESPONSE_CACHE_LOCK:
+            cached = LIVE_PRICE_RESPONSE_CACHE.get(cache_key)
+            expires_at = cached.get("expires_at") if isinstance(cached, dict) else None
+            cached_payload = cached.get("payload") if isinstance(cached, dict) else None
+        if isinstance(expires_at, datetime) and expires_at > now_utc and isinstance(cached_payload, dict):
+            payload = copy.deepcopy(cached_payload)
+            created_at = cached.get("created_at") if isinstance(cached, dict) else None
+            age_seconds = (
+                max(0, int((now_utc - created_at).total_seconds()))
+                if isinstance(created_at, datetime)
+                else 0
+            )
+            payload["cache"] = {
+                "hit": True,
+                "ttlSeconds": SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS,
+                "ageSeconds": age_seconds,
+                "expiresAt": expires_at.astimezone(KST).isoformat(timespec="seconds"),
+                "message": "서버 DB 스냅샷 응답 캐시를 사용했습니다.",
+            }
+            integrations = payload.get("integrations", {}) if isinstance(payload.get("integrations"), dict) else {}
+            live_price_status = integrations.get("livePrice", {}) if isinstance(integrations.get("livePrice"), dict) else {}
+            live_price_status["cache"] = payload["cache"]
+            integrations["livePrice"] = live_price_status
+            payload["integrations"] = integrations
+            return payload
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     store_payloads = live_price_fast_store_payloads()
     base_payload, base_source = dashboard_base_for_live_prices_fast(mode, store_payloads=store_payloads)
@@ -16438,7 +16470,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
     integrations["toss"] = toss_status
     integrations["marketDataMerge"] = market_data_merge_status
     integrations["marketDataLatest"] = market_data_status
-    return {
+    payload = {
         "mode": mode,
         "source": "db-live-price",
         "baseSource": base_source,
@@ -16456,6 +16488,20 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         "selected": None,
         "message": "DB 최신 스냅샷에서 가격·등락률 필드만 읽었습니다.",
     }
+    payload["cache"] = {
+        "hit": False,
+        "ttlSeconds": SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS,
+        "ageSeconds": 0,
+        "message": "DB 최신 스냅샷 응답을 새로 구성했습니다.",
+    }
+    if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
+        with LIVE_PRICE_RESPONSE_CACHE_LOCK:
+            LIVE_PRICE_RESPONSE_CACHE[cache_key] = {
+                "payload": copy.deepcopy(payload),
+                "created_at": now_utc,
+                "expires_at": now_utc + timedelta(seconds=SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS),
+            }
+    return payload
 
 
 def dashboard_live_price_payload(symbols: list[str], mode: str, detail: str = "price") -> dict:
