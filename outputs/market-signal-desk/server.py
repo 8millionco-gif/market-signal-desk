@@ -55,6 +55,7 @@ SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIME
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
+SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
@@ -321,12 +322,14 @@ FX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.repla
 INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 LIVE_PRICE_RESPONSE_CACHE: dict[tuple[str, str, tuple[str, ...]], dict[str, object]] = {}
+STORAGE_STATUS_CACHE: dict[str, object] = {"payload": None, "created_at": datetime.min.replace(tzinfo=timezone.utc), "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 GDELT_BACKOFF_UNTIL = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 LIVE_PRICE_RESPONSE_CACHE_LOCK = threading.Lock()
+STORAGE_STATUS_CACHE_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
@@ -15128,6 +15131,44 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 
 
 def snapshot_storage_status(fast: bool = True) -> dict:
+    now_utc = datetime.now(timezone.utc)
+    if fast and SIGNAL_STORAGE_STATUS_CACHE_SECONDS > 0:
+        with STORAGE_STATUS_CACHE_LOCK:
+            cached_payload = STORAGE_STATUS_CACHE.get("payload")
+            expires_at = STORAGE_STATUS_CACHE.get("expires_at")
+            created_at = STORAGE_STATUS_CACHE.get("created_at")
+        if isinstance(cached_payload, dict) and isinstance(expires_at, datetime) and expires_at > now_utc:
+            payload = copy.deepcopy(cached_payload)
+            age_seconds = (
+                max(0, int((now_utc - created_at).total_seconds()))
+                if isinstance(created_at, datetime)
+                else 0
+            )
+            payload["cache"] = {
+                "hit": True,
+                "ttlSeconds": SIGNAL_STORAGE_STATUS_CACHE_SECONDS,
+                "ageSeconds": age_seconds,
+                "expiresAt": expires_at.astimezone(KST).isoformat(timespec="seconds"),
+                "message": "저장소 상태 진단 캐시를 사용했습니다.",
+            }
+            return payload
+
+    def finalize(payload: dict) -> dict:
+        if fast and SIGNAL_STORAGE_STATUS_CACHE_SECONDS > 0:
+            cached = copy.deepcopy(payload)
+            cached["cache"] = {
+                "hit": False,
+                "ttlSeconds": SIGNAL_STORAGE_STATUS_CACHE_SECONDS,
+                "ageSeconds": 0,
+                "message": "저장소 상태 진단을 새로 계산했습니다.",
+            }
+            with STORAGE_STATUS_CACHE_LOCK:
+                STORAGE_STATUS_CACHE["payload"] = cached
+                STORAGE_STATUS_CACHE["created_at"] = now_utc
+                STORAGE_STATUS_CACHE["expires_at"] = now_utc + timedelta(seconds=SIGNAL_STORAGE_STATUS_CACHE_SECONDS)
+            return cached
+        return payload
+
     db_status = database_status(fast=fast)
     if fast and database_storage_enabled() and not database_fast_read_allowed():
         raw_events = {"enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED, "implementation": "filesystem", "persistent": False, "count": 0, "bySource": {}, "latest": {}, "last": dict(RAW_EVENT_STATE)}
@@ -15173,7 +15214,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         else:
             message = "DB는 연결됐지만 후보 데이터, Toss 최신값, 뉴스 이벤트 중 일부가 아직 DB 기준으로 읽히지 않습니다. 다음 수집 또는 DB 이관 후 운영 기준으로 전환됩니다."
             error = "candidate-market-or-news-not-db-backed"
-        return {
+        return finalize({
             "mode": SIGNAL_STORAGE_BACKEND,
             "implementation": "postgres",
             "runsDir": display_local_path(RUNS_DIR),
@@ -15200,7 +15241,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "fast": fast,
             "message": message,
             "error": error,
-        }
+        })
 
     writable = False
     error = ""
@@ -15215,7 +15256,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
 
     recent_runs = recent_scheduler_runs()
     persistent = SNAPSHOT_STORAGE_MODE not in {"", "filesystem", "local", "ephemeral"}
-    return {
+    return finalize({
         "mode": SNAPSHOT_STORAGE_MODE,
         "implementation": "filesystem",
         "runsDir": display_local_path(RUNS_DIR),
@@ -15246,7 +15287,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             else "DB가 연결되지 않아 스냅샷, 후보 풀, Toss 최신값이 임시 파일 저장소에 남습니다. 실전 운영 전에는 Postgres DB 연결이 필요합니다."
         ),
         "error": error,
-    }
+    })
 
 
 def scheduler_snapshot_path(run_id: str) -> Path | None:
