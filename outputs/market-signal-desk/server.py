@@ -16948,6 +16948,13 @@ def run_price_collection_cycle(
 
         records, queue_status = price_collector_records(selected_scope)
         if not records:
+            latest_read_status = market_data_latest_status(fast=True)
+            storage_summary = price_collector_storage_summary(selected_mode, latest_read_status)
+            message = (
+                storage_summary.get("message")
+                if storage_summary.get("decisionReady")
+                else "가격 수집 대상 후보가 아직 없습니다."
+            )
             status = {
                 "enabled": True,
                 "mode": selected_mode,
@@ -16956,8 +16963,17 @@ def run_price_collection_cycle(
                 "inputCount": 0,
                 "priceCount": 0,
                 "queue": queue_status,
+                "marketDataLatestStatus": latest_read_status,
+                "storageSummary": storage_summary,
+                "storedPriceValueCount": storage_summary.get("priceValueCount", 0),
+                "usablePriceCount": storage_summary.get("usablePriceCount", 0),
+                "closedBaselinePriceCount": storage_summary.get("closedBaselinePriceCount", 0),
+                "livePriceCount": storage_summary.get("livePriceCount", 0),
+                "dataWaitPriceCount": storage_summary.get("dataWaitPriceCount", 0),
+                "priceCoverage": storage_summary.get("priceCoverage", 0),
+                "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
                 "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-                "message": "가격 수집 대상 후보가 아직 없습니다.",
+                "message": message,
             }
         else:
             candidates = candidates_from_prefetch_records(records)
@@ -16985,6 +17001,7 @@ def run_price_collection_cycle(
                 stage=f"price-collector-{selected_scope}-{trigger}",
             )
             latest_read_status = market_data_latest_status(fast=True)
+            storage_summary = price_collector_storage_summary(selected_mode, latest_read_status)
             price_status = statuses.get("prices", {})
             status = {
                 "enabled": True,
@@ -17004,9 +17021,15 @@ def run_price_collection_cycle(
                 "statuses": statuses,
                 "marketDataLatest": latest_status,
                 "marketDataLatestStatus": latest_read_status,
+                "storageSummary": storage_summary,
                 "storedPriceValueCount": latest_read_status.get("priceValueCount", 0),
+                "usablePriceCount": latest_read_status.get("usablePriceCount", 0),
+                "closedBaselinePriceCount": latest_read_status.get("closedBaselinePriceCount", 0),
+                "livePriceCount": storage_summary.get("livePriceCount", 0),
                 "dataWaitPriceCount": latest_read_status.get("dataWaitPriceCount", 0),
                 "missingPriceValueCount": latest_read_status.get("missingPriceValueCount", 0),
+                "priceCoverage": storage_summary.get("priceCoverage", 0),
+                "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
                 "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
                 "message": "후보 풀 가격/등락률을 서버에서 수집해 DB 최신값 저장소에 반영했습니다.",
             }
@@ -17072,10 +17095,76 @@ def price_collector_next_run_at(state_key: str, interval_seconds: int) -> str:
     return (parsed.astimezone(KST) + timedelta(seconds=interval_seconds)).isoformat(timespec="seconds")
 
 
+def price_collector_storage_summary(mode: str | None = None, market_status: dict | None = None) -> dict:
+    selected_mode = normalize_signal_mode(mode or auto_signal_mode(), default=auto_signal_mode())
+    market_data = market_status if isinstance(market_status, dict) else market_data_latest_status(fast=True)
+    candidate_data = candidate_data_snapshot_status(fast=True)
+    candidate_count = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) if isinstance(candidate_data, dict) else 0
+    price_value_count = bounded_int(market_data.get("priceValueCount", market_data.get("priceCount", 0)), 0, 1_000_000)
+    usable_price_count = bounded_int(market_data.get("usablePriceCount", 0), 0, 1_000_000)
+    live_count = bounded_int(market_data.get("basisCounts", {}).get("live", 0), 0, 1_000_000) if isinstance(market_data.get("basisCounts"), dict) else 0
+    closed_count = bounded_int(market_data.get("closedBaselinePriceCount", 0), 0, 1_000_000)
+    last_good_count = bounded_int(market_data.get("lastGoodPriceCount", 0), 0, 1_000_000)
+    stale_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
+    data_wait_count = bounded_int(market_data.get("dataWaitPriceCount", 0), 0, 1_000_000)
+    unknown_count = bounded_int(market_data.get("unknownBasisCount", 0), 0, 1_000_000)
+    denominator = candidate_count if candidate_count > 0 else price_value_count
+    coverage = min(1, round(usable_price_count / denominator, 4)) if denominator > 0 else 0
+    decision_ready = bool(market_data.get("decisionReady") or usable_price_count > 0)
+    if selected_mode == "close" and closed_count > 0:
+        state = "closed_baseline_ready"
+        message = "장마감/휴장 판단에 사용할 DB 장마감 기준가를 보유하고 있습니다."
+        next_action = "다음 수집은 누락/오래된 기준가만 보강"
+    elif selected_mode == "intraday" and live_count > 0:
+        state = "live_ready"
+        message = "장중 판단에 사용할 DB 실시간 가격을 보유하고 있습니다."
+        next_action = "가격/등락률 필드만 갱신"
+    elif usable_price_count > 0:
+        state = "usable_price_ready"
+        message = "DB에 판단 가능한 가격 기준이 있어 후보를 비우지 않고 유지할 수 있습니다."
+        next_action = "시장 모드에 맞는 가격 기준을 추가 보강"
+    elif last_good_count > 0:
+        state = "last_good_only"
+        message = "마지막 정상 가격만 있어 신규 진입 판단은 보류하고 후보는 유지합니다."
+        next_action = "가격 수집 봇으로 live 또는 장마감 기준가 재확보"
+    elif data_wait_count > 0 or price_value_count <= 0:
+        state = "data_wait"
+        message = "가격 필수값이 부족해 진입 후보가 아니라 데이터 보강 대기 상태입니다."
+        next_action = "후보 풀 가격/등락률 수집"
+    else:
+        state = "unknown"
+        message = "가격 저장소 상태를 확인해야 합니다."
+        next_action = "market_data_latest 상태 점검"
+
+    return {
+        "mode": selected_mode,
+        "state": state,
+        "decisionReady": decision_ready,
+        "candidateCount": candidate_count,
+        "priceValueCount": price_value_count,
+        "usablePriceCount": usable_price_count,
+        "livePriceCount": live_count,
+        "closedBaselinePriceCount": closed_count,
+        "lastGoodPriceCount": last_good_count,
+        "stalePriceCount": stale_count,
+        "dataWaitPriceCount": data_wait_count,
+        "unknownBasisCount": unknown_count,
+        "priceCoverage": coverage,
+        "priceCoveragePercent": display_percent_abs(Decimal(str(coverage * 100))) if denominator > 0 else "0%",
+        "latestPriceAt": market_data.get("latestPriceAt", ""),
+        "readSource": market_data.get("readSource", ""),
+        "persistent": bool(market_data.get("persistent")),
+        "basisCounts": market_data.get("basisCounts", {}),
+        "message": message,
+        "nextAction": next_action,
+    }
+
+
 def price_collector_status() -> dict:
     with SCHEDULER_LOCK:
         state = copy.deepcopy(PRICE_COLLECTOR_STATE)
     mode = auto_signal_mode()
+    storage_summary = price_collector_storage_summary(mode)
     priority_next = price_collector_next_run_at("lastPriorityRun", SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS)
     full_next = price_collector_next_run_at("lastFullRun", SIGNAL_PRICE_COLLECTOR_FULL_SECONDS)
     close_next = price_collector_next_run_at("lastCloseRun", SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS)
@@ -17102,11 +17191,23 @@ def price_collector_status() -> dict:
         "lastFullRun": state.get("lastFullRun", {}),
         "lastCloseRun": state.get("lastCloseRun", {}),
         "lastDepthRun": state.get("lastDepthRun", {}),
+        "storageSummary": storage_summary,
+        "storageReady": bool(storage_summary.get("decisionReady")),
+        "storedCandidateCount": storage_summary.get("candidateCount", 0),
+        "storedPriceValueCount": storage_summary.get("priceValueCount", 0),
+        "usablePriceCount": storage_summary.get("usablePriceCount", 0),
+        "closedBaselinePriceCount": storage_summary.get("closedBaselinePriceCount", 0),
+        "livePriceCount": storage_summary.get("livePriceCount", 0),
+        "dataWaitPriceCount": storage_summary.get("dataWaitPriceCount", 0),
+        "priceCoverage": storage_summary.get("priceCoverage", 0),
+        "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
         "nextPriorityRunAt": priority_next,
         "nextFullRunAt": full_next,
         "nextCloseRunAt": close_next,
         "nextDepthRunAt": depth_next,
         "nextRunAt": close_next if mode == "close" else (priority_next or full_next),
+        "message": storage_summary.get("message", ""),
+        "nextAction": storage_summary.get("nextAction", ""),
     }
 
 
