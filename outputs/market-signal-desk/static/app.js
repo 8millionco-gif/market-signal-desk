@@ -1957,6 +1957,60 @@ function closedBaselineDecisionLabel(label, fallback = "다음 장 관찰") {
   return text;
 }
 
+function priceBasisKeyForDisplay(item) {
+  const livePrice = item?.livePrice ?? {};
+  const priceBasis = item?.priceBasis ?? {};
+  const readiness = item?.priceReadiness ?? {};
+  const evaluation = item?.evaluationMode ?? {};
+  const finalEvaluation = item?.finalDecision?.evaluationMode ?? {};
+  return (
+    livePrice.basis ||
+    priceBasis.basis ||
+    priceBasis.key ||
+    readiness.basis ||
+    readiness.key ||
+    evaluation.basis ||
+    evaluation.key ||
+    finalEvaluation.basis ||
+    finalEvaluation.key ||
+    ""
+  );
+}
+
+function basisAwareDecisionLabel(item, label = "", fallback = "데이터 보강 대기") {
+  const text = String(label ?? "").trim();
+  const basis = priceBasisKeyForDisplay(item);
+  const closedBaseline = isClosedBaselineCandidate(item);
+  const retained = Boolean(item?.livePrice?.retained || item?.displayRetained);
+  const replacement = closedBaseline
+    ? "다음 장 관찰"
+    : basis === "last_good" || retained
+      ? "마지막 정상값 확인"
+      : fallback;
+  if (!text) return replacement;
+  if (text.includes("가격 확인") || text.includes("미수신") || text.includes("반응 대기") || text.includes("확인 대기")) {
+    return replacement;
+  }
+  return text;
+}
+
+function basisAwareDecisionSummary(item, summary = "") {
+  const text = String(summary ?? "").trim();
+  const basis = priceBasisKeyForDisplay(item);
+  const closedBaseline = isClosedBaselineCandidate(item);
+  const retained = Boolean(item?.livePrice?.retained || item?.displayRetained);
+  const fallback = closedBaseline
+    ? "장마감 기준가로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
+    : basis === "last_good" || retained
+      ? "마지막 정상 가격을 유지해 후보를 보존합니다. 다음 수집에서 가격·등락률을 다시 검증합니다."
+      : "서버가 DB에 가격·등락률·거래량을 보강한 뒤 판단합니다.";
+  if (!text) return fallback;
+  if (text.includes("가격 확인 필요") || text.includes("가격확인 필요") || text.includes("미수신") || text.includes("반응대기")) {
+    return fallback;
+  }
+  return text;
+}
+
 function livePriceLabel(item) {
   const info = priceFreshnessInfo(item);
   if (info.isFresh) return info.ageText ? `실시간 ${info.ageText}` : "실시간";
@@ -1989,7 +2043,7 @@ function fallbackStatusLabel(status, fallback = "대체값") {
   if (source === "lookup") return "검색값";
   if (source === "error") return "오류";
   if (source === "sample") {
-    if (message.includes("응답이 비어")) return "미수신";
+    if (message.includes("응답이 비어")) return "보강 대기";
     if (message.includes("환경변수") || message.includes("키")) return "설정 대기";
     if (message.includes("꺼져")) return "라이브 꺼짐";
     if (message.includes("실패")) return "대체값";
@@ -2195,7 +2249,7 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
   }
   if (closedBaseline && !selectedHoldingFor(item)) {
-    const label = closedBaselineDecisionLabel(decision.action || reactionDecision.action || reactionDecision.label || reaction.decisionLabel);
+    const label = basisAwareDecisionLabel(item, decision.action || reactionDecision.action || reactionDecision.label || reaction.decisionLabel, "다음 장 관찰");
     return {
       key: "wait",
       label,
@@ -2758,7 +2812,7 @@ function renderLivePriceStatus() {
     ["실시간 반영", diag.freshCount > 0, `${diag.freshCount}/${diag.total || 0}`],
     ["미반영/지연", diag.notFreshCount === 0, `${diag.notFreshCount}/${diag.total || 0}`],
     ["저장값 복구", diag.storedFallbackCount === 0, diag.storedFallbackCount ? `${diag.storedFallbackCount}개` : "없음"],
-    ["최종 미수신", diag.missingCount === 0, diag.missingCount ? `${diag.missingCount}개` : "없음"],
+    ["최종 보강", diag.missingCount === 0, diag.missingCount ? `${diag.missingCount}개` : "없음"],
     ["직전가 유지", diag.retainedCount === 0, diag.retainedCount ? `${diag.retainedCount}개` : "없음"],
     ["DB 보강", true, diag.carriedForwardCount ? `${diag.carriedForwardCount}개 유지` : "없음"],
     ["부분 갱신", true, diag.changedCount ? `${diag.changedCount}개 변경` : "변경 없음"],
@@ -4021,7 +4075,7 @@ function renderStorageStatus() {
     livePriceCount ? `실시간 ${livePriceCount}` : "",
     closedBaselinePriceCount ? `장마감 ${closedBaselinePriceCount}` : "",
     lastGoodPriceCount ? `마지막값 ${lastGoodPriceCount}` : "",
-    unknownBasisCount ? `unknown ${unknownBasisCount}` : ""
+    unknownBasisCount ? `기준 미정 ${unknownBasisCount}` : ""
   ].filter(Boolean).join(" · ") || "기준 없음";
   const priceReadinessText = usablePriceCount > 0
     ? `판단 ${usablePriceCount}/${storedCandidateCount || storedPriceCount || "-"} · ${priceCoverageText}`
@@ -4194,7 +4248,7 @@ function renderEvidenceStatus() {
     liveCount ? `실시간 ${liveCount}` : "",
     closedCount ? `마감 ${closedCount}` : "",
     lastGoodCount ? `마지막값 ${lastGoodCount}` : "",
-    unknownCount ? `unknown ${unknownCount}` : ""
+    unknownCount ? `기준 미정 ${unknownCount}` : ""
   ].filter(Boolean).join(" · ") || "기준 없음";
   const gaps = Array.isArray(readiness.gaps) ? readiness.gaps : [];
   const nextAction = readiness.nextAction || status.nextAction || "근거 수집 상태 확인";
@@ -4576,14 +4630,15 @@ function tradePlanFromFinalDecision(item, decision, holding = null) {
   const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
   const closedBaseline = isClosedBaselineCandidate(item);
   const action = closedBaseline
-    ? closedBaselineDecisionLabel(decision.action)
-    : decision.action || "확인 대기";
+    ? basisAwareDecisionLabel(item, decision.action, "다음 장 관찰")
+    : basisAwareDecisionLabel(item, decision.action);
   const summary = closedBaseline
-    ? decision.summary || "장마감 기준가로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
-    : decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.";
-  const displaySignalCards = closedBaseline
-    ? signalCards.map(([label, value]) => [label, label === "현재 판단" ? closedBaselineDecisionLabel(value) : value])
-    : signalCards;
+    ? basisAwareDecisionSummary(item, decision.summary)
+    : basisAwareDecisionSummary(item, decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.");
+  const displaySignalCards = signalCards.map(([label, value]) => [
+    label,
+    basisAwareDecisionLabel(item, value, label === "현재 판단" && closedBaseline ? "다음 장 관찰" : String(value ?? ""))
+  ]);
   return {
     action,
     tone: decision.tone || "wait",
@@ -4634,10 +4689,22 @@ function tradePlan(item) {
   const overheated = change != null && change >= 3;
   const weak = change != null && change <= -2;
   const band = hasPrice ? priceBandFor(item, current, group, change, score) : null;
+  const closedBaseline = isClosedBaselineCandidate(item);
+  const basis = priceBasisKeyForDisplay(item);
+  const retained = Boolean(item?.livePrice?.retained || item?.displayRetained);
+  const missingPriceText = closedBaseline
+    ? "장마감 기준가로 판단"
+    : basis === "last_good" || retained
+      ? "마지막 정상값 확인"
+      : "DB 가격 저장 후 계산";
 
-  let action = "가격 확인 대기";
+  let action = closedBaseline
+    ? "다음 장 관찰"
+    : basis === "last_good" || retained
+      ? "마지막 정상값 확인"
+      : "데이터 보강 대기";
   let tone = "wait";
-  let summary = "현재가가 확인되면 매수·대기·매도 구간을 계산합니다.";
+  let summary = basisAwareDecisionSummary(item);
   if (hasPrice) {
     if (isHeld && (holdingJudgement.includes("분할매도") || (holdingRate != null && holdingRate >= 12))) {
       action = "분할매도 검토";
@@ -4674,14 +4741,14 @@ function tradePlan(item) {
     } else {
       action = "가격대 대기";
       tone = "wait";
-      summary = "후보 점수는 있으나 바로 진입보다 가격 확인이 필요합니다.";
+      summary = "후보 점수는 있으나 바로 진입보다 조건에 맞는 가격대까지 기다립니다.";
     }
   }
 
   const template = item?.price ?? "";
   const immediateText =
     !hasPrice
-      ? "현재가 확인 후 판단"
+      ? missingPriceText
       : tone === "buy"
         ? `구간 안착 시 관찰`
         : tone === "sell"
@@ -4692,7 +4759,9 @@ function tradePlan(item) {
               ? `반등선 회복 대기`
               : overheated
                 ? `눌림 확인 전 대기`
-                : `가격대 확인`;
+                : closedBaseline
+                  ? `다음 장 확인`
+                  : `가격대 관찰`;
 
   return {
     action,
@@ -4702,11 +4771,11 @@ function tradePlan(item) {
     hasPrice,
     signalCards: [
       ["현재 판단", immediateText],
-      ["매수 구간", band ? band.entryRangeText : "현재가 확인 후 계산"],
+      ["매수 구간", band ? band.entryRangeText : missingPriceText],
       ["위험 기준", band ? `${formatPriceFromTemplate(band.stopLine, template)} 이탈` : "-"]
     ],
     rows: [
-      ["관찰 매수", band ? band.entryRangeText : "현재가 확인 후 계산"],
+      ["관찰 매수", band ? band.entryRangeText : missingPriceText],
       ["눌림 대기", band ? `${formatPriceFromTemplate(band.pullback, template)} 부근 확인` : "-"],
       ["반등 확인", band?.reboundLine ? `${formatPriceFromTemplate(band.reboundLine, template)} 회복` : "약세 전환 시 확인"],
       ["추격 금지", band ? `${formatPriceFromTemplate(band.chaseLimit, template)} 이상` : "-"],
@@ -5266,12 +5335,12 @@ function primaryPriceGuide(plan) {
     return "신규 진입 금지";
   }
   if (String(plan?.action ?? "").includes("눌림")) {
-    return rows.find(([label]) => label === "눌림 대기")?.[1] ?? "눌림 확인 대기";
+    return rows.find(([label]) => label === "눌림 대기")?.[1] ?? "눌림 구간 관찰";
   }
   if (String(plan?.action ?? "").includes("반등")) {
-    return rows.find(([label]) => label === "반등 확인")?.[1] ?? "반등 확인 대기";
+    return rows.find(([label]) => label === "반등 확인")?.[1] ?? "반등 구간 관찰";
   }
-  return rows.find(([label]) => label === "관찰 매수")?.[1] ?? plan?.summary ?? "가격대 확인";
+  return rows.find(([label]) => label === "관찰 매수")?.[1] ?? plan?.summary ?? "가격대 관찰";
 }
 
 function feedActionLabel(item, plan) {
