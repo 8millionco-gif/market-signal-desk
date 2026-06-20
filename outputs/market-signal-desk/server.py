@@ -337,6 +337,7 @@ DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
 DB_FAILURE_BACKOFF_UNTIL = 0.0
+DB_PAYLOAD_UNSET = object()
 DB_MIGRATION_STATUS: dict[str, object] = {
     "enabled": SIGNAL_DB_AUTO_MIGRATE,
     "done": False,
@@ -1025,11 +1026,25 @@ def payload_item_count(payload: object, item_key: str = "items") -> int:
     return 0
 
 
-def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items", probe_database: bool = True) -> dict:
+def kv_payload_read_probe(
+    key: str,
+    file_path: Path,
+    item_key: str = "items",
+    probe_database: bool = True,
+    preloaded_db_payload: object = DB_PAYLOAD_UNSET,
+    preloaded_database_ready: bool | None = None,
+) -> dict:
     configured_db_enabled = database_storage_enabled()
     db_enabled = bool(configured_db_enabled and probe_database)
-    db_ready = bool(db_enabled and ensure_database_schema())
-    db_payload = db_read_kv(key, None) if db_ready else None
+    db_ready = (
+        bool(preloaded_database_ready)
+        if preloaded_database_ready is not None
+        else bool(db_enabled and ensure_database_schema())
+    )
+    if preloaded_db_payload is DB_PAYLOAD_UNSET:
+        db_payload = db_read_kv(key, None) if db_ready else None
+    else:
+        db_payload = preloaded_db_payload
     file_payload = safe_read_json_file(file_path)
     db_item_count = payload_item_count(db_payload, item_key)
     file_item_count = payload_item_count(file_payload, item_key)
@@ -1603,8 +1618,19 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
 def market_data_latest_status(fast: bool = False) -> dict:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
-    if fast and database_storage_enabled() and not database_fast_read_allowed():
-        data = safe_read_json_file(MARKET_DATA_LATEST_FILE) or market_data_latest_empty()
+    preloaded_db_payload: object = DB_PAYLOAD_UNSET
+    preloaded_database_ready: bool | None = None
+    if fast and database_storage_enabled():
+        if database_fast_read_allowed():
+            payloads = db_read_kv_many_fast([MARKET_DATA_LATEST_KV_KEY])
+            preloaded_db_payload = payloads.get(MARKET_DATA_LATEST_KV_KEY)
+            preloaded_database_ready = bool(DB_LAST_ERROR == "" or isinstance(preloaded_db_payload, dict))
+            data = preloaded_db_payload if isinstance(preloaded_db_payload, dict) else None
+        else:
+            preloaded_database_ready = False
+            data = None
+        if not isinstance(data, dict):
+            data = safe_read_json_file(MARKET_DATA_LATEST_FILE) or market_data_latest_empty()
         if not isinstance(data, dict):
             data = market_data_latest_empty()
         if not isinstance(data.get("items"), dict):
@@ -1639,6 +1665,8 @@ def market_data_latest_status(fast: bool = False) -> dict:
         MARKET_DATA_LATEST_KV_KEY,
         MARKET_DATA_LATEST_FILE,
         probe_database=not fast or database_fast_read_allowed(),
+        preloaded_db_payload=preloaded_db_payload,
+        preloaded_database_ready=preloaded_database_ready,
     )
     storage = probe["readSource"]
     persistent = storage == "postgres"
@@ -2670,8 +2698,8 @@ def database_status(fast: bool = False) -> dict:
     ready = False
     counts = {}
     if enabled:
-        if fast and not database_fast_read_allowed():
-            ready = False
+        if fast:
+            ready = database_fast_read_allowed()
         else:
             ready = ensure_database_schema()
             counts = db_storage_counts() if ready and not fast else {}
@@ -6344,8 +6372,19 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
 def candidate_data_snapshot_status(fast: bool = False) -> dict:
     if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
         return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "후보 데이터 저장이 꺼져 있습니다."}
-    if fast and database_storage_enabled() and not database_fast_read_allowed():
-        data = safe_read_json_file(CANDIDATE_DATA_FILE) or candidate_data_snapshot_empty()
+    preloaded_db_payload: object = DB_PAYLOAD_UNSET
+    preloaded_database_ready: bool | None = None
+    if fast and database_storage_enabled():
+        if database_fast_read_allowed():
+            payloads = db_read_kv_many_fast([CANDIDATE_DATA_KV_KEY])
+            preloaded_db_payload = payloads.get(CANDIDATE_DATA_KV_KEY)
+            preloaded_database_ready = bool(DB_LAST_ERROR == "" or isinstance(preloaded_db_payload, dict))
+            data = preloaded_db_payload if isinstance(preloaded_db_payload, dict) else None
+        else:
+            preloaded_database_ready = False
+            data = None
+        if not isinstance(data, dict):
+            data = safe_read_json_file(CANDIDATE_DATA_FILE) or candidate_data_snapshot_empty()
         if not isinstance(data, dict):
             data = candidate_data_snapshot_empty()
         if not isinstance(data.get("items"), dict):
@@ -6360,6 +6399,8 @@ def candidate_data_snapshot_status(fast: bool = False) -> dict:
         CANDIDATE_DATA_KV_KEY,
         CANDIDATE_DATA_FILE,
         probe_database=not fast or database_fast_read_allowed(),
+        preloaded_db_payload=preloaded_db_payload,
+        preloaded_database_ready=preloaded_database_ready,
     )
     storage = probe["readSource"]
     persistent = storage == "postgres"
