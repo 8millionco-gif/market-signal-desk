@@ -50,9 +50,11 @@ SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "3") or "3"))
-SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "10") or "10"))
+SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2") or "2"))
+SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
+SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
+SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
@@ -334,6 +336,7 @@ CANDIDATE_PREFETCH_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
+DB_FAILURE_BACKOFF_UNTIL = 0.0
 DB_MIGRATION_STATUS: dict[str, object] = {
     "enabled": SIGNAL_DB_AUTO_MIGRATE,
     "done": False,
@@ -435,20 +438,27 @@ def psycopg_modules():
 
 
 def db_connect_with_retry():
+    global DB_FAILURE_BACKOFF_UNTIL
+    backoff_remaining = DB_FAILURE_BACKOFF_UNTIL - time.time()
+    if backoff_remaining > 0:
+        raise RuntimeError(f"database temporarily unavailable; retry in {int(backoff_remaining) + 1}s")
     last_error: Exception | None = None
     for attempt in range(SIGNAL_DB_CONNECT_RETRIES):
         try:
             psycopg, Jsonb = psycopg_modules()
-            return psycopg, Jsonb, psycopg.connect(
+            conn = psycopg.connect(
                 DATABASE_URL,
                 connect_timeout=SIGNAL_DB_CONNECT_TIMEOUT_SECONDS,
             )
+            DB_FAILURE_BACKOFF_UNTIL = 0.0
+            return psycopg, Jsonb, conn
         except Exception as error:
             last_error = error
             set_db_error(error)
             if attempt + 1 < SIGNAL_DB_CONNECT_RETRIES:
                 time.sleep(SIGNAL_DB_RETRY_DELAY_SECONDS * (attempt + 1))
     if last_error is not None:
+        DB_FAILURE_BACKOFF_UNTIL = time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS
         raise last_error
     raise RuntimeError("database connection failed")
 
@@ -979,8 +989,9 @@ def payload_item_count(payload: object, item_key: str = "items") -> int:
     return 0
 
 
-def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items") -> dict:
-    db_enabled = database_storage_enabled()
+def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items", probe_database: bool = True) -> dict:
+    configured_db_enabled = database_storage_enabled()
+    db_enabled = bool(configured_db_enabled and probe_database)
     db_ready = bool(db_enabled and ensure_database_schema())
     db_payload = db_read_kv(key, None) if db_ready else None
     file_payload = safe_read_json_file(file_path)
@@ -1000,7 +1011,8 @@ def kv_payload_read_probe(key: str, file_path: Path, item_key: str = "items") ->
     return {
         "readSource": read_source,
         "databaseConfigured": bool(DATABASE_URL),
-        "databaseEnabled": db_enabled,
+        "databaseEnabled": configured_db_enabled,
+        "databaseProbed": probe_database,
         "databaseReady": db_ready,
         "databaseError": DB_LAST_ERROR,
         "dbItemCount": db_item_count,
@@ -1549,10 +1561,19 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
     }
 
 
-def market_data_latest_status() -> dict:
+def market_data_latest_status(fast: bool = False) -> dict:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
-    data = market_data_latest_data()
+    if fast and database_storage_enabled() and not DB_SCHEMA_READY:
+        data = safe_read_json_file(MARKET_DATA_LATEST_FILE) or market_data_latest_empty()
+        if not isinstance(data, dict):
+            data = market_data_latest_empty()
+        if not isinstance(data.get("items"), dict):
+            data["items"] = {}
+        if not isinstance(data.get("summary"), dict):
+            data["summary"] = {}
+    else:
+        data = market_data_latest_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
     price_items = [
@@ -1575,7 +1596,11 @@ def market_data_latest_status() -> dict:
             delayed_price_count += 1
         else:
             stale_price_count += 1
-    probe = kv_payload_read_probe(MARKET_DATA_LATEST_KV_KEY, MARKET_DATA_LATEST_FILE)
+    probe = kv_payload_read_probe(
+        MARKET_DATA_LATEST_KV_KEY,
+        MARKET_DATA_LATEST_FILE,
+        probe_database=not fast or DB_SCHEMA_READY,
+    )
     storage = probe["readSource"]
     persistent = storage == "postgres"
     if persistent:
@@ -2596,10 +2621,16 @@ def db_latest_snapshot_detail(mode: str | None = None) -> dict | None:
         return None
 
 
-def database_status() -> dict:
+def database_status(fast: bool = False) -> dict:
     enabled = database_storage_enabled()
-    ready = ensure_database_schema() if enabled else False
-    counts = db_storage_counts() if ready else {}
+    ready = False
+    counts = {}
+    if enabled:
+        if fast and not DB_SCHEMA_READY:
+            ready = False
+        else:
+            ready = ensure_database_schema()
+            counts = db_storage_counts() if ready and not fast else {}
     requested = database_storage_requested()
     if ready:
         message = "Postgres DB를 기준 저장소로 사용 중입니다."
@@ -2628,7 +2659,7 @@ def database_status() -> dict:
         "counts": counts,
         "message": message,
         "nextAction": next_action,
-        "error": "" if ready and counts else DB_LAST_ERROR,
+        "error": "" if ready else DB_LAST_ERROR,
     }
 
 
@@ -6259,13 +6290,26 @@ def update_candidate_data_snapshots(candidates: list[dict], mode: str, stage: st
     }
 
 
-def candidate_data_snapshot_status() -> dict:
+def candidate_data_snapshot_status(fast: bool = False) -> dict:
     if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
         return {"enabled": False, "storage": "disabled", "itemCount": 0, "message": "후보 데이터 저장이 꺼져 있습니다."}
-    data = candidate_data_snapshot_data()
+    if fast and database_storage_enabled() and not DB_SCHEMA_READY:
+        data = safe_read_json_file(CANDIDATE_DATA_FILE) or candidate_data_snapshot_empty()
+        if not isinstance(data, dict):
+            data = candidate_data_snapshot_empty()
+        if not isinstance(data.get("items"), dict):
+            data["items"] = {}
+        if not isinstance(data.get("summary"), dict):
+            data["summary"] = {}
+    else:
+        data = candidate_data_snapshot_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    probe = kv_payload_read_probe(CANDIDATE_DATA_KV_KEY, CANDIDATE_DATA_FILE)
+    probe = kv_payload_read_probe(
+        CANDIDATE_DATA_KV_KEY,
+        CANDIDATE_DATA_FILE,
+        probe_database=not fast or DB_SCHEMA_READY,
+    )
     storage = probe["readSource"]
     persistent = storage == "postgres"
     if persistent:
@@ -9539,12 +9583,15 @@ def candidate_pool_empty() -> dict:
     }
 
 
-def candidate_pool_data() -> dict:
-    data = preferred_kv_payload(
-        "candidate_pool",
-        CANDIDATE_POOL_FILE,
-        candidate_pool_empty,
-    )
+def candidate_pool_data(fast: bool = False) -> dict:
+    if fast and database_storage_enabled() and not DB_SCHEMA_READY:
+        data = safe_read_json_file(CANDIDATE_POOL_FILE) or candidate_pool_empty()
+    else:
+        data = preferred_kv_payload(
+            "candidate_pool",
+            CANDIDATE_POOL_FILE,
+            candidate_pool_empty,
+        )
     if not isinstance(data, dict):
         return candidate_pool_empty()
     if not isinstance(data.get("items"), dict):
@@ -9858,8 +9905,8 @@ def candidate_pool_performance_fields(record: dict) -> dict:
     return {key: record.get(key) for key in keys if key in record}
 
 
-def candidate_pool_summary(data: dict | None = None) -> dict:
-    payload = data if isinstance(data, dict) else candidate_pool_data()
+def candidate_pool_summary(data: dict | None = None, fast: bool = False) -> dict:
+    payload = data if isinstance(data, dict) else candidate_pool_data(fast=fast)
     items = payload.get("items", {}) if isinstance(payload.get("items"), dict) else {}
     counts: dict[str, int] = {key: 0 for key in CANDIDATE_POOL_STATES}
     active_count = 0
@@ -13532,7 +13579,7 @@ def pipeline_step(stage: str, label: str, status: str, message: str = "", count:
     return step
 
 
-def dashboard_status_defaults() -> dict:
+def dashboard_status_defaults(fast: bool = False) -> dict:
     return {
         "toss_price": {
             "source": "sample",
@@ -13587,10 +13634,14 @@ def dashboard_status_defaults() -> dict:
             "enabled": True,
             "message": "기본 후보 점수를 사용합니다.",
         },
-        "candidate_pool": candidate_pool_summary(),
-        "candidate_data": candidate_data_snapshot_status(),
-        "market_data_latest": market_data_latest_status(),
-        "news_events": news_event_storage_status(),
+        "candidate_pool": candidate_pool_summary(fast=fast),
+        "candidate_data": candidate_data_snapshot_status(fast=fast),
+        "market_data_latest": market_data_latest_status(fast=fast),
+        "news_events": (
+            {"enabled": SIGNAL_NEWS_EVENT_STORAGE_ENABLED, "implementation": "filesystem", "persistent": False, "count": 0, "message": "빠른 상태 조회에서는 DB 뉴스 통계를 생략합니다."}
+            if fast and database_storage_enabled() and not DB_SCHEMA_READY
+            else news_event_storage_status()
+        ),
     }
 
 
@@ -14232,7 +14283,7 @@ def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: st
     integrations["candidateDataMerge"] = candidate_data_merge
     integrations["liveStateMerge"] = live_state_merge
     integrations["marketDataMerge"] = market_data_merge
-    integrations["marketDataLatest"] = market_data_latest_status()
+    integrations["marketDataLatest"] = market_data_latest_status(fast=True)
     integrations["postPrefetchCandidateRefresh"] = {
         "enabled": True,
         "candidateCount": len(candidates),
@@ -14981,14 +15032,18 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
     return records
 
 
-def snapshot_storage_status() -> dict:
-    db_status = database_status()
-    raw_events = raw_event_storage_status()
-    news_events = news_event_storage_status()
-    candidate_data = candidate_data_snapshot_status()
-    market_data = market_data_latest_status()
+def snapshot_storage_status(fast: bool = True) -> dict:
+    db_status = database_status(fast=fast)
+    if fast and database_storage_enabled() and not DB_SCHEMA_READY:
+        raw_events = {"enabled": SIGNAL_RAW_EVENT_STORAGE_ENABLED, "implementation": "filesystem", "persistent": False, "count": 0, "bySource": {}, "latest": {}, "last": dict(RAW_EVENT_STATE)}
+        news_events = {"enabled": SIGNAL_NEWS_EVENT_STORAGE_ENABLED, "implementation": "filesystem", "persistent": False, "count": 0, "byProvider": {}, "latest": {}}
+    else:
+        raw_events = raw_event_storage_status()
+        news_events = news_event_storage_status()
+    candidate_data = candidate_data_snapshot_status(fast=fast)
+    market_data = market_data_latest_status(fast=fast)
     migration_attempt = None
-    if db_status["enabled"] and db_status["ready"]:
+    if SIGNAL_STORAGE_STATUS_AUTO_MIGRATE and db_status["enabled"] and db_status["ready"]:
         needs_file_promotion = any([
             candidate_data.get("readSource") == "filesystem" and bounded_int(candidate_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
             market_data.get("readSource") == "filesystem" and bounded_int(market_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
@@ -14998,11 +15053,11 @@ def snapshot_storage_status() -> dict:
         if needs_file_promotion:
             migration_attempt = migrate_files_to_database(force=True)
             if not migration_attempt.get("error"):
-                db_status = database_status()
+                db_status = database_status(fast=fast)
                 raw_events = raw_event_storage_status()
                 news_events = news_event_storage_status()
-                candidate_data = candidate_data_snapshot_status()
-                market_data = market_data_latest_status()
+                candidate_data = candidate_data_snapshot_status(fast=fast)
+                market_data = market_data_latest_status(fast=fast)
     analysis_ready = bool(
         bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
         and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
@@ -15047,6 +15102,7 @@ def snapshot_storage_status() -> dict:
             "candidateData": candidate_data,
             "marketData": market_data,
             "migrationAttempt": migration_attempt or {},
+            "fast": fast,
             "message": message,
             "error": error,
         }
@@ -15088,6 +15144,7 @@ def snapshot_storage_status() -> dict:
         "candidateData": candidate_data,
         "marketData": market_data,
         "migrationAttempt": migration_attempt or {},
+        "fast": fast,
         "message": (
             "영구 저장소로 표시되어 있습니다."
             if persistent
@@ -15373,7 +15430,7 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     integrations["candidateDataMerge"] = candidate_data_merge
     integrations["liveStateMerge"] = live_state_merge
     integrations["marketDataMerge"] = market_data_merge
-    integrations["marketDataLatest"] = market_data_latest_status()
+    integrations["marketDataLatest"] = market_data_latest_status(fast=True)
     payload["integrations"] = integrations
     return payload
 
@@ -15400,8 +15457,8 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
     candidates = sort_candidates_for_mode(candidates, mode)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
 
-    defaults = dashboard_status_defaults()
-    pool_status = candidate_pool_summary()
+    defaults = dashboard_status_defaults(fast=True)
+    pool_status = candidate_pool_summary(fast=True)
     discovery_status = {
         **discovery_status,
         "source": "candidate-data-snapshots",
@@ -15433,7 +15490,7 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
             "candidate_pool": pool_status,
             "candidate_data_merge": candidate_data_merge,
             "live_state_merge": live_state_merge,
-            "market_data_latest": market_data_latest_status(),
+            "market_data_latest": market_data_latest_status(fast=True),
             "market_data_merge": market_data_merge,
         },
         "pipeline": [
@@ -15522,8 +15579,8 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     candidates = sort_candidates_for_mode(candidates, mode)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
 
-    defaults = dashboard_status_defaults()
-    pool_status = candidate_pool_summary()
+    defaults = dashboard_status_defaults(fast=True)
+    pool_status = candidate_pool_summary(fast=True)
     discovery_status = {
         **discovery_status,
         "source": "candidate-pool",
@@ -15555,7 +15612,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
             "candidate_pool": pool_status,
             "candidate_data_merge": candidate_data_merge,
             "live_state_merge": live_state_merge,
-            "market_data_latest": market_data_latest_status(),
+            "market_data_latest": market_data_latest_status(fast=True),
             "market_data_merge": market_data_merge,
         },
         "pipeline": [
@@ -15881,7 +15938,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
     candidates = [price_only_candidate_update(candidate) for candidate in base_candidates]
     base_integrations = copy.deepcopy(base_payload.get("integrations", {})) if isinstance(base_payload.get("integrations"), dict) else {}
     selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
-    market_data_status = market_data_latest_status()
+    market_data_status = market_data_latest_status(fast=True)
     freshness_counts = live_price_freshness_counts(candidates)
     requested = unique_symbols(symbols) or unique_symbols([str(item.get("symbol", "")) for item in candidates])
     requested = requested[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
