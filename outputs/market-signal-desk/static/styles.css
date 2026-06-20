@@ -2722,13 +2722,14 @@ h3 {
   }
 
   .signal-panel {
-    display: block;
-    overflow: visible;
+    display: flex;
+    max-height: none;
+    overflow: hidden;
   }
 
   .signal-panel .feed {
-    flex: initial;
-    overflow: visible;
+    max-height: min(62vh, 680px);
+    overflow-y: auto;
     padding-right: 0;
     margin-right: 0;
   }
@@ -2810,5 +2811,9 @@ h3 {
 
   .feed-limit-panel em {
     white-space: normal;
+  }
+
+  .signal-panel .feed {
+    max-height: 56vh;
   }
 }

@@ -1502,29 +1502,30 @@ function visibleFeedCandidates(candidates = []) {
   const items = Array.isArray(candidates) ? candidates : [];
   const queryActive = Boolean(state.query.trim());
   const baseLimit = candidateFeedBaseLimit();
-  const canToggle = !queryActive && items.length > baseLimit;
+  const effectiveLimit = queryActive ? Math.max(baseLimit, CANDIDATE_FEED_ALL_VISIBLE_LIMIT) : baseLimit;
+  const canToggle = items.length > effectiveLimit;
   if (!canToggle || state.feedExpanded) {
     return {
       items,
       hiddenCount: 0,
-      baseLimit,
+      baseLimit: effectiveLimit,
       canToggle,
       expanded: Boolean(state.feedExpanded && canToggle)
     };
   }
 
-  const visible = items.slice(0, baseLimit);
+  const visible = items.slice(0, effectiveLimit);
   if (state.selectedSymbol && !visible.some((item) => item.symbol === state.selectedSymbol)) {
     const selected = items.find((item) => item.symbol === state.selectedSymbol);
     if (selected) {
-      visible.splice(Math.max(0, baseLimit - 1), 1, selected);
+      visible.splice(Math.max(0, effectiveLimit - 1), 1, selected);
     }
   }
 
   return {
     items: visible,
     hiddenCount: Math.max(0, items.length - visible.length),
-    baseLimit,
+    baseLimit: effectiveLimit,
     canToggle,
     expanded: false
   };
