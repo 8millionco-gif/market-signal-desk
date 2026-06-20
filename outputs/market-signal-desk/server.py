@@ -292,6 +292,48 @@ SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS = max(
     int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_MIN_INTERVAL_SECONDS", "180")),
     int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS", "180")),
 )
+SIGNAL_PRICE_COLLECTOR_ENABLED = os.getenv("SIGNAL_PRICE_COLLECTOR_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_PRICE_COLLECTOR_TICK_SECONDS = max(
+    5,
+    int(os.getenv("SIGNAL_PRICE_COLLECTOR_TICK_SECONDS", str(max(10, SIGNAL_LIVE_PRICE_POLL_SECONDS))) or "10"),
+)
+SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS = max(
+    SIGNAL_PRICE_COLLECTOR_TICK_SECONDS,
+    int(os.getenv("SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS", str(SIGNAL_PRICE_COLLECTOR_TICK_SECONDS)) or SIGNAL_PRICE_COLLECTOR_TICK_SECONDS),
+)
+SIGNAL_PRICE_COLLECTOR_FULL_SECONDS = max(
+    30,
+    int(os.getenv("SIGNAL_PRICE_COLLECTOR_FULL_SECONDS", "60") or "60"),
+)
+SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS = max(
+    300,
+    int(os.getenv("SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS", "600") or "600"),
+)
+SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT = max(
+    1,
+    min(
+        int(os.getenv("SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT", "12") or "12"),
+        SIGNAL_CANDIDATE_POOL_SCAN_LIMIT,
+    ),
+)
+SIGNAL_PRICE_COLLECTOR_FULL_LIMIT = max(
+    SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT,
+    min(
+        int(os.getenv("SIGNAL_PRICE_COLLECTOR_FULL_LIMIT", "80") or "80"),
+        SIGNAL_CANDIDATE_POOL_SCAN_LIMIT,
+    ),
+)
+SIGNAL_DEPTH_COLLECTOR_SECONDS = max(
+    30,
+    int(os.getenv("SIGNAL_DEPTH_COLLECTOR_SECONDS", "30") or "30"),
+)
+SIGNAL_DEPTH_COLLECTOR_LIMIT = max(
+    0,
+    min(
+        int(os.getenv("SIGNAL_DEPTH_COLLECTOR_LIMIT", "10") or "10"),
+        max(TOSS_CANDLE_MAX_CANDIDATES, TOSS_ORDERBOOK_MAX_CANDIDATES, TOSS_TRADES_MAX_CANDIDATES, 10),
+    ),
+)
 _SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = os.getenv("SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT", "1")
 try:
     SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT = Decimal(_SIGNAL_PERFORMANCE_SUCCESS_THRESHOLD_PERCENT)
@@ -339,6 +381,7 @@ LIVE_STATE_LOCK = threading.Lock()
 CANDIDATE_DATA_LOCK = threading.Lock()
 STOCK_SEARCH_MASTER_LOCK = threading.Lock()
 CANDIDATE_PREFETCH_LOCK = threading.Lock()
+PRICE_COLLECTOR_LOCK = threading.Lock()
 DB_SCHEMA_READY = False
 DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
@@ -397,6 +440,18 @@ DISCOVERY_BOT_STATE: dict[str, object] = {
     "lastError": "",
     "lastCheckedAt": "",
     "lastRun": {},
+}
+PRICE_COLLECTOR_STATE: dict[str, object] = {
+    "enabled": SIGNAL_PRICE_COLLECTOR_ENABLED,
+    "started": False,
+    "running": False,
+    "lastError": "",
+    "lastCheckedAt": "",
+    "lastRun": {},
+    "lastPriorityRun": {},
+    "lastFullRun": {},
+    "lastDepthRun": {},
+    "lastCloseRun": {},
 }
 
 
@@ -1483,16 +1538,54 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
         live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
         if str(live_price.get("source", "")) == "toss" and live_price.get("lastPrice") and live_price.get("currency"):
             timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or candidate.get("updated") or now_text)
+            session = market_session_context(str(candidate.get("market", "")))
+            retained_on_failure = bool(
+                live_price.get("retainedOnFailure")
+                or live_price.get("missedInLastFetch")
+                or live_price.get("stale")
+                or str(live_price.get("basis", "")).strip() == "last_good"
+            )
+            basis = "last_good" if retained_on_failure else str(
+                live_price.get("basis") or ("closed_baseline" if session.get("isClosedOrPreopen") else "live")
+            )
+            volume_value = None
+            for volume_key in (
+                "volume",
+                "tradeVolume",
+                "tradingVolume",
+                "accTradeVolume",
+                "accumulatedVolume",
+                "accumulatedTradeVolume",
+            ):
+                if live_price.get(volume_key) not in {None, ""}:
+                    volume_value = live_state_json_safe(live_price.get(volume_key))
+                    break
+            if volume_value is None:
+                trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+                volume_value = trend.get("dailyVolume") or trend.get("recentTradeVolume") or trend.get("volume")
             row = {
                 **base_row,
                 "lastPrice": str(live_price.get("lastPrice")),
                 "currency": str(live_price.get("currency")),
                 "timestamp": timestamp,
                 "updatedAt": str(live_price.get("updatedAt") or timestamp),
+                "lastGoodAt": str(live_price.get("lastGoodAt") or live_price.get("updatedAt") or timestamp),
+                "basis": basis,
                 "dataSource": str(live_price.get("dataSource") or "candidate-final"),
                 "retained": bool(live_price.get("retained")),
+                "stale": retained_on_failure,
+                "retainedOnFailure": retained_on_failure,
                 "dataCompleteness": completeness_row,
             }
+            if retained_on_failure:
+                missing_fields = unique_texts(
+                    list(completeness_row.get("missing", []) if isinstance(completeness_row.get("missing"), list) else [])
+                    + ["price"]
+                )
+                row["missingFields"] = missing_fields
+                row["message"] = str(live_price.get("message") or "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다.")
+            if volume_value not in {None, ""}:
+                row["volume"] = volume_value
             change = candidate_change_decimal(candidate)
             if change is not None:
                 row["changeRate"] = str(change)
@@ -1508,9 +1601,18 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                 **base_metadata,
                 "eventType": "prices",
                 "retained": bool(live_price.get("retained")),
+                "stale": retained_on_failure,
+                "retainedOnFailure": retained_on_failure,
+                "basis": basis,
+                "lastGoodAt": row.get("lastGoodAt", ""),
             }
+            if retained_on_failure:
+                metadata["missingFields"] = row.get("missingFields", [])
             rows.append(candidate_market_data_latest_record("prices", symbol, row, metadata, now_text))
             updated_by_type["prices"] = updated_by_type.get("prices", 0) + 1
+            if retained_on_failure:
+                updated_by_type["prices_retained"] = updated_by_type.get("prices_retained", 0) + 1
+                retained_price_count += 1
             candidate_stored = True
         else:
             previous_key = market_data_latest_key("toss", "prices", symbol, "")
@@ -1538,6 +1640,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                     **base_row,
                     "updatedAt": now_text,
                     "lastGoodAt": previous_updated,
+                    "basis": "last_good",
                     "stale": True,
                     "retained": True,
                     "retainedOnFailure": True,
@@ -1554,6 +1657,7 @@ def update_market_data_latest_from_candidates(candidates: list[dict], mode: str 
                     "retained": True,
                     "retainedOnFailure": True,
                     "lastGoodAt": previous_updated,
+                    "basis": "last_good",
                     "missingFields": missing_fields,
                 }
                 retained_record = {
@@ -1729,9 +1833,15 @@ def market_data_latest_status(fast: bool = False) -> dict:
     last_good_price_count = 0
     missing_price_timestamp_count = 0
     missing_field_counts: dict[str, int] = {}
+    basis_counts: dict[str, int] = {}
     latest_price_at = ""
     for item in price_items:
         row = market_data_record_payload_row(item)
+        item_metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        basis = str(row.get("basis") or item.get("basis") or item_metadata.get("basis") or "").strip()
+        if not basis:
+            basis = "unknown"
+        basis_counts[basis] = basis_counts.get(basis, 0) + 1
         row_missing = row.get("missingFields") if isinstance(row, dict) else []
         item_missing = item.get("missingFields") if isinstance(item.get("missingFields"), list) else []
         missing_fields = unique_texts(
@@ -1803,6 +1913,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "lastGoodPriceCount": last_good_price_count,
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
+        "basisCounts": basis_counts,
         "bySource": summary.get("bySource", {}),
         "byType": summary.get("byType", {}),
         "latestAt": data.get("updatedAt", ""),
@@ -1890,6 +2001,21 @@ def live_price_from_market_data_record(record: dict, fallback_updated_at: str = 
         "retained": True,
         "message": "서버 DB에 저장된 최신 토스 현재가를 후보 판단에 반영했습니다.",
     }
+    if bool(row.get("stale") or record.get("stale")):
+        live_price["stale"] = True
+    if bool(row.get("retainedOnFailure") or record.get("retainedOnFailure")):
+        live_price["retainedOnFailure"] = True
+        live_price["basis"] = "last_good"
+        live_price["message"] = "서버 DB의 마지막 정상 토스 현재가를 후보 판단에 유지 반영했습니다."
+    missing_fields = row.get("missingFields") or record.get("missingFields")
+    if isinstance(missing_fields, list):
+        live_price["missingFields"] = missing_fields
+    if row.get("basis"):
+        live_price["basis"] = str(row.get("basis"))
+    if row.get("lastGoodAt"):
+        live_price["lastGoodAt"] = str(row.get("lastGoodAt"))
+    if row.get("volume") not in {None, ""}:
+        live_price["volume"] = live_state_json_safe(row.get("volume"))
     change = change_from_toss_price_row(row)
     if change:
         live_price["changeSource"] = "market-data-latest"
@@ -4839,6 +4965,21 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
                 "updatedAt": now_text,
                 "source": "toss",
             }
+            for volume_key in (
+                "volume",
+                "tradeVolume",
+                "tradingVolume",
+                "accTradeVolume",
+                "accumulatedVolume",
+                "accumulatedTradeVolume",
+            ):
+                if price.get(volume_key) not in {None, ""}:
+                    item["livePrice"][volume_key] = live_state_json_safe(price.get(volume_key))
+            item["livePrice"]["basis"] = (
+                "closed_baseline"
+                if market_session_context(str(item.get("market", ""))).get("isClosedOrPreopen")
+                else "live"
+            )
             item["livePrice"]["freshness"] = live_price_freshness(item["livePrice"], now_text, str(item.get("market", "")))
             change = change_from_toss_price_row(price)
             change_source = "toss-prices" if change else ""
@@ -14798,6 +14939,310 @@ def prefetch_candidate_pool_market_data(
     }
 
 
+def price_collector_records(scope: str, seed_candidates: list[dict] | None = None) -> tuple[list[dict], dict]:
+    normalized_scope = str(scope or "priority").strip().lower()
+    limit = SIGNAL_PRICE_COLLECTOR_FULL_LIMIT if normalized_scope in {"full", "close"} else SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT
+    records, queue_status = candidate_prefetch_queue_records(limit, seed_candidates=seed_candidates)
+    queue_status = dict(queue_status)
+    queue_status["collectorScope"] = normalized_scope
+    queue_status["collectorLimit"] = limit
+    return records, queue_status
+
+
+def candidates_from_prefetch_records(records: list[dict]) -> list[dict]:
+    data = seed_data()
+    seed_lookup = {
+        str(item.get("symbol", "")).strip().upper(): item
+        for item in data.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    }
+    watched = set(watchlist())
+    candidates = [candidate_from_pool_record_for_prefetch(record, seed_lookup, watched) for record in records]
+    return [candidate for candidate in candidates if isinstance(candidate, dict) and str(candidate.get("symbol", "")).strip()]
+
+
+def annotate_price_collection_basis(candidates: list[dict], mode: str, scope: str) -> list[dict]:
+    normalized_mode = normalize_signal_mode(mode)
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    annotated: list[dict] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        live_price = dict(item.get("livePrice", {})) if isinstance(item.get("livePrice"), dict) else {}
+        if live_price.get("lastPrice") and str(live_price.get("source", "")).strip() == "toss":
+            session = market_session_context(str(item.get("market", "")))
+            retained_on_failure = bool(
+                live_price.get("retainedOnFailure")
+                or live_price.get("missedInLastFetch")
+                or live_price.get("stale")
+                or str(live_price.get("basis", "")).strip() == "last_good"
+            )
+            basis = "last_good" if retained_on_failure else (
+                "closed_baseline" if normalized_mode == "close" or session.get("isClosedOrPreopen") else "live"
+            )
+            live_price.update({
+                "basis": basis,
+                "collectorScope": scope,
+                "collectorUpdatedAt": now_text,
+                "dataSource": "price-collector",
+            })
+            if retained_on_failure:
+                live_price["stale"] = True
+                live_price["retainedOnFailure"] = True
+                live_price["message"] = live_price.get("message") or "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다."
+            if not live_price.get("lastGoodAt"):
+                live_price["lastGoodAt"] = live_price.get("timestamp") or live_price.get("updatedAt") or now_text
+            item["livePrice"] = live_price
+        annotated.append(item)
+    return annotated
+
+
+def enrich_price_collector_depth(candidates: list[dict]) -> tuple[list[dict], dict]:
+    if SIGNAL_DEPTH_COLLECTOR_LIMIT <= 0:
+        return candidates, {
+            "enabled": False,
+            "message": "심화 데이터 수집 제한이 0이라 가격만 저장합니다.",
+        }
+    limited = [dict(item) for item in candidates[:SIGNAL_DEPTH_COLLECTOR_LIMIT]]
+    if not limited:
+        return candidates, {"enabled": True, "inputCount": 0, "message": "심화 데이터 수집 대상이 없습니다."}
+
+    statuses: dict[str, dict] = {}
+    enrichers = [
+        ("candles", enrich_candidates_with_toss_candles, "토스 차트 수집에 실패했습니다."),
+        ("orderbook", enrich_candidates_with_toss_orderbook, "토스 호가 수집에 실패했습니다."),
+        ("trades", enrich_candidates_with_toss_trades, "토스 체결 수집에 실패했습니다."),
+    ]
+    depth_candidates = limited
+    for key, enricher, message in enrichers:
+        try:
+            depth_candidates, statuses[key] = enricher(depth_candidates)
+        except Exception as error:
+            statuses[key] = prefetch_enrichment_status("error", error, message)
+
+    by_symbol = {
+        str(item.get("symbol", "")).strip().upper(): item
+        for item in depth_candidates
+        if isinstance(item, dict) and str(item.get("symbol", "")).strip()
+    }
+    merged = []
+    merged_count = 0
+    for candidate in candidates:
+        symbol = str(candidate.get("symbol", "")).strip().upper() if isinstance(candidate, dict) else ""
+        if symbol in by_symbol:
+            merged.append({**candidate, **by_symbol[symbol]})
+            merged_count += 1
+        else:
+            merged.append(candidate)
+
+    return merged, {
+        "enabled": True,
+        "inputCount": len(limited),
+        "mergedCount": merged_count,
+        "limit": SIGNAL_DEPTH_COLLECTOR_LIMIT,
+        "statuses": statuses,
+        "message": f"상위 후보 {merged_count}개의 차트/호가/체결을 가격 저장소에 보강했습니다.",
+    }
+
+
+def run_price_collection_cycle(
+    scope: str = "priority",
+    trigger: str = "scheduler",
+    mode: str | None = None,
+    include_depth: bool = False,
+) -> dict:
+    checked_at = datetime.now(KST)
+    selected_scope = str(scope or "priority").strip().lower()
+    selected_mode = normalize_signal_mode(mode or auto_signal_mode(), default=auto_signal_mode())
+    if selected_mode == "close" and selected_scope == "priority":
+        selected_scope = "close"
+    if not SIGNAL_PRICE_COLLECTOR_ENABLED:
+        return {
+            "enabled": False,
+            "mode": selected_mode,
+            "scope": selected_scope,
+            "trigger": trigger,
+            "checkedAt": checked_at.isoformat(timespec="seconds"),
+            "message": "가격 수집 봇이 꺼져 있습니다.",
+        }
+    if not PRICE_COLLECTOR_LOCK.acquire(blocking=False):
+        status = {
+            "enabled": True,
+            "skipped": True,
+            "reason": "already-running",
+            "mode": selected_mode,
+            "scope": selected_scope,
+            "trigger": trigger,
+            "checkedAt": checked_at.isoformat(timespec="seconds"),
+            "message": "가격 수집 봇이 이미 실행 중입니다.",
+        }
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["lastRun"] = status
+        return status
+
+    try:
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["running"] = True
+            PRICE_COLLECTOR_STATE["lastCheckedAt"] = checked_at.isoformat(timespec="seconds")
+
+        records, queue_status = price_collector_records(selected_scope)
+        if not records:
+            status = {
+                "enabled": True,
+                "mode": selected_mode,
+                "scope": selected_scope,
+                "trigger": trigger,
+                "inputCount": 0,
+                "priceCount": 0,
+                "queue": queue_status,
+                "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+                "message": "가격 수집 대상 후보가 아직 없습니다.",
+            }
+        else:
+            candidates = candidates_from_prefetch_records(records)
+            candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, selected_mode)
+            candidates, live_state_merge = merge_live_state_into_candidates(candidates, selected_mode)
+            candidates, market_data_merge = merge_market_data_latest_into_candidates(candidates)
+
+            statuses: dict[str, dict] = {
+                "candidateDataMerge": candidate_data_merge,
+                "liveStateMerge": live_state_merge,
+                "marketDataMerge": market_data_merge,
+            }
+            try:
+                candidates, statuses["prices"] = enrich_candidates_with_toss_prices(candidates)
+            except Exception as error:
+                statuses["prices"] = prefetch_enrichment_status("error", error, "토스 가격 수집에 실패했습니다.")
+
+            candidates = annotate_price_collection_basis(candidates, selected_mode, selected_scope)
+            if include_depth:
+                candidates, statuses["depth"] = enrich_price_collector_depth(candidates)
+
+            latest_status = update_market_data_latest_from_candidates(
+                candidates,
+                mode=selected_mode,
+                stage=f"price-collector-{selected_scope}-{trigger}",
+            )
+            price_status = statuses.get("prices", {})
+            status = {
+                "enabled": True,
+                "mode": selected_mode,
+                "scope": selected_scope,
+                "trigger": trigger,
+                "inputCount": len(records),
+                "candidateCount": len(candidates),
+                "priceCount": price_status.get("priceCount", 0),
+                "requestedPriceCount": price_status.get("requestedCount", len(candidates)),
+                "receivedPriceCount": price_status.get("receivedCount", price_status.get("priceCount", 0)),
+                "retainedCount": price_status.get("retainedCount", 0),
+                "storedFallbackCount": price_status.get("storedFallbackCount", 0),
+                "missingCount": price_status.get("missingCount", 0),
+                "missingSymbols": price_status.get("missingSymbols", []),
+                "queue": queue_status,
+                "statuses": statuses,
+                "marketDataLatest": latest_status,
+                "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+                "message": "후보 풀 가격/등락률을 서버에서 수집해 DB 최신값 저장소에 반영했습니다.",
+            }
+
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["lastRun"] = status
+            if selected_scope in {"priority"}:
+                PRICE_COLLECTOR_STATE["lastPriorityRun"] = status
+            elif selected_scope in {"full"}:
+                PRICE_COLLECTOR_STATE["lastFullRun"] = status
+            elif selected_scope in {"close"}:
+                PRICE_COLLECTOR_STATE["lastCloseRun"] = status
+            if include_depth:
+                PRICE_COLLECTOR_STATE["lastDepthRun"] = status
+            PRICE_COLLECTOR_STATE["lastError"] = ""
+        return status
+    except Exception as error:
+        status = {
+            "enabled": True,
+            "mode": selected_mode,
+            "scope": selected_scope,
+            "trigger": trigger,
+            "error": str(error)[:240],
+            "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+            "message": "가격 수집 봇 실행 중 오류가 발생했습니다.",
+        }
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["lastRun"] = status
+            PRICE_COLLECTOR_STATE["lastError"] = status["error"]
+        return status
+    finally:
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["running"] = False
+        PRICE_COLLECTOR_LOCK.release()
+
+
+def seconds_since_state_run(state_key: str) -> int | None:
+    with SCHEDULER_LOCK:
+        run = PRICE_COLLECTOR_STATE.get(state_key, {})
+    if not isinstance(run, dict):
+        return None
+    timestamp = str(run.get("updatedAt") or run.get("checkedAt") or "")
+    parsed = parse_iso_datetime(timestamp)
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
+def price_collector_due(state_key: str, interval_seconds: int) -> bool:
+    age = seconds_since_state_run(state_key)
+    return age is None or age >= interval_seconds
+
+
+def price_collector_next_run_at(state_key: str, interval_seconds: int) -> str:
+    with SCHEDULER_LOCK:
+        run = PRICE_COLLECTOR_STATE.get(state_key, {})
+    if not isinstance(run, dict):
+        return ""
+    timestamp = str(run.get("updatedAt") or run.get("checkedAt") or "")
+    parsed = parse_iso_datetime(timestamp)
+    if parsed is None:
+        return ""
+    return (parsed.astimezone(KST) + timedelta(seconds=interval_seconds)).isoformat(timespec="seconds")
+
+
+def price_collector_status() -> dict:
+    with SCHEDULER_LOCK:
+        state = copy.deepcopy(PRICE_COLLECTOR_STATE)
+    mode = auto_signal_mode()
+    priority_next = price_collector_next_run_at("lastPriorityRun", SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS)
+    full_next = price_collector_next_run_at("lastFullRun", SIGNAL_PRICE_COLLECTOR_FULL_SECONDS)
+    close_next = price_collector_next_run_at("lastCloseRun", SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS)
+    depth_next = price_collector_next_run_at("lastDepthRun", SIGNAL_DEPTH_COLLECTOR_SECONDS)
+    return {
+        "enabled": SIGNAL_PRICE_COLLECTOR_ENABLED,
+        "started": bool(state.get("started")),
+        "running": bool(state.get("running")),
+        "mode": mode,
+        "config": {
+            "tickSeconds": SIGNAL_PRICE_COLLECTOR_TICK_SECONDS,
+            "prioritySeconds": SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS,
+            "fullSeconds": SIGNAL_PRICE_COLLECTOR_FULL_SECONDS,
+            "closeSeconds": SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS,
+            "depthSeconds": SIGNAL_DEPTH_COLLECTOR_SECONDS,
+            "priorityLimit": SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT,
+            "fullLimit": SIGNAL_PRICE_COLLECTOR_FULL_LIMIT,
+            "depthLimit": SIGNAL_DEPTH_COLLECTOR_LIMIT,
+        },
+        "lastError": state.get("lastError", ""),
+        "lastCheckedAt": state.get("lastCheckedAt", ""),
+        "lastRun": state.get("lastRun", {}),
+        "lastPriorityRun": state.get("lastPriorityRun", {}),
+        "lastFullRun": state.get("lastFullRun", {}),
+        "lastCloseRun": state.get("lastCloseRun", {}),
+        "lastDepthRun": state.get("lastDepthRun", {}),
+        "nextPriorityRunAt": priority_next,
+        "nextFullRunAt": full_next,
+        "nextCloseRunAt": close_next,
+        "nextDepthRunAt": depth_next,
+        "nextRunAt": close_next if mode == "close" else (priority_next or full_next),
+    }
+
+
 def minutes_from_hhmm(value: str) -> int | None:
     match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(value or "").strip())
     if not match:
@@ -14831,6 +15276,15 @@ def scheduler_config_status() -> dict:
         "candidatePrefetchIndependent": True,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
+        "priceCollectorEnabled": SIGNAL_PRICE_COLLECTOR_ENABLED,
+        "priceCollectorTickSeconds": SIGNAL_PRICE_COLLECTOR_TICK_SECONDS,
+        "priceCollectorPrioritySeconds": SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS,
+        "priceCollectorFullSeconds": SIGNAL_PRICE_COLLECTOR_FULL_SECONDS,
+        "priceCollectorCloseSeconds": SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS,
+        "priceCollectorPriorityLimit": SIGNAL_PRICE_COLLECTOR_PRIORITY_LIMIT,
+        "priceCollectorFullLimit": SIGNAL_PRICE_COLLECTOR_FULL_LIMIT,
+        "depthCollectorSeconds": SIGNAL_DEPTH_COLLECTOR_SECONDS,
+        "depthCollectorLimit": SIGNAL_DEPTH_COLLECTOR_LIMIT,
         "historyLimit": SIGNAL_RUN_HISTORY_LIMIT,
         "performanceAutoUpdate": SIGNAL_PERFORMANCE_AUTO_UPDATE,
         "performanceMinAgeMinutes": max(0, SIGNAL_PERFORMANCE_MIN_AGE_MINUTES),
@@ -15404,6 +15858,17 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     stored_price_count = bounded_int(market_data.get("priceCount", 0), 0, 1_000_000)
     stale_price_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
     missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
+    price_coverage = (
+        round(stored_price_count / stored_candidate_count, 4)
+        if stored_candidate_count > 0
+        else 0
+    )
+    stale_price_ratio = (
+        round(stale_price_count / stored_price_count, 4)
+        if stored_price_count > 0
+        else 0
+    )
+    collector_status = price_collector_status()
     collector_roles = {
         "candidateDiscovery": "ready" if stored_candidate_count > 0 else "waiting",
         "priceCollector": "ready" if stored_price_count > 0 else "waiting",
@@ -15443,10 +15908,17 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "dashboardReadMode": "db-snapshot-only" if candidate_data.get("persistent") and market_data.get("persistent") else "fallback",
             "storedCandidateCount": stored_candidate_count,
             "storedPriceCount": stored_price_count,
+            "priceCoverage": price_coverage,
+            "priceCoveragePercent": display_percent_abs(Decimal(str(price_coverage * 100))) if stored_candidate_count > 0 else "0%",
             "staleCandidateCount": stale_price_count,
             "stalePriceCount": stale_price_count,
+            "stalePriceRatio": stale_price_ratio,
+            "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
             "missingPriceTimestampCount": missing_price_count,
             "latestPriceAt": market_data.get("latestPriceAt", ""),
+            "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
+            "nextPriceCollectorAt": collector_status.get("nextRunAt", ""),
+            "priceCollector": collector_status,
             "collectorRoles": collector_roles,
             "requiresDatabase": False,
             "recentRunCount": len(recent_runs),
@@ -15494,10 +15966,17 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "dashboardReadMode": "fallback",
         "storedCandidateCount": stored_candidate_count,
         "storedPriceCount": stored_price_count,
+        "priceCoverage": price_coverage,
+        "priceCoveragePercent": display_percent_abs(Decimal(str(price_coverage * 100))) if stored_candidate_count > 0 else "0%",
         "staleCandidateCount": stale_price_count,
         "stalePriceCount": stale_price_count,
+        "stalePriceRatio": stale_price_ratio,
+        "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
         "missingPriceTimestampCount": missing_price_count,
         "latestPriceAt": market_data.get("latestPriceAt", ""),
+        "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
+        "nextPriceCollectorAt": collector_status.get("nextRunAt", ""),
+        "priceCollector": collector_status,
         "collectorRoles": collector_roles,
         "requiresDatabase": True,
         "recentRunCount": len(recent_runs),
@@ -17723,6 +18202,7 @@ def scheduler_status() -> dict:
     return {
         "config": scheduler_config_status(),
         "state": state,
+        "priceCollector": price_collector_status(),
         "nextRun": next_scheduler_run(),
         "recentRuns": recent_scheduler_runs(),
     }
@@ -17780,6 +18260,50 @@ def discovery_bot_loop() -> None:
 
 def start_discovery_bot_thread() -> None:
     thread = threading.Thread(target=discovery_bot_loop, name="market-signal-discovery-bot", daemon=True)
+    thread.start()
+
+
+def price_collector_loop() -> None:
+    with SCHEDULER_LOCK:
+        PRICE_COLLECTOR_STATE["started"] = True
+    while True:
+        now = datetime.now(KST)
+        with SCHEDULER_LOCK:
+            PRICE_COLLECTOR_STATE["lastCheckedAt"] = now.isoformat(timespec="seconds")
+        if SIGNAL_PRICE_COLLECTOR_ENABLED:
+            mode = auto_signal_mode(now)
+            try:
+                if mode == "intraday":
+                    include_depth = price_collector_due("lastDepthRun", SIGNAL_DEPTH_COLLECTOR_SECONDS)
+                    if price_collector_due("lastPriorityRun", SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS):
+                        run_price_collection_cycle(
+                            "priority",
+                            trigger="price-collector",
+                            mode=mode,
+                            include_depth=include_depth,
+                        )
+                    if price_collector_due("lastFullRun", SIGNAL_PRICE_COLLECTOR_FULL_SECONDS):
+                        run_price_collection_cycle(
+                            "full",
+                            trigger="price-collector",
+                            mode=mode,
+                            include_depth=False,
+                        )
+                elif price_collector_due("lastCloseRun", SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS):
+                    run_price_collection_cycle(
+                        "close",
+                        trigger="price-collector",
+                        mode=mode,
+                        include_depth=False,
+                    )
+            except Exception as error:
+                with SCHEDULER_LOCK:
+                    PRICE_COLLECTOR_STATE["lastError"] = str(error)[:240]
+        time.sleep(SIGNAL_PRICE_COLLECTOR_TICK_SECONDS)
+
+
+def start_price_collector_thread() -> None:
+    thread = threading.Thread(target=price_collector_loop, name="market-signal-price-collector", daemon=True)
     thread.start()
 
 
@@ -18004,6 +18528,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(snapshot_storage_status())
             return
 
+        if parsed.path == "/api/collector/prices/status":
+            self.send_json(price_collector_status())
+            return
+
         if parsed.path == "/api/raw-events/status":
             self.send_json(raw_event_storage_status())
             return
@@ -18154,6 +18682,29 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json(payload, status)
             return
 
+        if parsed.path == "/api/collector/prices/run":
+            body = self.read_body()
+            raw_mode = str(body.get("mode", "auto")).strip().lower()
+            mode = auto_signal_mode() if raw_mode in {"", "auto", "자동"} else normalize_signal_mode(raw_mode)
+            scope = str(body.get("scope", "priority")).strip().lower() or "priority"
+            include_depth = bool(body.get("includeDepth", False))
+            try:
+                status = run_price_collection_cycle(
+                    scope=scope,
+                    trigger="manual",
+                    mode=mode,
+                    include_depth=include_depth,
+                )
+                self.send_json({
+                    "ok": not bool(status.get("error")),
+                    "status": status,
+                    "collector": price_collector_status(),
+                })
+            except Exception as error:
+                payload, status_code = integration_error_payload(error)
+                self.send_json(payload, status_code)
+            return
+
         if parsed.path == "/api/stocks/master/refresh":
             self.send_json(refresh_stock_search_master(trigger="manual"))
             return
@@ -18222,6 +18773,7 @@ def main() -> None:
     server = ThreadingHTTPServer((host, port), AppHandler)
     start_scheduler_thread()
     start_discovery_bot_thread()
+    start_price_collector_thread()
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"Market Signal Desk is running at http://{display_host}:{port}")
     server.serve_forever()
