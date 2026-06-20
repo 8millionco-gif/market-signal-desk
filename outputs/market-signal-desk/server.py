@@ -3374,6 +3374,12 @@ def evidence_status() -> dict:
     raw_status = raw_event_storage_status()
     news_status = news_event_storage_status()
     market_status = market_data_latest_status(fast=True)
+    if market_status.get("readSource") != "postgres" and database_storage_enabled():
+        full_market_status = market_data_latest_status(fast=False)
+        fast_price_count = bounded_int(market_status.get("priceCount", 0), 0, 10_000_000)
+        full_price_count = bounded_int(full_market_status.get("priceCount", 0), 0, 10_000_000)
+        if full_market_status.get("readSource") == "postgres" or full_price_count > fast_price_count:
+            market_status = full_market_status
     by_kind: dict[str, int] = {}
     raw_by_type = raw_status.get("byType", {}) if isinstance(raw_status.get("byType"), dict) else {}
     raw_by_source = raw_status.get("bySource", {}) if isinstance(raw_status.get("bySource"), dict) else {}
