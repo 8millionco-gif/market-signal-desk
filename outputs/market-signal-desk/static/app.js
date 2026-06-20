@@ -196,8 +196,9 @@ const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 8;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 12;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 6;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 10;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 20;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1529,15 +1530,19 @@ function visibleFeedCandidates(candidates = []) {
   const items = Array.isArray(candidates) ? candidates : [];
   const queryActive = Boolean(state.query.trim());
   const baseLimit = candidateFeedBaseLimit();
-  const effectiveLimit = queryActive ? Math.max(baseLimit, CANDIDATE_FEED_ALL_VISIBLE_LIMIT) : baseLimit;
-  const canToggle = items.length > effectiveLimit;
-  if (!canToggle || state.feedExpanded) {
+  const collapsedLimit = queryActive ? Math.max(baseLimit, CANDIDATE_FEED_ALL_VISIBLE_LIMIT) : baseLimit;
+  const expandedLimit = Math.max(collapsedLimit, CANDIDATE_FEED_EXPANDED_LIMIT);
+  const canToggle = items.length > collapsedLimit;
+  const expanded = Boolean(state.feedExpanded && canToggle);
+  const effectiveLimit = expanded ? Math.min(items.length, expandedLimit) : collapsedLimit;
+  if (!canToggle) {
     return {
       items,
       hiddenCount: 0,
-      baseLimit: effectiveLimit,
-      canToggle,
-      expanded: Boolean(state.feedExpanded && canToggle)
+      baseLimit: collapsedLimit,
+      expandedLimit,
+      canToggle: false,
+      expanded: false
     };
   }
 
@@ -1552,19 +1557,24 @@ function visibleFeedCandidates(candidates = []) {
   return {
     items: visible,
     hiddenCount: Math.max(0, items.length - visible.length),
-    baseLimit: effectiveLimit,
+    baseLimit: collapsedLimit,
+    expandedLimit,
     canToggle,
-    expanded: false
+    expanded
   };
 }
 
 function candidateFeedToggleMarkup(feedView, totalCount) {
   if (!feedView?.canToggle) return "";
   const hiddenText = feedView.expanded
-    ? "상위 후보만 압축해서 다시 봅니다."
+    ? feedView.hiddenCount > 0
+      ? `${feedView.hiddenCount}개 후보는 설정/성과 화면에서 확인하고 서버가 계속 관찰합니다.`
+      : "메인 화면을 다시 압축해서 봅니다."
     : `${feedView.hiddenCount}개 후보는 서버와 DB에서 계속 관찰 중입니다.`;
-  const actionText = feedView.expanded ? "상위만 보기" : `전체 ${totalCount}개 보기`;
-  const titleText = feedView.expanded ? "전체 후보 표시 중" : `상위 ${feedView.items.length}개 표시`;
+  const actionText = feedView.expanded ? "상위만 보기" : `더 보기`;
+  const titleText = feedView.expanded
+    ? `압축 후보 ${feedView.items.length}/${totalCount}개`
+    : `상위 ${feedView.items.length}개만 표시`;
   return `
     <button class="feed-limit-panel" type="button" data-feed-toggle>
       <span>
