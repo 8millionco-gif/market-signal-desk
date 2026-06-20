@@ -3705,6 +3705,8 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
         "provider": market_index_provider_label(),
         "count": len(indices),
         "timestamp": latest_timestamp,
+        "lastGoodAt": latest_timestamp,
+        "stale": True,
         "errors": errors,
     }
     return enriched, {
@@ -3714,6 +3716,8 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
         "count": len(indices),
         "errors": errors,
         "timestamp": latest_timestamp,
+        "lastGoodAt": latest_timestamp,
+        "stale": True,
         "updatedAt": str(item.get("updatedAt") or item.get("collectedAt") or ""),
         "message": "DB에 저장된 최신 지수 값을 사용합니다.",
     }
@@ -3745,6 +3749,8 @@ def enrich_market_with_stored_latest_fx(market: dict) -> tuple[dict, dict]:
         "source": "market-data-latest",
         "provider": fx.get("provider", "fx"),
         "timestamp": timestamp,
+        "lastGoodAt": timestamp,
+        "stale": True,
         "sampleValue": sample_value,
     }
     return enriched, {
@@ -3753,10 +3759,60 @@ def enrich_market_with_stored_latest_fx(market: dict) -> tuple[dict, dict]:
         "provider": fx.get("provider", "fx"),
         "value": display,
         "timestamp": timestamp,
+        "lastGoodAt": timestamp,
+        "stale": True,
         "sampleValue": sample_value,
         "updatedAt": str(item.get("updatedAt") or item.get("collectedAt") or ""),
         "message": "DB에 저장된 최신 환율 값을 사용합니다.",
     }
+
+
+def should_use_stored_index_fallback(market: dict, status: dict) -> bool:
+    status = status if isinstance(status, dict) else {}
+    details = market.get("indexDetails") if isinstance(market, dict) else {}
+    if not isinstance(details, dict) or not details:
+        return True
+    source = str(status.get("source") or "").strip()
+    return source in {"sample", "error", "stored-missing", "unavailable"}
+
+
+def should_use_stored_fx_fallback(market: dict, status: dict) -> bool:
+    status = status if isinstance(status, dict) else {}
+    value = str((market or {}).get("usdKrw") or "").strip()
+    source = str(status.get("source") or "").strip()
+    return not value or value == "-" or source in {"sample", "error", "stored-missing", "unavailable"}
+
+
+def enrich_market_with_last_good_sources(market: dict, index_status: dict | None = None, fx_status: dict | None = None) -> tuple[dict, dict, dict]:
+    enriched = dict(market or {})
+    resolved_index_status = index_status if isinstance(index_status, dict) else {}
+    resolved_fx_status = fx_status if isinstance(fx_status, dict) else {}
+
+    if should_use_stored_index_fallback(enriched, resolved_index_status):
+        stored_market, stored_status = enrich_market_with_stored_latest_indices(enriched)
+        if stored_status.get("source") == "market-data-latest" and stored_status.get("count", 0):
+            enriched = stored_market
+            resolved_index_status = {
+                **stored_status,
+                "fallbackFrom": resolved_index_status,
+                "message": "실시간 지수 조회 실패/부족으로 DB 마지막 정상 지수를 사용합니다.",
+            }
+
+    if should_use_stored_fx_fallback(enriched, resolved_fx_status):
+        stored_market, stored_status = enrich_market_with_stored_latest_fx(enriched)
+        if stored_status.get("source") == "market-data-latest" and stored_status.get("value"):
+            enriched = stored_market
+            resolved_fx_status = {
+                **stored_status,
+                "fallbackFrom": resolved_fx_status,
+                "message": "실시간 환율 조회 실패/부족으로 DB 마지막 정상 환율을 사용합니다.",
+            }
+
+    session = market_session_context("KR")
+    enriched["marketSession"] = session
+    enriched["analysisMode"] = session.get("analysisMode")
+    enriched["baselineLabel"] = session.get("baselineLabel")
+    return enriched, resolved_index_status, resolved_fx_status
 
 
 def price_rows(payload: dict) -> list[dict]:
@@ -4442,6 +4498,8 @@ def market_session_context(market: str = "", now: datetime | None = None) -> dic
             "label": label,
             "isRegular": is_regular,
             "isClosedOrPreopen": not is_regular,
+            "analysisMode": "intraday" if is_regular else "close",
+            "baselineLabel": "실시간 가격" if is_regular else "장마감 기준가",
             "holiday": holiday,
             "timestamp": eastern.isoformat(timespec="seconds"),
         }
@@ -4463,6 +4521,8 @@ def market_session_context(market: str = "", now: datetime | None = None) -> dic
         "label": label,
         "isRegular": is_regular,
         "isClosedOrPreopen": not is_regular,
+        "analysisMode": "intraday" if is_regular else "close",
+        "baselineLabel": "실시간 가격" if is_regular else "장마감 기준가",
         "holiday": "",
         "timestamp": kst_now.isoformat(timespec="seconds"),
     }
@@ -4479,11 +4539,27 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
     timestamp = str(live_price.get("timestamp") or live_price.get("updatedAt") or fallback_updated_at or "").strip()
     age_seconds = seconds_since_timestamp(timestamp)
     session = market_session_context(market)
+    has_stored_price = bool(
+        live_price.get("lastPrice")
+        or live_price.get("price")
+        or live_price.get("close")
+        or live_price.get("displayPrice")
+    )
+    closed_baseline_sources = {
+        "toss",
+        "retained",
+        "stored-live-state",
+        "snapshot",
+        "candidate_pool",
+        "candidate_data_store",
+        "market_data_latest",
+        "db-market-data-latest",
+        "lookup",
+    }
     closed_baseline_allowed = (
-        source == "toss"
-        and bool(live_price.get("lastPrice"))
+        source in closed_baseline_sources
+        and has_stored_price
         and bool(session.get("isClosedOrPreopen"))
-        and (age_seconds is None or age_seconds <= SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS)
     )
 
     if source == "toss":
@@ -4499,8 +4575,28 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
             status, label, message = "delayed", "지연", "토스 현재가가 지연되어 신규 진입 판단을 보류합니다."
         else:
             status, label, message = "stale", "오래됨", "토스 현재가가 오래되어 저장 가격처럼만 참고합니다."
-    elif source in {"sample", "seed", "lookup", "candidate_pool", "snapshot", "retained"}:
-        status, label, message = "snapshot", "저장값", "저장된 가격이라 실시간 반응 판단에는 사용하지 않습니다."
+    elif source in {
+        "sample",
+        "seed",
+        "lookup",
+        "candidate_pool",
+        "snapshot",
+        "retained",
+        "stored-live-state",
+        "candidate_data_store",
+        "market_data_latest",
+        "db-market-data-latest",
+    }:
+        if closed_baseline_allowed:
+            status, label = "closed-baseline", "장마감 기준가"
+            session_reason = str(session.get("label") or "비정규 시간")
+            message = f"{session_reason}이라 DB에 저장된 마지막 정상 가격 기준으로 다음 거래일 후보를 평가합니다."
+        else:
+            status, label, message = "snapshot", "저장값", "저장된 가격이라 실시간 반응 판단에는 사용하지 않습니다."
+    elif closed_baseline_allowed:
+        status, label = "closed-baseline", "장마감 기준가"
+        session_reason = str(session.get("label") or "비정규 시간")
+        message = f"{session_reason}이라 DB에 저장된 마지막 정상 가격 기준으로 다음 거래일 후보를 평가합니다."
     elif source:
         status, label, message = "missing", "미확인", str(live_price.get("message") or "실시간 가격을 확인하지 못했습니다.")
     else:
@@ -7967,6 +8063,10 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
             if has_event:
                 entry_block = True
 
+    if closed_baseline and not has_live_price and has_price_basis:
+        reaction_gate = "watch"
+        entry_block = True
+
     supports_entry = (
         reaction_gate == "confirmed"
         and not entry_block
@@ -8017,12 +8117,12 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     ]
     if supports_entry:
         next_check = "가격·거래량 반응이 확인되었습니다. 매수 구간과 리스크 기준만 점검하세요."
+    elif closed_baseline and not has_live_price:
+        next_check = "직전 정규장 마감가 기준 분석입니다. 실시간 매수 판단은 개장 후 가격·거래량 반응을 확인하세요."
     elif blockers:
         next_check = blockers[0]
     elif not has_price_basis:
         next_check = str(live_freshness.get("message") or "가격 기준 수신을 기다립니다.")
-    elif closed_baseline and not has_live_price:
-        next_check = "직전 정규장 마감가 기준 분석입니다. 실시간 매수 판단은 개장 후 가격·거래량 반응을 확인하세요."
     elif not price_reaction_confirmed:
         next_check = "뉴스 방향과 같은 가격 반응이 확인될 때까지 대기합니다."
     elif not market_response_confirmed:
@@ -8062,9 +8162,9 @@ def candidate_price_reaction(candidate: dict, score_detail: dict) -> dict:
     elif reaction_gate == "watch":
         reaction_decision = {
             "key": "watch",
-            "label": "관찰 지속",
+            "label": "다음 장 관찰" if closed_baseline and not has_live_price else "관찰 지속",
             "tone": "watch",
-            "action": "추가 확인",
+            "action": "장 시작 후 확인" if closed_baseline and not has_live_price else "추가 확인",
             "summary": next_check,
             "tradeAllowed": False,
         }
@@ -13775,6 +13875,7 @@ def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
+    market, index_status, fx_status = enrich_market_with_last_good_sources(market, index_status, fx_status)
     watched = set(watchlist())
     portfolio = safe_portfolio_status()
     raw_candidates, discovery_status = initial_candidates(data, watched, mode, force_discovery=force_discovery)
@@ -15927,6 +16028,7 @@ def minimal_live_price_dashboard_payload(mode: str, candidates: list[dict], sour
     )
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     market = copy.deepcopy(data.get("market", {})) if isinstance(data.get("market"), dict) else {}
+    market, _, _ = enrich_market_with_last_good_sources(market, {}, {})
     return {
         "generatedAt": created_at or now_text,
         "mode": mode,
@@ -16342,6 +16444,8 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
 
 def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: str = "price") -> dict:
     mode = normalize_signal_mode(mode)
+    session = market_session_context("KR")
+    poll_seconds = SIGNAL_LIVE_PRICE_POLL_SECONDS if mode == "intraday" else max(60, SIGNAL_LIVE_PRICE_POLL_SECONDS * 6)
     cache_symbols = tuple(unique_symbols(symbols)[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT])
     cache_key = (mode, str(detail or "price"), cache_symbols)
     now_utc = datetime.now(timezone.utc)
@@ -16445,6 +16549,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
     summary = live_price_summary_from_selection(candidates, selection_status, base_payload.get("summary", {}))
     summary.update({
         "livePriceUpdatedAt": now_text,
+        "marketSession": session,
         "livePriceFreshnessCounts": freshness_counts,
         "livePriceRequestedCount": len(requested),
         "livePriceTossRequestedCount": 0,
@@ -16476,7 +16581,8 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         "source": "db-market-data-latest",
         "baseSource": base_source,
         "dbOnly": True,
-        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "pollSeconds": poll_seconds,
+        "marketSession": session,
         "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
         "requestedCount": len(requested),
         "refreshedCount": refreshed_count,
@@ -16518,7 +16624,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         "selectionCycle": "price-only",
         "detail": "price",
         "updatedAt": now_text,
-        "pollSeconds": SIGNAL_LIVE_PRICE_POLL_SECONDS,
+        "pollSeconds": poll_seconds,
         "symbols": requested,
         "requestedCount": len(requested),
         "refreshedCount": refreshed_count,

@@ -51,6 +51,16 @@ function normalizeAnalysisMode(mode) {
   return mode === "intraday" ? "intraday" : "close";
 }
 
+function dashboardRequestMode() {
+  return state.modeAutoFollow ? "auto" : state.mode;
+}
+
+function applyServerDashboardMode(dashboard) {
+  const serverMode = normalizeAnalysisMode(dashboard?.mode || dashboard?.market?.analysisMode || state.mode);
+  state.mode = serverMode;
+  state.autoMode = serverMode;
+}
+
 const state = {
   view: "signals",
   mode: detectedAnalysisMode(),
@@ -608,6 +618,7 @@ async function loadDashboard(options = {}) {
     const cachedDashboard = browserCachedDashboardPayload(state.mode, { name: "WarmStart" });
     if (cachedDashboard) {
       state.dashboard = cachedDashboard;
+      applyServerDashboardMode(cachedDashboard);
       const candidates = state.dashboard.candidates ?? [];
       if (!candidates.some((item) => item.symbol === state.selectedSymbol)) {
         const defaultCandidate = bestCandidate(candidates);
@@ -627,10 +638,11 @@ async function loadDashboard(options = {}) {
         forceRefresh ? "뉴스, 공시, 가격 반응으로 후보 점수를 계산합니다" : "DB나 최신 스냅샷에 저장된 후보를 확인합니다"
       );
     }
-    const params = new URLSearchParams({ mode: state.mode });
+    const params = new URLSearchParams({ mode: dashboardRequestMode() });
     if (forceRefresh) params.set("refresh", "1");
     const dashboard = await fetchJson(`/api/dashboard?${params.toString()}`, forceRefresh ? 45000 : 15000);
     await statusPromise;
+    applyServerDashboardMode(dashboard);
     state.dashboard = dashboard;
     saveDashboardToBrowserCache(dashboard);
     if (!state.selectedSymbol) {
@@ -661,6 +673,7 @@ async function loadDashboard(options = {}) {
 function restoreDashboardFromBrowserCache(error) {
   const dashboard = browserCachedDashboardPayload(state.mode, error);
   if (!dashboard) return false;
+  applyServerDashboardMode(dashboard);
   state.dashboard = dashboard;
   const candidates = state.dashboard.candidates ?? [];
   if (!candidates.some((item) => item.symbol === state.selectedSymbol)) {
@@ -1324,7 +1337,7 @@ async function refreshLivePrices() {
   };
   renderLivePriceStatus();
   const params = new URLSearchParams({
-    mode: state.mode,
+    mode: dashboardRequestMode(),
     symbols: symbols.join(","),
     detail: livePriceRefreshDetail(symbols)
   });
@@ -1737,7 +1750,7 @@ function evaluationModeForDisplay(item) {
   }
   return {
     key,
-    label: primaryBlocker || mode.label || readiness.label || fallback[0],
+    label: fallback[1] === "baseline" ? (mode.label || readiness.label || fallback[0]) : (primaryBlocker || mode.label || readiness.label || fallback[0]),
     status: mode.status || fallback[1],
     message,
     tradeEligible: Boolean(mode.tradeEligible || readiness.entryReady),
@@ -3216,18 +3229,20 @@ function renderMarket() {
   if (els.usdKrwValue) els.usdKrwValue.textContent = market.usdKrw ?? "-";
   if (els.usdKrwPair) els.usdKrwPair.textContent = "USD/KRW";
   const fxSource = market.usdKrwSource;
+  const fxTimestamp = fxSource?.lastGoodAt || fxSource?.timestamp || "";
   const fxText =
-    fxSource?.source === "fx-api"
-      ? `환율: ${fxSource.provider}${fxSource.timestamp ? ` · ${fxSource.timestamp}` : ""}`
+    fxSource?.source === "fx-api" || fxSource?.source === "market-data-latest"
+      ? `환율: ${fxSource.provider}${fxTimestamp ? ` · ${fxTimestamp}` : ""}${fxSource.stale ? " · 지연" : ""}`
       : fxSource?.source === "sample"
         ? `환율: ${fallbackStatusLabel(fxSource, "대체 환율")}`
         : "";
   const indexSource = market.indexSource;
+  const indexTimestamp = indexSource?.lastGoodAt || indexSource?.timestamp || "";
   const indexText =
-    indexSource?.source === "index-api"
-      ? `지수: ${indexSource.provider}${indexSource.timestamp ? ` · ${indexSource.timestamp}` : ""}`
+    indexSource?.source === "index-api" || indexSource?.source === "market-data-latest"
+      ? `지수: ${indexSource.provider}${indexTimestamp ? ` · ${indexTimestamp}` : ""}${indexSource.stale ? " · 지연" : ""}`
       : indexSource?.source === "index-api-partial"
-        ? `지수: ${indexSource.provider} 일부`
+        ? `지수: ${indexSource.provider} 일부${indexTimestamp ? ` · ${indexTimestamp}` : ""}`
         : indexSource?.source === "sample"
           ? `지수: ${fallbackStatusLabel(indexSource, "대체 지수")}`
           : "";
@@ -3439,7 +3454,8 @@ function modeSummary(mode) {
 }
 
 function updateModeStatus() {
-  state.autoMode = detectedAnalysisMode();
+  const serverSessionMode = state.dashboard?.market?.marketSession?.analysisMode || state.dashboard?.market?.analysisMode || "";
+  state.autoMode = serverSessionMode ? normalizeAnalysisMode(serverSessionMode) : detectedAnalysisMode();
   const autoLabel = modeLabel(state.autoMode);
   const selected = modeSummary(state.mode);
   const isAuto = state.mode === state.autoMode;
