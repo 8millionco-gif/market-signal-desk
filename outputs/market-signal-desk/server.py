@@ -56,6 +56,8 @@ SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
+SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
+SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS = max(16, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS", "256") or "256"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_RAW_EVENT_STORAGE_ENABLED = os.getenv("SIGNAL_RAW_EVENT_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_RAW_EVENT_FILE_LIMIT = max(
@@ -365,6 +367,8 @@ INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.re
 DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 LIVE_PRICE_RESPONSE_CACHE: dict[tuple[str, str, tuple[str, ...]], dict[str, object]] = {}
 STORAGE_STATUS_CACHE: dict[str, object] = {"payload": None, "created_at": datetime.min.replace(tzinfo=timezone.utc), "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
+DB_KV_READ_CACHE: dict[str, dict[str, object]] = {}
+DB_KV_READ_CACHE_STATS: dict[str, int] = {"hits": 0, "misses": 0, "writes": 0, "evictions": 0}
 GDELT_RATE_LOCK = threading.Lock()
 GDELT_LAST_REQUEST_AT = datetime.min.replace(tzinfo=timezone.utc)
 GDELT_BACKOFF_UNTIL = datetime.min.replace(tzinfo=timezone.utc)
@@ -372,6 +376,7 @@ SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 LIVE_PRICE_RESPONSE_CACHE_LOCK = threading.Lock()
 STORAGE_STATUS_CACHE_LOCK = threading.Lock()
+DB_KV_READ_CACHE_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
 DB_LOCK = threading.Lock()
 DB_MIGRATION_LOCK = threading.Lock()
@@ -776,6 +781,68 @@ def normalize_db_payload(value, fallback):
     return fallback
 
 
+def db_kv_read_cache_status() -> dict:
+    with DB_KV_READ_CACHE_LOCK:
+        stats = dict(DB_KV_READ_CACHE_STATS)
+        item_count = len(DB_KV_READ_CACHE)
+    return {
+        "enabled": SIGNAL_DB_KV_READ_CACHE_SECONDS > 0,
+        "ttlSeconds": SIGNAL_DB_KV_READ_CACHE_SECONDS,
+        "maxItems": SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS,
+        "items": item_count,
+        "stats": stats,
+        "message": "signal_kv 반복 읽기 캐시입니다. DB 연결 폭주를 줄이기 위한 짧은 캐시입니다.",
+    }
+
+
+def db_kv_cache_get(key: str):
+    if SIGNAL_DB_KV_READ_CACHE_SECONDS <= 0:
+        return DB_PAYLOAD_UNSET
+    text = str(key or "").strip()
+    if not text:
+        return DB_PAYLOAD_UNSET
+    now = time.time()
+    with DB_KV_READ_CACHE_LOCK:
+        entry = DB_KV_READ_CACHE.get(text)
+        if isinstance(entry, dict) and float(entry.get("expires_at", 0) or 0) > now:
+            DB_KV_READ_CACHE_STATS["hits"] = DB_KV_READ_CACHE_STATS.get("hits", 0) + 1
+            return copy.deepcopy(entry.get("payload"))
+        if text in DB_KV_READ_CACHE:
+            DB_KV_READ_CACHE.pop(text, None)
+        DB_KV_READ_CACHE_STATS["misses"] = DB_KV_READ_CACHE_STATS.get("misses", 0) + 1
+    return DB_PAYLOAD_UNSET
+
+
+def db_kv_cache_store(key: str, payload) -> None:
+    if SIGNAL_DB_KV_READ_CACHE_SECONDS <= 0:
+        return
+    text = str(key or "").strip()
+    if not text:
+        return
+    now = time.time()
+    with DB_KV_READ_CACHE_LOCK:
+        DB_KV_READ_CACHE[text] = {
+            "payload": copy.deepcopy(payload),
+            "stored_at": now,
+            "expires_at": now + SIGNAL_DB_KV_READ_CACHE_SECONDS,
+        }
+        DB_KV_READ_CACHE_STATS["writes"] = DB_KV_READ_CACHE_STATS.get("writes", 0) + 1
+        while len(DB_KV_READ_CACHE) > SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS:
+            oldest_key = min(
+                DB_KV_READ_CACHE,
+                key=lambda item: float(DB_KV_READ_CACHE.get(item, {}).get("stored_at", 0) or 0),
+            )
+            DB_KV_READ_CACHE.pop(oldest_key, None)
+            DB_KV_READ_CACHE_STATS["evictions"] = DB_KV_READ_CACHE_STATS.get("evictions", 0) + 1
+
+
+def db_kv_cache_store_many(payloads: dict[str, object]) -> None:
+    if not isinstance(payloads, dict):
+        return
+    for key, payload in payloads.items():
+        db_kv_cache_store(key, payload)
+
+
 def short_text(value: object, limit: int) -> str:
     text = str(value or "")
     limit = max(0, int(limit))
@@ -1094,6 +1161,9 @@ def run_database_migration() -> tuple[dict, int]:
 
 
 def db_read_kv(key: str, fallback):
+    cached = db_kv_cache_get(key)
+    if cached is not DB_PAYLOAD_UNSET:
+        return normalize_db_payload(cached, fallback)
     if not ensure_database_schema():
         return fallback
     try:
@@ -1104,7 +1174,10 @@ def db_read_kv(key: str, fallback):
                 row = cur.fetchone()
         if not row:
             return fallback
-        return normalize_db_payload(row[0], fallback)
+        payload = normalize_db_payload(row[0], fallback)
+        if payload is not fallback:
+            db_kv_cache_store(key, payload)
+        return payload
     except Exception as error:
         set_db_error(error)
         return fallback
@@ -1120,24 +1193,36 @@ def db_read_kv_many_fast(keys: list[str]) -> dict[str, object]:
             unique_keys.append(text)
     if not unique_keys:
         return {}
+    cached_payloads: dict[str, object] = {}
+    missing_keys: list[str] = []
+    for key in unique_keys:
+        cached = db_kv_cache_get(key)
+        if cached is DB_PAYLOAD_UNSET:
+            missing_keys.append(key)
+        else:
+            cached_payloads[key] = normalize_db_payload(cached, {})
+    if not missing_keys:
+        return cached_payloads
     try:
-        placeholders = ", ".join(["%s"] * len(unique_keys))
+        placeholders = ", ".join(["%s"] * len(missing_keys))
         with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT key, payload FROM signal_kv WHERE key IN ({placeholders})",
-                    tuple(unique_keys),
+                    tuple(missing_keys),
                 )
                 rows = cur.fetchall()
         set_db_error("")
-        return {
+        fetched_payloads = {
             str(row[0]): normalize_db_payload(row[1], {})
             for row in rows
             if row and len(row) >= 2
         }
+        db_kv_cache_store_many(fetched_payloads)
+        return {**cached_payloads, **fetched_payloads}
     except Exception as error:
         set_db_error(error)
-        return {}
+        return cached_payloads
 
 
 def db_write_kv(key: str, payload) -> bool:
@@ -1157,6 +1242,7 @@ def db_write_kv(key: str, payload) -> bool:
                     (key, Jsonb(payload)),
                 )
         set_db_error("")
+        db_kv_cache_store(key, payload)
         return True
     except Exception as error:
         set_db_error(error)
@@ -3267,6 +3353,7 @@ def database_status(fast: bool = False) -> dict:
         "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
+        "kvReadCache": db_kv_read_cache_status(),
         "checks": {
             "databaseUrlConfigured": bool(DATABASE_URL),
             "storageBackendRequestsDb": requested,
