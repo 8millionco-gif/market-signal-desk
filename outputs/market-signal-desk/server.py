@@ -387,6 +387,8 @@ DB_MIGRATION_DONE = False
 DB_LAST_ERROR = ""
 DB_LAST_ERROR_AT = ""
 DB_LAST_ERROR_TYPE = ""
+DB_LAST_BACKOFF_MESSAGE = ""
+DB_LAST_BACKOFF_AT = ""
 DB_LAST_CONNECT_ATTEMPT_AT = ""
 DB_LAST_SUCCESS_AT = ""
 DB_SCHEMA_LAST_CHECKED_AT = ""
@@ -504,8 +506,13 @@ def db_diag_now() -> str:
 
 
 def set_db_error(error: Exception | str) -> None:
-    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE
+    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE, DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT
     message = str(error)[:240]
+    if message.startswith("database temporarily unavailable"):
+        DB_LAST_BACKOFF_MESSAGE = message
+        DB_LAST_BACKOFF_AT = db_diag_now()
+        if DB_LAST_ERROR:
+            return
     DB_LAST_ERROR = message
     if message:
         DB_LAST_ERROR_AT = db_diag_now()
@@ -513,6 +520,8 @@ def set_db_error(error: Exception | str) -> None:
     else:
         DB_LAST_ERROR_AT = ""
         DB_LAST_ERROR_TYPE = ""
+        DB_LAST_BACKOFF_MESSAGE = ""
+        DB_LAST_BACKOFF_AT = ""
 
 
 def database_retry_seconds() -> int:
@@ -3020,6 +3029,9 @@ def database_status(fast: bool = False) -> dict:
     if ready:
         message = "Postgres DB를 기준 저장소로 사용 중입니다."
         next_action = "운영 가능"
+    elif DATABASE_URL and DB_SCHEMA_READY and database_retry_seconds() > 0:
+        message = "Postgres 스키마는 준비됐지만 최근 DB 작업 실패로 잠시 재시도 대기 중입니다."
+        next_action = "재시도 대기 후 상태 새로고침"
     elif DATABASE_URL:
         message = "DATABASE_URL은 설정되어 있으나 DB 연결 또는 스키마 확인에 실패했습니다."
         next_action = "DB 연결 오류 확인"
@@ -3053,10 +3065,12 @@ def database_status(fast: bool = False) -> dict:
         "counts": counts,
         "message": message,
         "nextAction": next_action,
-        "error": "" if ready else DB_LAST_ERROR,
+        "error": "" if ready else (DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE),
         "lastError": "" if ready else DB_LAST_ERROR,
         "lastErrorAt": "" if ready else DB_LAST_ERROR_AT,
         "lastErrorType": "" if ready else DB_LAST_ERROR_TYPE,
+        "lastBackoffMessage": "" if ready else DB_LAST_BACKOFF_MESSAGE,
+        "lastBackoffAt": "" if ready else DB_LAST_BACKOFF_AT,
         "lastConnectAttemptAt": DB_LAST_CONNECT_ATTEMPT_AT,
         "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
         "nextRetrySeconds": retry_seconds,
