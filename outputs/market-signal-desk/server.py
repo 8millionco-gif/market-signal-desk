@@ -16477,22 +16477,32 @@ def annotate_price_collection_basis(candidates: list[dict], mode: str, scope: st
         live_price = dict(item.get("livePrice", {})) if isinstance(item.get("livePrice"), dict) else {}
         if live_price.get("lastPrice") and str(live_price.get("source", "")).strip() == "toss":
             session = market_session_context(str(item.get("market", "")))
+            is_closed_baseline_context = bool(normalized_mode == "close" or session.get("isClosedOrPreopen"))
             retained_on_failure = bool(
                 live_price.get("retainedOnFailure")
                 or live_price.get("missedInLastFetch")
                 or live_price.get("stale")
                 or str(live_price.get("basis", "")).strip() == "last_good"
             )
-            basis = "last_good" if retained_on_failure else (
-                "closed_baseline" if normalized_mode == "close" or session.get("isClosedOrPreopen") else "live"
-            )
+            if is_closed_baseline_context:
+                basis = "closed_baseline"
+                retained_on_failure = False
+            else:
+                basis = "last_good" if retained_on_failure else "live"
             live_price.update({
                 "basis": basis,
                 "collectorScope": scope,
                 "collectorUpdatedAt": now_text,
                 "dataSource": "price-collector",
             })
-            if retained_on_failure:
+            if basis == "closed_baseline":
+                live_price["stale"] = False
+                live_price["retained"] = False
+                live_price["retainedOnFailure"] = False
+                live_price["missedInLastFetch"] = False
+                live_price.pop("missingFields", None)
+                live_price["message"] = "비정규 시간이라 서버 DB의 직전 정규장 기준가로 다음 거래일 후보를 평가합니다."
+            elif retained_on_failure:
                 live_price["stale"] = True
                 live_price["retainedOnFailure"] = True
                 live_price["message"] = live_price.get("message") or "이번 수집에서 가격이 미수신되어 마지막 정상값을 유지합니다."
