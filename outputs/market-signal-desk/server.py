@@ -961,6 +961,36 @@ def db_read_kv(key: str, fallback):
         return fallback
 
 
+def db_read_kv_many_fast(keys: list[str]) -> dict[str, object]:
+    if not keys or not database_fast_read_allowed():
+        return {}
+    unique_keys = []
+    for key in keys:
+        text = str(key or "").strip()
+        if text and text not in unique_keys:
+            unique_keys.append(text)
+    if not unique_keys:
+        return {}
+    try:
+        placeholders = ", ".join(["%s"] * len(unique_keys))
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT key, payload FROM signal_kv WHERE key IN ({placeholders})",
+                    tuple(unique_keys),
+                )
+                rows = cur.fetchall()
+        set_db_error("")
+        return {
+            str(row[0]): normalize_db_payload(row[1], {})
+            for row in rows
+            if row and len(row) >= 2
+        }
+    except Exception as error:
+        set_db_error(error)
+        return {}
+
+
 def db_write_kv(key: str, payload) -> bool:
     if not ensure_database_schema():
         return False
@@ -1894,10 +1924,10 @@ def stored_trades_from_market_data_record(record: dict) -> dict | None:
     }
 
 
-def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool = False) -> tuple[list[dict], dict]:
+def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool = False, latest_data: dict | None = None) -> tuple[list[dict], dict]:
     if not SIGNAL_MARKET_DATA_LATEST_ENABLED:
         return candidates, {"enabled": False, "mergedCount": 0, "message": "최신 수집값 저장이 꺼져 있습니다."}
-    latest_data = market_data_latest_data(fast=fast)
+    latest_data = latest_data if isinstance(latest_data, dict) else market_data_latest_data(fast=fast)
     records = market_data_latest_records_from_data(latest_data, "toss", "prices")
     candle_records = market_data_latest_records_from_data(latest_data, "toss", "candles")
     orderbook_records = market_data_latest_records_from_data(latest_data, "toss", "orderbook")
@@ -15875,11 +15905,23 @@ def dashboard_payload_from_candidate_data_file(mode: str) -> tuple[dict, str] | 
     )
 
 
-def dashboard_payload_from_candidate_data_store(mode: str) -> tuple[dict, str] | None:
-    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED or not database_fast_read_allowed():
+def dashboard_payload_from_candidate_data_store(mode: str, data: dict | None = None) -> tuple[dict, str] | None:
+    if not SIGNAL_CANDIDATE_DATA_STORAGE_ENABLED:
         return None
-    records = stored_candidate_data_latest_records(fast=True)
-    candidates = [item for item in records.values() if isinstance(item, dict)]
+    if isinstance(data, dict):
+        items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+        candidates = []
+        for symbol, record in items.items():
+            if not isinstance(record, dict):
+                continue
+            latest = record.get("latest", {}) if isinstance(record.get("latest"), dict) else {}
+            if latest:
+                candidates.append(latest)
+    else:
+        if not database_fast_read_allowed():
+            return None
+        records = stored_candidate_data_latest_records(fast=True)
+        candidates = [item for item in records.values() if isinstance(item, dict)]
     if not candidates:
         return None
     return (
@@ -15912,10 +15954,11 @@ def dashboard_payload_from_candidate_pool_file(mode: str) -> tuple[dict, str] | 
     )
 
 
-def dashboard_payload_from_candidate_pool_store(mode: str) -> tuple[dict, str] | None:
-    if not database_fast_read_allowed():
-        return None
-    data = candidate_pool_data(fast=True)
+def dashboard_payload_from_candidate_pool_store(mode: str, data: dict | None = None) -> tuple[dict, str] | None:
+    if not isinstance(data, dict):
+        if not database_fast_read_allowed():
+            return None
+        data = candidate_pool_data(fast=True)
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
     candidates = [item for item in items.values() if isinstance(item, dict)]
     if not candidates:
@@ -15993,15 +16036,34 @@ def seed_dashboard_payload_for_live_prices_fast(mode: str) -> dict:
     return minimal_live_price_dashboard_payload(mode, candidates, "seed_fast")
 
 
-def dashboard_base_for_live_prices_fast(mode: str) -> tuple[dict, str]:
-    for loader in (
-        dashboard_payload_from_candidate_data_store,
-        dashboard_payload_from_candidate_pool_store,
-        dashboard_payload_from_dashboard_file,
-        dashboard_payload_from_candidate_data_file,
-        dashboard_payload_from_candidate_pool_file,
+def live_price_fast_store_payloads() -> dict[str, dict]:
+    payloads = db_read_kv_many_fast([
+        CANDIDATE_DATA_KV_KEY,
+        MARKET_DATA_LATEST_KV_KEY,
+        "candidate_pool",
+    ])
+    candidate_data = payloads.get(CANDIDATE_DATA_KV_KEY)
+    market_data = payloads.get(MARKET_DATA_LATEST_KV_KEY)
+    candidate_pool = payloads.get("candidate_pool")
+    return {
+        "candidateData": candidate_data if isinstance(candidate_data, dict) else candidate_data_snapshot_empty(),
+        "marketData": market_data if isinstance(market_data, dict) else market_data_latest_empty(),
+        "candidatePool": candidate_pool if isinstance(candidate_pool, dict) else candidate_pool_empty(),
+        "source": "postgres" if payloads else "filesystem",
+    }
+
+
+def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None = None) -> tuple[dict, str]:
+    store_payloads = store_payloads if isinstance(store_payloads, dict) else {}
+    candidate_data_payload = store_payloads.get("candidateData") if isinstance(store_payloads.get("candidateData"), dict) else None
+    candidate_pool_payload = store_payloads.get("candidatePool") if isinstance(store_payloads.get("candidatePool"), dict) else None
+    for payload in (
+        dashboard_payload_from_candidate_data_store(mode, candidate_data_payload),
+        dashboard_payload_from_candidate_pool_store(mode, candidate_pool_payload),
+        dashboard_payload_from_dashboard_file(mode),
+        dashboard_payload_from_candidate_data_file(mode),
+        dashboard_payload_from_candidate_pool_file(mode),
     ):
-        payload = loader(mode)
         if payload is not None:
             return payload
     return seed_dashboard_payload_for_live_prices_fast(mode), "seed_fast"
@@ -16196,7 +16258,8 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
 def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: str = "price") -> dict:
     mode = normalize_signal_mode(mode)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
-    base_payload, base_source = dashboard_base_for_live_prices_fast(mode)
+    store_payloads = live_price_fast_store_payloads()
+    base_payload, base_source = dashboard_base_for_live_prices_fast(mode, store_payloads=store_payloads)
     base_candidates = [
         copy.deepcopy(item)
         for item in base_payload.get("candidates", [])
@@ -16221,7 +16284,14 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         }
     else:
         base_candidates, candidate_data_merge_status = merge_candidate_data_snapshots_into_candidates(base_candidates, mode, fast=True)
-    base_candidates, market_data_merge_status = merge_market_data_latest_into_candidates(base_candidates, fast=True)
+    market_data_payload = store_payloads.get("marketData") if isinstance(store_payloads.get("marketData"), dict) else None
+    if payload_item_count(market_data_payload, "items") <= 0:
+        market_data_payload = None
+    base_candidates, market_data_merge_status = merge_market_data_latest_into_candidates(
+        base_candidates,
+        fast=True,
+        latest_data=market_data_payload,
+    )
     live_state_status = {
         "enabled": SIGNAL_LIVE_STATE_STORAGE_ENABLED,
         "source": "skipped-price-only",
@@ -16237,7 +16307,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
     selection_status = price_only_selection_status(candidates, base_payload.get("summary", {}), base_integrations)
     market_data_status = {
         "enabled": SIGNAL_MARKET_DATA_LATEST_ENABLED,
-        "storage": "postgres" if database_fast_read_allowed() else "filesystem",
+        "storage": "postgres" if store_payloads.get("source") == "postgres" else "filesystem",
         "readSource": "market_data_latest",
         "fast": True,
         "itemCount": market_data_merge_status.get("availableCount", 0),
