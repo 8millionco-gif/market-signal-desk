@@ -68,7 +68,7 @@ SIGNAL_DB_KEEPALIVES = os.getenv("SIGNAL_DB_KEEPALIVES", "1").lower() not in {"0
 SIGNAL_DB_KEEPALIVES_IDLE_SECONDS = max(10, int(os.getenv("SIGNAL_DB_KEEPALIVES_IDLE_SECONDS", "30") or "30"))
 SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS = max(5, int(os.getenv("SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS", "10") or "10"))
 SIGNAL_DB_KEEPALIVES_COUNT = max(1, int(os.getenv("SIGNAL_DB_KEEPALIVES_COUNT", "3") or "3"))
-SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
+SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
 SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS = max(16, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS", "256") or "256"))
@@ -1506,7 +1506,7 @@ def db_read_kv(key: str, fallback):
 
 
 def db_read_kv_many_fast(keys: list[str]) -> dict[str, object]:
-    if not keys or not database_fast_read_allowed():
+    if not keys:
         return {}
     unique_keys = []
     for key in keys:
@@ -1524,6 +1524,8 @@ def db_read_kv_many_fast(keys: list[str]) -> dict[str, object]:
         else:
             cached_payloads[key] = normalize_db_payload(cached, {})
     if not missing_keys:
+        return cached_payloads
+    if not database_fast_read_allowed():
         return cached_payloads
     try:
         placeholders = ", ".join(["%s"] * len(missing_keys))
@@ -1589,6 +1591,7 @@ def kv_payload_read_probe(
     probe_database: bool = True,
     preloaded_db_payload: object = DB_PAYLOAD_UNSET,
     preloaded_database_ready: bool | None = None,
+    promote_file_when_db_empty: bool = True,
 ) -> dict:
     configured_db_enabled = database_storage_enabled()
     db_enabled = bool(configured_db_enabled and probe_database)
@@ -1604,6 +1607,19 @@ def kv_payload_read_probe(
     file_payload = safe_read_json_file(file_path)
     db_item_count = payload_item_count(db_payload, item_key)
     file_item_count = payload_item_count(file_payload, item_key)
+    promoted_file_to_db = False
+    if (
+        promote_file_when_db_empty
+        and db_ready
+        and db_enabled
+        and db_item_count <= 0
+        and isinstance(file_payload, dict)
+        and file_item_count > 0
+    ):
+        promoted_file_to_db = db_write_kv(key, live_state_json_safe(file_payload))
+        if promoted_file_to_db:
+            db_payload = file_payload
+            db_item_count = file_item_count
     if isinstance(db_payload, dict) and db_item_count > 0:
         read_source = "postgres"
     elif isinstance(file_payload, dict) and file_item_count > 0:
@@ -1625,6 +1641,7 @@ def kv_payload_read_probe(
         "dbItemCount": db_item_count,
         "fileItemCount": file_item_count,
         "fileExists": file_exists,
+        "promotedFileToDb": promoted_file_to_db,
         "writeFallback": bool(db_enabled and read_source != "postgres"),
         "readable": read_source != "empty",
     }
@@ -2472,6 +2489,7 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "dbItemCount": probe["dbItemCount"],
         "fileItemCount": probe["fileItemCount"],
         "fileExists": probe["fileExists"],
+        "promotedFileToDb": probe.get("promotedFileToDb", False),
         "writeFallback": probe["writeFallback"],
         "operationReady": decision_ready,
         "displayReady": display_ready,
@@ -7815,6 +7833,7 @@ def candidate_data_snapshot_status(fast: bool = False) -> dict:
         "dbItemCount": probe["dbItemCount"],
         "fileItemCount": probe["fileItemCount"],
         "fileExists": probe["fileExists"],
+        "promotedFileToDb": probe.get("promotedFileToDb", False),
         "writeFallback": probe["writeFallback"],
         "operationReady": persistent and len(items) > 0,
         "persistent": persistent,
