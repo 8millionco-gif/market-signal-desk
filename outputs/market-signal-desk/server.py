@@ -51,11 +51,16 @@ SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2") or "2"))
+SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "1") or "1"))
 SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
-SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "20") or "20"))
-SIGNAL_DB_REFUSED_BACKOFF_SECONDS = max(5, int(os.getenv("SIGNAL_DB_REFUSED_BACKOFF_SECONDS", "20") or "20"))
+SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "30") or "30"))
+SIGNAL_DB_REFUSED_BACKOFF_SECONDS = max(5, int(os.getenv("SIGNAL_DB_REFUSED_BACKOFF_SECONDS", "60") or "60"))
+SIGNAL_DB_BACKOFF_MAX_SECONDS = max(
+    SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
+    SIGNAL_DB_REFUSED_BACKOFF_SECONDS,
+    int(os.getenv("SIGNAL_DB_BACKOFF_MAX_SECONDS", "180") or "180"),
+)
 SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
     0,
     int(os.getenv("SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS", "2") or "2"),
@@ -414,6 +419,8 @@ DB_LAST_CONNECT_ATTEMPT_AT = ""
 DB_LAST_SUCCESS_AT = ""
 DB_SCHEMA_LAST_CHECKED_AT = ""
 DB_FAILURE_BACKOFF_UNTIL = 0.0
+DB_CONSECUTIVE_FAILURES = 0
+DB_LAST_FAILURE_KIND = ""
 DB_MIGRATION_LAST_ATTEMPT_AT = 0.0
 DB_PAYLOAD_UNSET = object()
 DB_SHARED_CONNECTION = None
@@ -577,8 +584,28 @@ def db_error_classification(error: Exception | str) -> dict:
     }
 
 
+def db_failure_backoff_seconds(classification: dict) -> tuple[int, str, int]:
+    global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
+    if classification.get("staleConnection"):
+        return SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS, "stale", DB_CONSECUTIVE_FAILURES
+    failure_kind = "refused" if classification.get("connectionRefused") else "connection"
+    base_seconds = (
+        SIGNAL_DB_REFUSED_BACKOFF_SECONDS
+        if failure_kind == "refused"
+        else SIGNAL_DB_FAILURE_BACKOFF_SECONDS
+    )
+    if DB_LAST_FAILURE_KIND == failure_kind:
+        DB_CONSECUTIVE_FAILURES += 1
+    else:
+        DB_CONSECUTIVE_FAILURES = 1
+        DB_LAST_FAILURE_KIND = failure_kind
+    multiplier = min(4, 2 ** max(0, DB_CONSECUTIVE_FAILURES - 1))
+    return min(SIGNAL_DB_BACKOFF_MAX_SECONDS, base_seconds * multiplier), failure_kind, DB_CONSECUTIVE_FAILURES
+
+
 def set_db_error(error: Exception | str) -> None:
     global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE, DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
+    global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
     classification = db_error_classification(error)
     message = classification["message"]
     if message.startswith("database temporarily unavailable"):
@@ -593,27 +620,23 @@ def set_db_error(error: Exception | str) -> None:
         if classification["connectionFailure"]:
             if classification["staleConnection"]:
                 close_db_shared_connection()
-                backoff_seconds = SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS
+                backoff_seconds, failure_kind, consecutive_failures = db_failure_backoff_seconds(classification)
                 DB_FAILURE_BACKOFF_UNTIL = max(
                     DB_FAILURE_BACKOFF_UNTIL,
                     time.time() + backoff_seconds,
                 )
                 DB_LAST_BACKOFF_MESSAGE = (
-                    f"database connection refreshed; retry in {backoff_seconds}s"
+                    f"database {failure_kind} connection refreshed; retry in {backoff_seconds}s"
                 )
                 DB_LAST_BACKOFF_AT = db_diag_now()
                 return
-            backoff_seconds = (
-                SIGNAL_DB_REFUSED_BACKOFF_SECONDS
-                if classification.get("connectionRefused")
-                else SIGNAL_DB_FAILURE_BACKOFF_SECONDS
-            )
+            backoff_seconds, failure_kind, consecutive_failures = db_failure_backoff_seconds(classification)
             DB_FAILURE_BACKOFF_UNTIL = max(
                 DB_FAILURE_BACKOFF_UNTIL,
                 time.time() + backoff_seconds,
             )
             DB_LAST_BACKOFF_MESSAGE = (
-                f"database operation failed; retry in {backoff_seconds}s"
+                f"database {failure_kind} failed {consecutive_failures}x; retry in {backoff_seconds}s"
             )
             DB_LAST_BACKOFF_AT = db_diag_now()
     else:
@@ -622,6 +645,8 @@ def set_db_error(error: Exception | str) -> None:
         DB_LAST_BACKOFF_MESSAGE = ""
         DB_LAST_BACKOFF_AT = ""
         DB_FAILURE_BACKOFF_UNTIL = 0.0
+        DB_CONSECUTIVE_FAILURES = 0
+        DB_LAST_FAILURE_KIND = ""
 
 
 def database_retry_seconds() -> int:
@@ -744,6 +769,7 @@ def psycopg_modules():
 
 def db_connect_with_retry():
     global DB_FAILURE_BACKOFF_UNTIL, DB_LAST_CONNECT_ATTEMPT_AT, DB_LAST_SUCCESS_AT
+    global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
     DB_LAST_CONNECT_ATTEMPT_AT = db_diag_now()
     backoff_remaining = DB_FAILURE_BACKOFF_UNTIL - time.time()
     if backoff_remaining > 0:
@@ -768,6 +794,8 @@ def db_connect_with_retry():
                 **connect_kwargs,
             )
             DB_FAILURE_BACKOFF_UNTIL = 0.0
+            DB_CONSECUTIVE_FAILURES = 0
+            DB_LAST_FAILURE_KIND = ""
             DB_LAST_SUCCESS_AT = db_diag_now()
             return psycopg, Jsonb, conn
         except Exception as error:
@@ -1113,6 +1141,7 @@ def reset_database_connection_state() -> tuple[dict, int]:
     global DB_SCHEMA_READY, DB_SCHEMA_LAST_CHECKED_AT
     global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE
     global DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
+    global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
     if not DATABASE_URL:
         return {
             "ok": False,
@@ -1139,6 +1168,8 @@ def reset_database_connection_state() -> tuple[dict, int]:
     DB_LAST_BACKOFF_MESSAGE = ""
     DB_LAST_BACKOFF_AT = ""
     DB_FAILURE_BACKOFF_UNTIL = 0.0
+    DB_CONSECUTIVE_FAILURES = 0
+    DB_LAST_FAILURE_KIND = ""
     clear_storage_status_cache()
 
     ready = ensure_database_schema()
@@ -3902,6 +3933,8 @@ def database_status(fast: bool = False) -> dict:
         "lastSuccessfulAgeSeconds": database_recent_success_age_seconds(),
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
+        "consecutiveFailures": DB_CONSECUTIVE_FAILURES,
+        "lastFailureKind": DB_LAST_FAILURE_KIND,
         "connectionReuse": db_connection_reuse_status(),
         "connectivity": {
             "ready": ready,
@@ -3923,6 +3956,9 @@ def database_status(fast: bool = False) -> dict:
             "operationSeconds": SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
             "refusedSeconds": SIGNAL_DB_REFUSED_BACKOFF_SECONDS,
             "staleConnectionSeconds": SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS,
+            "maxSeconds": SIGNAL_DB_BACKOFF_MAX_SECONDS,
+            "consecutiveFailures": DB_CONSECUTIVE_FAILURES,
+            "lastFailureKind": DB_LAST_FAILURE_KIND,
         },
         "kvReadCache": db_kv_read_cache_status(),
         "checks": {
