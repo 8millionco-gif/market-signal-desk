@@ -13243,7 +13243,18 @@ def integration_failure_status(fallback: dict, error: Exception, message: str) -
     return status
 
 
+def normalize_signal_mode(mode: str | None = None, default: str = "close") -> str:
+    selected = str(mode or default or "close").strip().lower()
+    if selected == "preopen":
+        return "close"
+    if selected in {"close", "intraday"}:
+        return selected
+    fallback = str(default or "close").strip().lower()
+    return fallback if fallback in {"close", "intraday"} else "close"
+
+
 def collect_signal_inputs(mode: str, force_discovery: bool = False) -> dict:
+    mode = normalize_signal_mode(mode)
     data = seed_data()
     market, index_status = enrich_market_with_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_fx(market)
@@ -13455,6 +13466,8 @@ def score_signal_context(context: dict) -> dict:
 
 
 def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
+    mode = normalize_signal_mode(mode)
+
     def data_readiness_rank(item: dict) -> int:
         evaluation = item.get("evaluationMode", {}) if isinstance(item, dict) else {}
         readiness = item.get("priceReadiness", {}) if isinstance(item, dict) else {}
@@ -13465,8 +13478,8 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         )
         base = {
             "entry_ready": 130,
-            "closed_baseline": 112 if mode in {"close", "preopen"} else 78,
-            "display_ready": 100 if mode in {"close", "preopen"} else 88,
+            "closed_baseline": 112 if mode == "close" else 78,
+            "display_ready": 100 if mode == "close" else 88,
             "collecting_change": 42,
             "change_wait": 42,
             "collecting_price": 24,
@@ -13488,7 +13501,7 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
             base -= 10
         if "후보 제한" in blocker_text:
             base -= 8
-        if "장 시간 외" in blocker_text and mode in {"close", "preopen"}:
+        if "장 시간 외" in blocker_text and mode == "close":
             base += 10
         return bounded_int(base, 0, 140)
 
@@ -13527,9 +13540,7 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         group = item.get("decisionGroup", {}) if isinstance(item, dict) else {}
         return bounded_int(group.get("score", 0), 0, 100) if isinstance(group, dict) else 0
 
-    if mode == "preopen":
-        candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["preopenPriority"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
-    elif mode == "intraday":
+    if mode == "intraday":
         candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["triggerReadiness"], decision_score(item), candidate_pool_decision_bonus(item), item["totalScore"]), reverse=True)
     else:
         candidates.sort(key=lambda item: (data_readiness_rank(item), compression_rank(item), final_rank(item), group_rank(item), item["totalScore"], decision_score(item), candidate_pool_decision_bonus(item)), reverse=True)
@@ -13766,6 +13777,7 @@ def build_dashboard_payload(context: dict) -> dict:
 
 
 def dashboard(mode: str, force_discovery: bool = False) -> dict:
+    mode = normalize_signal_mode(mode)
     context = collect_signal_inputs(mode, force_discovery=force_discovery)
     context = analyze_signal_context(context)
     context = score_signal_context(context)
@@ -13774,6 +13786,7 @@ def dashboard(mode: str, force_discovery: bool = False) -> dict:
 
 
 def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: str) -> tuple[dict, dict]:
+    mode = normalize_signal_mode(mode)
     if not isinstance(payload, dict):
         return payload, {"enabled": False, "message": "대시보드 payload가 없어 재병합을 생략했습니다."}
     raw_candidates = payload.get("candidates", [])
@@ -14079,12 +14092,6 @@ def minutes_from_hhmm(value: str) -> int | None:
 def scheduler_jobs() -> list[dict]:
     return [
         {
-            "mode": "preopen",
-            "label": "장전 후보 점검",
-            "time": SIGNAL_PREOPEN_RUN_TIME,
-            "windowMinutes": SIGNAL_PREOPEN_RUN_WINDOW_MINUTES,
-        },
-        {
             "mode": "close",
             "label": "장마감 후보 발굴",
             "time": SIGNAL_CLOSE_RUN_TIME,
@@ -14119,6 +14126,7 @@ def scheduler_config_status() -> dict:
 
 
 def scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
+    mode = normalize_signal_mode(mode)
     if database_storage_enabled():
         exists = db_scheduled_snapshot_exists(run_date, mode)
         if exists or not DB_LAST_ERROR:
@@ -14148,7 +14156,7 @@ def next_scheduler_run(now: datetime | None = None) -> dict:
     now = now or datetime.now(KST)
     candidates = []
     for job in scheduler_jobs():
-        mode = str(job.get("mode", ""))
+        mode = normalize_signal_mode(str(job.get("mode", "")))
         run_at = scheduled_datetime(job, now.date())
         if run_at is None:
             continue
@@ -14382,8 +14390,7 @@ def dashboard_summary(payload: dict) -> dict:
 
 
 def discovery_bot_mode(mode: str | None = None) -> str:
-    normalized = str(mode or SIGNAL_DISCOVERY_BOT_MODE or "intraday").strip().lower()
-    return normalized if normalized in {"close", "preopen", "intraday"} else "intraday"
+    return normalize_signal_mode(mode or SIGNAL_DISCOVERY_BOT_MODE or "intraday", default="intraday")
 
 
 def discovery_bot_config_status() -> dict:
@@ -14416,6 +14423,7 @@ def write_discovery_latest_record(record: dict) -> None:
 
 
 def refresh_discovery_payload_after_prefetch(payload: dict, mode: str, trigger: str) -> dict:
+    mode = normalize_signal_mode(mode)
     candidates = [
         copy.deepcopy(item)
         for item in payload.get("candidates", [])
@@ -14736,6 +14744,7 @@ def scheduler_snapshot_detail(run_id: str) -> dict | None:
 
 
 def latest_file_snapshot_detail(mode: str | None = None) -> dict | None:
+    selected_mode = normalize_signal_mode(mode) if mode else None
     if not RUNS_DIR.exists():
         return None
     for path in sorted(RUNS_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
@@ -14745,7 +14754,7 @@ def latest_file_snapshot_detail(mode: str | None = None) -> dict | None:
             continue
         if not isinstance(snapshot, dict):
             continue
-        if mode and str(snapshot.get("mode", "")) != mode:
+        if selected_mode and normalize_signal_mode(str(snapshot.get("mode", ""))) != selected_mode:
             continue
         dashboard_payload = snapshot.get("dashboard", {})
         if not isinstance(dashboard_payload, dict) or not dashboard_payload:
@@ -14758,19 +14767,20 @@ def latest_file_snapshot_detail(mode: str | None = None) -> dict | None:
 
 
 def latest_scheduler_snapshot_detail(mode: str | None = None) -> dict | None:
+    selected_mode = normalize_signal_mode(mode) if mode else None
     if database_storage_enabled():
-        detail = db_latest_snapshot_detail(mode)
+        detail = db_latest_snapshot_detail(selected_mode)
         if detail is not None:
             return detail
         if DB_LAST_ERROR:
-            file_detail = latest_file_snapshot_detail(mode)
+            file_detail = latest_file_snapshot_detail(selected_mode)
             if file_detail is not None:
                 return file_detail
-    return latest_file_snapshot_detail(mode)
+    return latest_file_snapshot_detail(selected_mode)
 
 
 def dashboard_cache_key(mode: str) -> str:
-    selected = mode if mode in {"close", "preopen", "intraday"} else "close"
+    selected = normalize_signal_mode(mode)
     return f"dashboard_cache:{selected}"
 
 
@@ -14784,6 +14794,7 @@ def dashboard_cache_file_data() -> dict:
 
 
 def dashboard_cache_record(mode: str) -> dict | None:
+    mode = normalize_signal_mode(mode)
     key = dashboard_cache_key(mode)
     stored = db_read_kv(key, None) if database_storage_enabled() else None
     if isinstance(stored, dict) and isinstance(stored.get("dashboard"), dict):
@@ -14801,8 +14812,9 @@ def write_dashboard_cache_record(mode: str, dashboard_payload: dict, source: str
     candidates = dashboard_payload.get("candidates", [])
     if not isinstance(candidates, list) or not candidates:
         return False
-    selected_mode = mode if mode in {"close", "preopen", "intraday"} else str(dashboard_payload.get("mode", "close"))
+    selected_mode = normalize_signal_mode(mode or str(dashboard_payload.get("mode", "close")))
     payload = copy.deepcopy(dashboard_payload)
+    payload["mode"] = selected_mode
     payload.pop("cache", None)
     created_at = str(payload.get("generatedAt") or datetime.now(KST).isoformat(timespec="seconds"))
     record = {
@@ -16268,8 +16280,7 @@ def run_performance_auto_update(trigger: str = "snapshot") -> dict:
 
 
 def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
-    if mode not in {"close", "preopen", "intraday"}:
-        raise ValueError("mode는 close, preopen, intraday 중 하나여야 합니다.")
+    mode = normalize_signal_mode(mode)
     now = datetime.now(KST)
     payload = dashboard(mode, force_discovery=True)
     prefetch_status = prefetch_candidate_pool_market_data(
@@ -16659,9 +16670,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard/live-prices":
             query = parse_qs(parsed.query)
-            mode = query.get("mode", ["close"])[0]
-            if mode not in {"close", "preopen", "intraday"}:
-                mode = "close"
+            mode = normalize_signal_mode(query.get("mode", ["close"])[0])
             symbols = [
                 symbol.strip()
                 for symbol in query.get("symbols", [""])[0].split(",")
@@ -16677,9 +16686,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/dashboard":
             query = parse_qs(parsed.query)
-            mode = query.get("mode", ["close"])[0]
-            if mode not in {"close", "preopen", "intraday"}:
-                mode = "close"
+            mode = normalize_signal_mode(query.get("mode", ["close"])[0])
             force_refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes", "on"}
             if not force_refresh:
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
@@ -16747,7 +16754,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/scheduler/run":
             body = self.read_body()
-            mode = str(body.get("mode", "close")).strip()
+            mode = normalize_signal_mode(str(body.get("mode", "close")).strip())
             try:
                 record = run_signal_snapshot(mode, trigger="manual")
                 self.send_json({"ok": True, "record": record, "status": scheduler_status()})
@@ -16758,7 +16765,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/discovery/run":
             body = self.read_body()
-            mode = str(body.get("mode", SIGNAL_DISCOVERY_BOT_MODE)).strip()
+            mode = normalize_signal_mode(str(body.get("mode", SIGNAL_DISCOVERY_BOT_MODE)).strip(), default="intraday")
             try:
                 record = run_discovery_bot_cycle(mode, trigger="manual")
                 self.send_json({"ok": True, "latest": {key: value for key, value in record.items() if key != "dashboard"}, "status": discovery_bot_status()})

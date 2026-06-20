@@ -43,9 +43,12 @@ function detectedAnalysisMode(date = new Date()) {
   const { weekday, hour, minute } = koreaTimeParts(date);
   const minutes = hour * 60 + minute;
   if (["Sat", "Sun"].includes(weekday)) return "close";
-  if (minutes < 9 * 60) return "preopen";
   if (minutes <= 15 * 60 + 30) return "intraday";
   return "close";
+}
+
+function normalizeAnalysisMode(mode) {
+  return mode === "intraday" ? "intraday" : "close";
 }
 
 const state = {
@@ -2209,8 +2212,8 @@ function dataReadinessPriority(item) {
   const key = evaluation.key || "collecting";
   let priority = {
     entry_ready: 0,
-    closed_baseline: state.mode === "close" || state.mode === "preopen" ? 1 : 3,
-    display_ready: state.mode === "close" || state.mode === "preopen" ? 2 : 2,
+    closed_baseline: state.mode === "close" ? 1 : 3,
+    display_ready: state.mode === "close" ? 2 : 2,
     collecting_change: 5,
     change_wait: 5,
     collecting_price: 7,
@@ -2223,7 +2226,7 @@ function dataReadinessPriority(item) {
   if (blockers.includes("등락률")) priority += 1;
   if (blockers.includes("응답 없음")) priority += 1;
   if (blockers.includes("후보 제한")) priority += 1;
-  if (blockers.includes("장 시간 외") && (state.mode === "close" || state.mode === "preopen")) {
+  if (blockers.includes("장 시간 외") && state.mode === "close") {
     priority = Math.max(0, priority - 1);
   }
   return priority;
@@ -3415,18 +3418,11 @@ function scheduleTimeLabel(value) {
 }
 
 function modeLabel(mode) {
-  if (mode === "preopen") return "장전";
   if (mode === "intraday") return "장중";
   return "장마감";
 }
 
 function modeSummary(mode) {
-  if (mode === "preopen") {
-    return {
-      label: "장전 분석",
-      detail: "갭·해외시장·전일 재료 기준으로 오늘 후보를 압축합니다"
-    };
-  }
   if (mode === "intraday") {
     return {
       label: "장중 분석",
@@ -3435,7 +3431,7 @@ function modeSummary(mode) {
   }
   return {
     label: "장마감 분석",
-    detail: "뉴스·공시·성과를 정리해 다음 거래일 후보를 준비합니다"
+    detail: "장마감 기준가·뉴스·공시·해외지수로 다음 거래일 후보를 준비합니다"
   };
 }
 
@@ -3547,7 +3543,7 @@ function renderSchedulerStatus() {
     ${candidatePrefetchError}
     <div class="schedule-actions">
       <button type="button" data-scheduler-mode="close">장마감 실행</button>
-      <button type="button" data-scheduler-mode="preopen">장전 실행</button>
+      <button type="button" data-scheduler-mode="intraday">장중 실행</button>
     </div>
   `;
   els.schedulerStatus.querySelectorAll("[data-scheduler-mode]").forEach((button) => {
@@ -5449,12 +5445,12 @@ function renderPerformance() {
     els.signalDetail.innerHTML = `
       <div class="empty-state performance-empty-state">
         <h2>성과 검증은 아직 시작 전입니다</h2>
-        <p>장마감·장전 스냅샷이 저장되면 1시간, 종가, 1일, 3일, 5일 성과를 여기서 검증합니다.</p>
+        <p>장마감·장중 스냅샷이 저장되면 1시간, 종가, 1일, 3일, 5일 성과를 여기서 검증합니다.</p>
         <div class="signal-flow-strip">
           <div>
             <span>1. 후보 저장</span>
             <strong>스냅샷 생성</strong>
-            <em>장마감·장전 후보와 가격을 기록</em>
+            <em>장마감·장중 후보와 가격을 기록</em>
           </div>
           <div>
             <span>2. 가격 추적</span>
@@ -5631,7 +5627,7 @@ function renderPerformance() {
             ${
               observations.length
                 ? observations.slice(0, 18).map(renderPerformanceObservation).join("")
-                : `<div class="history-empty">장마감 또는 장전 스냅샷을 먼저 저장하세요</div>`
+                : `<div class="history-empty">장마감 또는 장중 스냅샷을 먼저 저장하세요</div>`
             }
           </div>
         </section>
@@ -6569,8 +6565,9 @@ function showDeskView() {
 }
 
 function changeAnalysisMode(mode) {
+  mode = normalizeAnalysisMode(mode);
   if (!mode || mode === state.mode) {
-    state.modeAutoFollow = mode === detectedAnalysisMode();
+    state.modeAutoFollow = mode === normalizeAnalysisMode(detectedAnalysisMode());
     updateModeStatus();
     return;
   }
@@ -6578,7 +6575,7 @@ function changeAnalysisMode(mode) {
   updateViewButtons();
   updateShellView();
   state.mode = mode;
-  state.modeAutoFollow = mode === detectedAnalysisMode();
+  state.modeAutoFollow = mode === normalizeAnalysisMode(detectedAnalysisMode());
   state.selectedSymbol = null;
   state.selectedLookup = null;
   updateModeStatus();
@@ -6685,7 +6682,7 @@ els.refreshButton.addEventListener("click", () => {
 });
 
 function refreshAutoAnalysisMode() {
-  const nextAutoMode = detectedAnalysisMode();
+  const nextAutoMode = normalizeAnalysisMode(detectedAnalysisMode());
   const changed = nextAutoMode !== state.autoMode;
   state.autoMode = nextAutoMode;
   if (changed && state.modeAutoFollow && state.mode !== nextAutoMode) {
