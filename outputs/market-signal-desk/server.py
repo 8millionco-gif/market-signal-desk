@@ -60,6 +60,7 @@ SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
     0,
     int(os.getenv("SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS", "2") or "2"),
 )
+SIGNAL_DB_TRANSIENT_GRACE_SECONDS = max(30, int(os.getenv("SIGNAL_DB_TRANSIENT_GRACE_SECONDS", "180") or "180"))
 SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_CONNECTION_TTL_SECONDS = max(10, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "45") or "45"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
@@ -523,6 +524,19 @@ def db_diag_now() -> str:
     return datetime.now(KST).isoformat(timespec="seconds")
 
 
+def db_diag_age_seconds(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return max(0, int((datetime.now(KST) - parsed.astimezone(KST)).total_seconds()))
+
+
 def db_error_classification(error: Exception | str) -> dict:
     message = str(error)[:240]
     lower_message = message.lower()
@@ -611,6 +625,29 @@ def database_retry_seconds() -> int:
 
 def database_backoff_active() -> bool:
     return database_retry_seconds() > 0
+
+
+def database_recent_success_age_seconds() -> int | None:
+    return db_diag_age_seconds(DB_LAST_SUCCESS_AT)
+
+
+def database_recently_succeeded(max_age_seconds: int | None = None) -> bool:
+    age_seconds = database_recent_success_age_seconds()
+    if age_seconds is None:
+        return False
+    limit = SIGNAL_DB_TRANSIENT_GRACE_SECONDS if max_age_seconds is None else max_age_seconds
+    return age_seconds <= max(1, int(limit))
+
+
+def database_transient_degraded() -> bool:
+    if not database_storage_enabled() or not DB_SCHEMA_READY or not database_recently_succeeded():
+        return False
+    classification = db_error_classification(DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)
+    return bool(
+        database_backoff_active()
+        or classification.get("staleConnection")
+        or classification.get("connectionFailure")
+    )
 
 
 def maybe_migrate_files_to_database_once() -> None:
@@ -3619,6 +3656,8 @@ def database_status(fast: bool = False) -> dict:
             ready = ensure_database_schema()
             counts = db_storage_counts() if ready and not fast else {}
     requested = database_storage_requested()
+    transient_degraded = bool(enabled and not ready and database_transient_degraded())
+    operational_ready = bool(ready or transient_degraded)
     if ready:
         maybe_migrate_files_to_database_once()
         migration_done_after_check = bool(DB_MIGRATION_STATUS.get("done"))
@@ -3628,6 +3667,9 @@ def database_status(fast: bool = False) -> dict:
     if ready:
         message = "Postgres DB를 기준 저장소로 사용 중입니다."
         next_action = "운영 가능"
+    elif transient_degraded:
+        message = "Postgres DB 기준 저장소를 유지 중이며 최근 연결 오류는 짧게 재시도 중입니다."
+        next_action = "최근 정상 DB 스냅샷 유지 후 재시도"
     elif DATABASE_URL and DB_SCHEMA_READY and database_retry_seconds() > 0:
         message = "Postgres 스키마는 준비됐지만 최근 DB 작업 실패로 잠시 재시도 대기 중입니다."
         next_action = "재시도 대기 후 상태 새로고침"
@@ -3649,12 +3691,15 @@ def database_status(fast: bool = False) -> dict:
         "urlConfigured": bool(DATABASE_URL),
         "url": url_info,
         "enabled": enabled,
-        "ready": ready,
+        "ready": operational_ready,
+        "connectionReady": ready,
+        "degraded": transient_degraded,
+        "transientDegraded": transient_degraded,
         "schemaReady": bool(DB_SCHEMA_READY),
         "schemaCheckedAt": DB_SCHEMA_LAST_CHECKED_AT,
         "implementation": "postgres" if enabled else "filesystem",
-        "persistent": bool(ready),
-        "volatileFallback": not bool(ready),
+        "persistent": operational_ready,
+        "volatileFallback": not operational_ready,
         "requiredForStableOperation": True,
         "requested": requested,
         "autoMigrate": SIGNAL_DB_AUTO_MIGRATE,
@@ -3664,19 +3709,20 @@ def database_status(fast: bool = False) -> dict:
         "counts": counts,
         "message": message,
         "nextAction": next_action,
-        "error": "" if ready else (DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE),
-        "lastError": "" if ready else DB_LAST_ERROR,
-        "lastErrorAt": "" if ready else DB_LAST_ERROR_AT,
-        "lastErrorType": "" if ready else DB_LAST_ERROR_TYPE,
+        "error": (DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE) if transient_degraded else ("" if ready else (DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)),
+        "lastError": DB_LAST_ERROR if transient_degraded else ("" if ready else DB_LAST_ERROR),
+        "lastErrorAt": DB_LAST_ERROR_AT if transient_degraded else ("" if ready else DB_LAST_ERROR_AT),
+        "lastErrorType": DB_LAST_ERROR_TYPE if transient_degraded else ("" if ready else DB_LAST_ERROR_TYPE),
         "lastErrorClassification": (
             {"connectionFailure": False, "staleConnection": False, "connectionRefused": False}
-            if ready
+            if ready and not transient_degraded
             else db_error_classification(DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)
         ),
-        "lastBackoffMessage": "" if ready else DB_LAST_BACKOFF_MESSAGE,
-        "lastBackoffAt": "" if ready else DB_LAST_BACKOFF_AT,
+        "lastBackoffMessage": DB_LAST_BACKOFF_MESSAGE if transient_degraded else ("" if ready else DB_LAST_BACKOFF_MESSAGE),
+        "lastBackoffAt": DB_LAST_BACKOFF_AT if transient_degraded else ("" if ready else DB_LAST_BACKOFF_AT),
         "lastConnectAttemptAt": DB_LAST_CONNECT_ATTEMPT_AT,
         "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
+        "lastSuccessfulAgeSeconds": database_recent_success_age_seconds(),
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
         "connectionReuse": db_connection_reuse_status(),
@@ -3693,7 +3739,9 @@ def database_status(fast: bool = False) -> dict:
             "schemaReady": bool(DB_SCHEMA_READY),
             "migrationRan": migration_ran,
             "migrationDone": migration_done,
-            "primaryReady": ready,
+            "primaryReady": operational_ready,
+            "connectionReady": ready,
+            "transientDegraded": transient_degraded,
             "usingInternalUrl": url_info.get("hostKind") == "render-internal",
         },
     }
@@ -16815,40 +16863,58 @@ def recent_scheduler_runs(limit: int | None = None) -> list[dict]:
 
 def snapshot_storage_status(fast: bool = True) -> dict:
     now_utc = datetime.now(timezone.utc)
+
+    def cache_ttl_seconds_for(payload: dict) -> int:
+        ttl_seconds = SIGNAL_STORAGE_STATUS_CACHE_SECONDS
+        database_payload = payload.get("database") if isinstance(payload, dict) else {}
+        if isinstance(database_payload, dict):
+            transient = bool(
+                database_payload.get("transientDegraded")
+                or database_payload.get("backoffActive")
+                or database_payload.get("lastErrorClassification", {}).get("staleConnection")
+            )
+            if transient:
+                retry_seconds = bounded_int(database_payload.get("nextRetrySeconds", 0), 0, ttl_seconds)
+                ttl_seconds = min(ttl_seconds, max(1, retry_seconds or SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS or 2))
+        return max(0, int(ttl_seconds))
+
     if fast and SIGNAL_STORAGE_STATUS_CACHE_SECONDS > 0:
         with STORAGE_STATUS_CACHE_LOCK:
             cached_payload = STORAGE_STATUS_CACHE.get("payload")
             expires_at = STORAGE_STATUS_CACHE.get("expires_at")
             created_at = STORAGE_STATUS_CACHE.get("created_at")
         if isinstance(cached_payload, dict) and isinstance(expires_at, datetime) and expires_at > now_utc:
-            payload = copy.deepcopy(cached_payload)
             age_seconds = (
                 max(0, int((now_utc - created_at).total_seconds()))
                 if isinstance(created_at, datetime)
                 else 0
             )
-            payload["cache"] = {
-                "hit": True,
-                "ttlSeconds": SIGNAL_STORAGE_STATUS_CACHE_SECONDS,
-                "ageSeconds": age_seconds,
-                "expiresAt": expires_at.astimezone(KST).isoformat(timespec="seconds"),
-                "message": "저장소 상태 진단 캐시를 사용했습니다.",
-            }
-            return payload
+            cache_ttl_seconds = cache_ttl_seconds_for(cached_payload)
+            if age_seconds < cache_ttl_seconds:
+                payload = copy.deepcopy(cached_payload)
+                payload["cache"] = {
+                    "hit": True,
+                    "ttlSeconds": cache_ttl_seconds,
+                    "ageSeconds": age_seconds,
+                    "expiresAt": expires_at.astimezone(KST).isoformat(timespec="seconds"),
+                    "message": "저장소 상태 진단 캐시를 사용했습니다.",
+                }
+                return payload
 
     def finalize(payload: dict) -> dict:
         if fast and SIGNAL_STORAGE_STATUS_CACHE_SECONDS > 0:
+            cache_ttl_seconds = cache_ttl_seconds_for(payload)
             cached = copy.deepcopy(payload)
             cached["cache"] = {
                 "hit": False,
-                "ttlSeconds": SIGNAL_STORAGE_STATUS_CACHE_SECONDS,
+                "ttlSeconds": cache_ttl_seconds,
                 "ageSeconds": 0,
                 "message": "저장소 상태 진단을 새로 계산했습니다.",
             }
             with STORAGE_STATUS_CACHE_LOCK:
                 STORAGE_STATUS_CACHE["payload"] = cached
                 STORAGE_STATUS_CACHE["created_at"] = now_utc
-                STORAGE_STATUS_CACHE["expires_at"] = now_utc + timedelta(seconds=SIGNAL_STORAGE_STATUS_CACHE_SECONDS)
+                STORAGE_STATUS_CACHE["expires_at"] = now_utc + timedelta(seconds=cache_ttl_seconds)
             return cached
         return payload
 
