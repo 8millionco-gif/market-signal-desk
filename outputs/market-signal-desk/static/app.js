@@ -1722,7 +1722,7 @@ function evaluationModeForDisplay(item) {
   const primaryBlocker = mode.primaryBlocker || readiness.primaryBlocker || blockerReasons[0] || "";
   const fallback = {
     entry_ready: ["실시간 평가 가능", "ready", "서버가 가격·등락률·거래 반응을 확보했습니다."],
-    closed_baseline: ["장마감 기준가", "baseline", "직전 정규장 마감 가격 기준입니다. 신규 진입은 개장 후 확인합니다."],
+    closed_baseline: ["장마감 기준가", "baseline", "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."],
     display_ready: ["후보 분석 가능", "analysis", "가격과 재료는 확보됐지만 거래 반응 보강 전까지 진입 후보로 올리지 않습니다."],
     collecting_change: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
     change_wait: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
@@ -1772,6 +1772,9 @@ function priceFreshnessInfo(item) {
   const delayedSeconds = Number(freshness.delayedSeconds ?? 120);
   let status = freshness.status || (source === "toss" ? "unknown" : "snapshot");
   const serverBaseline = status === "closed-baseline" || Boolean(freshness.isClosedBaseline || freshness.usableForBaseline && freshness.session?.isClosedOrPreopen);
+  const hasDisplayPrice = Boolean(item?.price && item.price !== "-" && !String(item.price).includes("미수신"));
+  const hasDisplayChange = parseDisplayPercent(item?.change) != null;
+  const closeModeBaseline = state.mode === "close" && hasDisplayPrice && hasDisplayChange && Boolean(freshness.session?.isClosedOrPreopen || status === "snapshot" || source !== "toss");
   if (source === "toss" && !serverBaseline) {
     if (!Number.isFinite(ageSeconds)) status = "unknown";
     else if (ageSeconds <= freshSeconds) status = "live";
@@ -1780,7 +1783,7 @@ function priceFreshnessInfo(item) {
   }
   const ageText = timestamp ? elapsedLabel(timestamp) : "";
   const isFresh = status === "live" && source === "toss";
-  const isBaseline = status === "closed-baseline" || serverBaseline;
+  const isBaseline = status === "closed-baseline" || serverBaseline || closeModeBaseline;
   const isDelayed = ["delayed", "stale", "unknown"].includes(status) && source === "toss" && !isBaseline;
   const isSnapshot = status === "snapshot" || source !== "toss";
   const fallbackLabel =
@@ -1791,7 +1794,7 @@ function priceFreshnessInfo(item) {
     isSnapshot ? "저장값" : "미확인";
   const fallbackMessage =
     isFresh ? "토스 현재가를 실시간 판단에 사용합니다." :
-    isBaseline ? (freshness.message || "미국장 비정규 시간이라 직전 마감가 기준으로 분석합니다. 실시간 진입은 개장 후 확인하세요.") :
+    isBaseline ? (freshness.message || "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인하세요.") :
     status === "delayed" ? "토스 현재가가 지연되어 신규 진입 판단을 보류합니다." :
     status === "stale" ? "토스 현재가가 오래되어 저장 가격처럼만 참고합니다." :
     freshness.message || livePrice.message || "";

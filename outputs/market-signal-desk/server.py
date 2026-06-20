@@ -4115,6 +4115,12 @@ def live_price_freshness(live_price: dict | None, fallback_updated_at: str = "",
     }
 
 
+def freshness_is_closed_market_baseline(freshness: dict | None) -> bool:
+    freshness = freshness if isinstance(freshness, dict) else {}
+    session = freshness.get("session", {}) if isinstance(freshness.get("session"), dict) else {}
+    return bool(freshness.get("isClosedBaseline") or session.get("isClosedOrPreopen"))
+
+
 def annotate_candidate_live_price_freshness(candidate: dict, fallback_updated_at: str = "") -> dict:
     item = dict(candidate)
     live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
@@ -5323,16 +5329,19 @@ def candidate_data_completeness(candidate: dict) -> dict:
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
     news_count = len(news_items) or bounded_int(trend.get("newsCount", 0), 0, 999999)
     disclosure_count = len(disclosure_items)
+    freshness = live_price_freshness(live_price, str(candidate.get("updated", "")), str(candidate.get("market", "")))
+    closed_market_session = freshness_is_closed_market_baseline(freshness)
     live_price_ok = candidate_has_fresh_live_price(candidate)
     price_ok = candidate_has_usable_price_basis(candidate)
     change_ok = price_ok and candidate_data_has_change(candidate)
+    closed_market_baseline = bool(closed_market_session and price_ok and change_ok)
     candle_ok = candidate_data_source_ok(live_candles)
     orderbook_ok = candidate_data_source_ok(live_orderbook)
     trade_ok = candidate_data_source_ok(live_trades)
     material_ok = news_count > 0 or disclosure_count > 0
-    reaction_ready = live_price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
+    reaction_ready = False if closed_market_baseline else live_price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
     display_ready = price_ok and change_ok and material_ok
-    entry_ready = display_ready and reaction_ready
+    entry_ready = False if closed_market_baseline else display_ready and reaction_ready
     missing = []
     if not price_ok:
         missing.append("가격 기준")
@@ -5340,7 +5349,7 @@ def candidate_data_completeness(candidate: dict) -> dict:
         missing.append("등락률")
     if not material_ok:
         missing.append("뉴스/공시")
-    if not (candle_ok or orderbook_ok or trade_ok):
+    if not closed_market_baseline and not (candle_ok or orderbook_ok or trade_ok):
         missing.append("차트/호가/체결")
     status = "entry_ready" if entry_ready else "display_ready" if display_ready else "collecting"
     return {
@@ -5359,11 +5368,12 @@ def candidate_data_completeness(candidate: dict) -> dict:
         "reactionReady": reaction_ready,
         "displayReady": display_ready,
         "entryReady": entry_ready,
+        "closedMarketBaseline": closed_market_baseline,
         "newsCount": news_count,
         "disclosureCount": disclosure_count,
         "missing": unique_texts(missing, limit=8),
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-        "freshness": live_price_freshness(live_price, str(candidate.get("updated", "")), str(candidate.get("market", ""))),
+        "freshness": freshness,
     }
 
 
@@ -5403,6 +5413,7 @@ def candidate_toss_data_coverage(candidates: list[dict]) -> dict:
         source_counts[source] = source_counts.get(source, 0) + 1
         freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else live_price_freshness(live_price, str(candidate.get("updated", "")), str(candidate.get("market", "")))
         freshness_status = str(freshness.get("status", ""))
+        closed_market_baseline = freshness_is_closed_market_baseline(freshness)
         if source == "toss" and live_price.get("lastPrice"):
             counts["tossPriceCount"] += 1
         if completeness.get("priceOk"):
@@ -5423,7 +5434,7 @@ def candidate_toss_data_coverage(candidates: list[dict]) -> dict:
             counts["reactionReadyCount"] += 1
         if completeness.get("entryReady"):
             counts["entryReadyCount"] += 1
-        if freshness_status == "closed-baseline":
+        if freshness_status == "closed-baseline" or (closed_market_baseline and completeness.get("priceOk") and completeness.get("changeOk")):
             counts["closedBaselineCount"] += 1
         elif freshness_status == "live":
             counts["liveCount"] += 1
@@ -5486,6 +5497,7 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
     freshness = completeness.get("freshness", {}) if isinstance(completeness.get("freshness"), dict) else {}
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     freshness_status = str(freshness.get("status", ""))
+    closed_market_baseline = bool(freshness_is_closed_market_baseline(freshness) and completeness.get("priceOk") and completeness.get("changeOk"))
     price_source = str(live_price.get("source", "")).strip().lower()
     if not completeness.get("priceOk"):
         if price_source == "toss" and freshness_status in {"delayed", "stale", "unknown"}:
@@ -5498,9 +5510,9 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
             reasons.append("가격 저장값 없음")
         else:
             reasons.append("가격 확인 필요")
-    elif freshness_status == "closed-baseline":
+    elif freshness_status == "closed-baseline" or closed_market_baseline:
         reasons.append("장마감 기준가")
-    elif freshness_status in {"delayed", "stale", "unknown"}:
+    elif freshness_status in {"delayed", "stale", "unknown"} and not closed_market_baseline:
         reasons.append(f"가격 {freshness.get('label', '지연')}")
 
     if not completeness.get("changeOk"):
@@ -5515,16 +5527,17 @@ def candidate_data_blocker_reasons(candidate: dict, completeness: dict | None = 
     if not completeness.get("materialOk"):
         reasons.append("뉴스/공시 부족")
 
-    for source_key, label, ok_key in (
-        ("liveCandles", "차트", "candleOk"),
-        ("liveOrderbook", "호가", "orderbookOk"),
-        ("liveTrades", "체결", "tradeOk"),
-    ):
-        if completeness.get(ok_key):
-            continue
-        reason = candidate_source_wait_reason(candidate.get(source_key, {}), label)
-        if reason:
-            reasons.append(reason)
+    if not closed_market_baseline:
+        for source_key, label, ok_key in (
+            ("liveCandles", "차트", "candleOk"),
+            ("liveOrderbook", "호가", "orderbookOk"),
+            ("liveTrades", "체결", "tradeOk"),
+        ):
+            if completeness.get(ok_key):
+                continue
+            reason = candidate_source_wait_reason(candidate.get(source_key, {}), label)
+            if reason:
+                reasons.append(reason)
 
     return unique_texts(reasons, limit=10)
 
@@ -5539,10 +5552,11 @@ def candidate_price_readiness(candidate: dict) -> dict:
     display_ready = bool(completeness.get("displayReady"))
     entry_ready = bool(completeness.get("entryReady"))
     status = str(freshness.get("status", "missing"))
+    closed_market_baseline = bool(freshness_is_closed_market_baseline(freshness) and price_ok and change_ok)
     if entry_ready:
         key, label, message = "entry_ready", "실시간 평가 가능", "가격·등락률·거래 반응 데이터가 모두 확인되었습니다."
-    elif display_ready and status == "closed-baseline":
-        key, label, message = "closed_baseline", "장마감 기준가", "직전 정규장 마감 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다."
+    elif display_ready and (status == "closed-baseline" or closed_market_baseline):
+        key, label, message = "closed_baseline", "장마감 기준가", "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
     elif display_ready:
         key, label, message = "display_ready", "후보 분석 가능", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
     elif price_ok and not change_ok:
@@ -5584,7 +5598,7 @@ def candidate_evaluation_mode(candidate: dict) -> dict:
             "key": "closed_baseline",
             "label": "장마감 기준가",
             "status": "baseline",
-            "message": "직전 정규장 마감 가격 기준으로 분석합니다. 신규 진입은 개장 후 실시간 반응을 확인합니다.",
+            "message": "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다.",
             "tradeEligible": False,
             "rankEligible": True,
         },
@@ -5661,8 +5675,8 @@ def candidate_trade_data_gate(candidate: dict) -> dict:
         label = "실시간 진입 검증 완료"
         reason = "서버가 가격·등락률·거래 반응을 모두 확보했습니다."
     elif closed_baseline:
-        label = "장마감 기준가 관찰"
-        reason = "직전 정규장 마감 가격 기준으로 후보를 평가합니다. 신규 진입은 개장 후 실시간 가격·거래량 반응을 확인합니다."
+        label = "다음 장 우선 관찰"
+        reason = "장마감 기준가와 전일 등락률 기준으로 후보를 평가합니다. 장 시작 후 실시간 가격·거래량 반응을 확인합니다."
     elif display_ready:
         label = "반응 검증 대기"
         reason = "가격과 재료는 확보됐지만 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
