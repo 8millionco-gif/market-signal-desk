@@ -15669,7 +15669,7 @@ def cached_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None
     integrations["marketDataMerge"] = market_data_merge
     integrations["marketDataLatest"] = market_data_latest_status(fast=True)
     payload["integrations"] = integrations
-    return payload
+    return ensure_dashboard_market_snapshot(payload, mode)
 
 
 def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
@@ -15685,6 +15685,7 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
 
     market, index_status = enrich_market_with_stored_latest_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_stored_latest_fx(market)
+    market, index_status, fx_status = enrich_market_with_last_good_sources(market, index_status, fx_status)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15791,7 +15792,7 @@ def stored_candidate_data_dashboard_payload(mode: str, fallback_error: str = "")
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
         payload["summary"]["candidateSourceStored"] = True
         payload["summary"]["candidateSourceStoredData"] = True
-    return payload
+    return ensure_dashboard_market_snapshot(payload, mode)
 
 
 def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "") -> dict | None:
@@ -15807,6 +15808,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
 
     market, index_status = enrich_market_with_stored_latest_indices(data.get("market", {}))
     market, fx_status = enrich_market_with_stored_latest_fx(market)
+    market, index_status, fx_status = enrich_market_with_last_good_sources(market, index_status, fx_status)
     candidates = [decorate_candidate(copy.deepcopy(item), watched) for item in raw_candidates]
     candidates, candidate_data_merge = merge_candidate_data_snapshots_into_candidates(candidates, mode)
     candidates, live_state_merge = merge_live_state_into_candidates(candidates, mode)
@@ -15912,7 +15914,7 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
         payload["summary"]["dashboardCacheCreatedAt"] = payload["cache"]["createdAt"]
         payload["summary"]["dashboardCacheFallbackError"] = fallback_error
         payload["summary"]["candidateSourceStored"] = True
-    return payload
+    return ensure_dashboard_market_snapshot(payload, mode)
 
 
 def seed_dashboard_payload_for_live_prices(mode: str) -> dict:
@@ -16067,6 +16069,28 @@ def minimal_live_price_dashboard_payload(mode: str, candidates: list[dict], sour
     }
 
 
+def ensure_dashboard_market_snapshot(payload: dict, mode: str = "") -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    enriched_payload = payload
+    market = copy.deepcopy(enriched_payload.get("market", {})) if isinstance(enriched_payload.get("market"), dict) else {}
+    market, _, _ = enrich_market_with_last_good_sources(market, {}, {})
+    resolved_mode = normalize_signal_mode(mode or enriched_payload.get("mode") or market.get("analysisMode") or "auto")
+    market["analysisMode"] = resolved_mode
+    session = market.get("marketSession") if isinstance(market.get("marketSession"), dict) else market_session_context("KR")
+    session["analysisMode"] = resolved_mode
+    session["baselineLabel"] = "실시간 가격" if resolved_mode == "intraday" else "장마감 기준가"
+    market["marketSession"] = session
+    market["baselineLabel"] = session["baselineLabel"]
+    enriched_payload["mode"] = resolved_mode
+    enriched_payload["market"] = market
+    summary = enriched_payload.get("summary") if isinstance(enriched_payload.get("summary"), dict) else {}
+    summary["marketSession"] = session
+    summary["baselineLabel"] = session["baselineLabel"]
+    enriched_payload["summary"] = summary
+    return enriched_payload
+
+
 def dashboard_payload_from_candidate_data_file(mode: str) -> tuple[dict, str] | None:
     data = safe_read_json_file(CANDIDATE_DATA_FILE)
     if not isinstance(data, dict):
@@ -16184,7 +16208,7 @@ def dashboard_payload_from_dashboard_file(mode: str) -> tuple[dict, str] | None:
                 "mode": selected_mode,
                 "createdAt": record.get("createdAt", ""),
             }
-            return payload, "dashboard_cache_file"
+            return ensure_dashboard_market_snapshot(payload, selected_mode), "dashboard_cache_file"
 
     discovery = safe_read_json_file(DISCOVERY_LATEST_FILE)
     if isinstance(discovery, dict) and isinstance(discovery.get("dashboard"), dict):
@@ -16197,7 +16221,7 @@ def dashboard_payload_from_dashboard_file(mode: str) -> tuple[dict, str] | None:
                 "mode": selected_mode,
                 "createdAt": discovery.get("createdAt") or discovery.get("updatedAt", ""),
             }
-            return payload, "discovery_latest_file"
+            return ensure_dashboard_market_snapshot(payload, selected_mode), "discovery_latest_file"
 
     detail = latest_file_snapshot_detail(selected_mode)
     if isinstance(detail, dict) and isinstance(detail.get("dashboard"), dict):
@@ -16209,7 +16233,7 @@ def dashboard_payload_from_dashboard_file(mode: str) -> tuple[dict, str] | None:
                 "source": "snapshot_file",
                 "mode": selected_mode,
             }
-            return payload, "snapshot_file"
+            return ensure_dashboard_market_snapshot(payload, selected_mode), "snapshot_file"
     return None
 
 
