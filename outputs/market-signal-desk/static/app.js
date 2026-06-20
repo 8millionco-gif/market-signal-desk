@@ -5204,15 +5204,51 @@ function feedActionLabel(item, plan) {
   return primaryDecisionForDisplay(item, plan).label;
 }
 
+function candidateEvidenceSummary(item) {
+  return item?.evidenceSummary && typeof item.evidenceSummary === "object" ? item.evidenceSummary : {};
+}
+
+function evidenceScoreValue(summary) {
+  const raw = summary?.weightedScore ?? summary?.score;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, Math.round(value))) : null;
+}
+
+function scoreTextFromValue(value, suffix = "") {
+  const score = Number(value);
+  return Number.isFinite(score) ? `${Math.max(0, Math.min(100, Math.round(score)))}/100${suffix}` : "-";
+}
+
+function evidenceScoreText(summary) {
+  const score = evidenceScoreValue(summary);
+  return score == null ? "-" : scoreTextFromValue(score);
+}
+
+function evidenceSummaryLabel(summary) {
+  if (summary?.label) return String(summary.label);
+  const score = evidenceScoreValue(summary);
+  if (score == null) return "근거 확인";
+  if (score >= 75) return "근거 강함";
+  if (score >= 60) return "검증 중";
+  if (score >= 45) return "보강 필요";
+  return "근거 약함";
+}
+
 function candidateSignalMeta(item) {
+  const evidence = candidateEvidenceSummary(item);
+  const counts = evidence.sourceCounts ?? {};
   const sourceCount = Array.isArray(item?.sources) ? item.sources.length : 0;
-  const newsCount = Number(item?.trend?.newsCount ?? 0);
-  const officialCount = Number(item?.officialSignal?.count ?? 0);
+  const newsCount = Number(counts.news ?? evidence.newsCount ?? item?.trend?.newsCount ?? 0);
+  const materialNews = Number(counts.materialNews ?? evidence.materialNews ?? item?.trend?.materialNewsCount ?? 0);
+  const officialCount = Number(counts.official ?? evidence.officialCount ?? item?.officialSignal?.count ?? 0);
   const parts = [];
-  if (sourceCount) parts.push(`출처 ${sourceCount}개`);
+  const evidenceScore = evidenceScoreValue(evidence);
+  if (evidenceScore != null) parts.push(`${evidenceSummaryLabel(evidence)} ${evidenceScore}/100`);
+  if (materialNews) parts.push(`재료 ${materialNews}건`);
+  else if (sourceCount) parts.push(`출처 ${sourceCount}개`);
   else if (newsCount) parts.push(`뉴스 ${newsCount}건`);
   if (officialCount) parts.push(`공시 ${officialCount}건`);
-  const liveText = livePriceLabel(item);
+  const liveText = evidence?.priceBasis?.label || livePriceLabel(item);
   if (liveText) parts.push(liveText);
   return parts.join(" · ");
 }
@@ -6144,9 +6180,15 @@ function signalFlowStrip(item, plan, primaryDecision) {
 }
 
 function newsSignalSection(item) {
-  const reasons = uniqueTexts([item.thesis, ...(item.why ?? [])], 4);
+  const evidence = candidateEvidenceSummary(item);
+  const reasons = uniqueTexts([...(evidence.reasons ?? []), item.thesis, ...(item.why ?? [])], 4);
   const sourceCount = Array.isArray(item.sources) ? item.sources.length : 0;
   const latestSource = item.sources?.[0];
+  const reliability = scoreTextFromValue(evidence.reliabilityScore);
+  const impact = scoreTextFromValue(evidence.impactScore);
+  const reaction = scoreTextFromValue(evidence.priceReactionComponent);
+  const risk = scoreTextFromValue(evidence.riskPenalty, " 차감");
+  const evidenceStats = evidenceScoreValue(evidence) != null;
   return `
     <section class="detail-section signal-story-section">
       <div class="section-title">
@@ -6157,10 +6199,21 @@ function newsSignalSection(item) {
         ${reasons.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}
       </ul>
       <div class="signal-mini-stats">
-        ${statCard("확인 출처", sourceCount ? `${sourceCount}개` : "-")}
-        ${statCard("재료 뉴스", item.trend?.materialNewsCount != null ? `${item.trend.materialNewsCount}건` : "-")}
-        ${statCard("공시/IR", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
-        ${statCard("최근 출처", latestSource ? `${latestSource.publisher} · ${latestSource.time}` : "-")}
+        ${
+          evidenceStats
+            ? `
+              ${statCard("근거 신뢰", reliability)}
+              ${statCard("재료 영향", impact)}
+              ${statCard("가격 반응", reaction)}
+              ${statCard("리스크", risk)}
+            `
+            : `
+              ${statCard("확인 출처", sourceCount ? `${sourceCount}개` : "-")}
+              ${statCard("재료 뉴스", item.trend?.materialNewsCount != null ? `${item.trend.materialNewsCount}건` : "-")}
+              ${statCard("공시/IR", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
+              ${statCard("최근 출처", latestSource ? `${latestSource.publisher} · ${latestSource.time}` : "-")}
+            `
+        }
       </div>
     </section>
   `;

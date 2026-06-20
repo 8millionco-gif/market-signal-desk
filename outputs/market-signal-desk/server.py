@@ -10699,12 +10699,15 @@ def candidate_public_price_basis(candidate: dict) -> dict:
 
 
 def candidate_public_evidence_summary(candidate: dict) -> dict:
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
     discovery = candidate.get("discovery", {}) if isinstance(candidate.get("discovery"), dict) else {}
     evidence = discovery.get("evidenceProfile", {}) if isinstance(discovery.get("evidenceProfile"), dict) else {}
     trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
     official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
     reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
     price_basis = candidate_public_price_basis(candidate)
     strength = candidate_discovery_evidence_strength(candidate)
     score = bounded_int(strength.get("score", evidence.get("score", 0)), 0, 100)
@@ -10718,6 +10721,8 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
     reaction_score = bounded_int(reaction.get("score", validation.get("reactionScore", 0)), 0, 100)
     base_reliability = max(
         score,
+        bounded_int(source_reliability.get("score", 0), 0, 100),
+        bounded_int(confidence.get("score", 0), 0, 100),
         90 if official_count > 0 else 0,
         62 if material_news > 0 else 0,
         bounded_int(validation.get("confidenceScore", 0), 0, 100),
@@ -10735,6 +10740,55 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
     )
     price_basis_key = str(price_basis.get("basis") or "")
     usable_price_basis = price_basis_key in {"live", "closed_baseline", "last_good"}
+    price_reaction_component = max(
+        reaction_score,
+        62 if price_basis_key == "live" else 0,
+        55 if price_basis_key == "closed_baseline" else 0,
+        42 if price_basis_key == "last_good" else 0,
+    )
+    market_raw = display_number_to_decimal(
+        score_detail.get("marketEnvironmentScore")
+        or score_detail.get("marketEnvironment")
+        or score_detail.get("market")
+        or candidate.get("marketEnvironmentScore")
+    )
+    if market_raw is None:
+        market_environment_score = 50
+    elif market_raw <= Decimal("15"):
+        market_environment_score = bounded_int(int((market_raw / Decimal("15")) * Decimal("100")), 0, 100)
+    else:
+        market_environment_score = bounded_int(market_raw, 0, 100)
+    raw_risk = display_number_to_decimal(score_detail.get("riskPenalty")) or Decimal("0")
+    risk_penalty = bounded_int(int((raw_risk / Decimal("30")) * Decimal("100")), 0, 100)
+    explicit_risk_flags = candidate_public_risk_flags(candidate)
+    if official.get("riskLevel") == "high":
+        risk_penalty = max(risk_penalty, 80)
+    elif official.get("riskLevel") == "medium":
+        risk_penalty = max(risk_penalty, 55)
+    elif explicit_risk_flags:
+        risk_penalty = max(risk_penalty, 35)
+    weighted_score = bounded_int(
+        round(
+            (
+                bounded_int(base_reliability, 0, 100) * EVIDENCE_SCORING_WEIGHTS["reliability"]
+                + impact_score * EVIDENCE_SCORING_WEIGHTS["impact"]
+                + price_reaction_component * EVIDENCE_SCORING_WEIGHTS["priceReaction"]
+                + market_environment_score * EVIDENCE_SCORING_WEIGHTS["marketEnvironment"]
+                + (100 - risk_penalty) * EVIDENCE_SCORING_WEIGHTS["riskPenalty"]
+            )
+            / 100
+        ),
+        0,
+        100,
+    )
+    if weighted_score >= 75:
+        score_label = "근거 강함"
+    elif weighted_score >= 60:
+        score_label = "검증 중"
+    elif weighted_score >= 45:
+        score_label = "보강 필요"
+    else:
+        score_label = "근거 약함"
     decision_use: list[str] = []
     if official_count > 0:
         decision_use.append(f"공시/IR {official_count}건")
@@ -10772,15 +10826,21 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
     )
     return {
         "score": score,
+        "weightedScore": weighted_score,
+        "label": score_label,
+        "evidenceScore": score,
         "grade": strength.get("grade", evidence.get("grade", "weak")),
         "qualified": bool(strength.get("qualified")),
         "strong": bool(strength.get("strong")),
         "reliabilityScore": bounded_int(base_reliability, 0, 100),
         "impactScore": impact_score,
+        "marketEnvironmentScore": market_environment_score,
+        "riskPenalty": risk_penalty,
         "materialNews": material_news,
         "officialCount": official_count,
         "newsCount": news_count,
         "priceReactionScore": reaction_score,
+        "priceReactionComponent": price_reaction_component,
         "sourceCounts": {
             "news": news_count,
             "materialNews": material_news,
@@ -10791,8 +10851,16 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         "decisionUse": unique_texts(decision_use, limit=6),
         "dataGaps": unique_texts(data_gaps, limit=6),
         "priceBasis": price_basis,
-        "riskFlags": candidate_public_risk_flags(candidate),
+        "riskFlags": explicit_risk_flags,
         "reasons": reasons,
+        "summaryLine": " · ".join(unique_texts([score_label, *decision_use[:3]], limit=4)),
+        "components": {
+            "reliability": bounded_int(base_reliability, 0, 100),
+            "impact": impact_score,
+            "priceReaction": price_reaction_component,
+            "marketEnvironment": market_environment_score,
+            "riskPenalty": risk_penalty,
+        },
         "weights": dict(EVIDENCE_SCORING_WEIGHTS),
     }
 
@@ -10814,8 +10882,8 @@ def enrich_candidate_public_evidence_fields(candidate: dict) -> dict:
     if not isinstance(candidate, dict):
         return candidate
     item = normalize_candidate_live_price_fields(candidate)
-    if not isinstance(item.get("evidenceSummary"), dict):
-        item["evidenceSummary"] = candidate_public_evidence_summary(item)
+    previous_summary = item.get("evidenceSummary", {}) if isinstance(item.get("evidenceSummary"), dict) else {}
+    item["evidenceSummary"] = {**previous_summary, **candidate_public_evidence_summary(item)}
     if not isinstance(item.get("riskFlags"), list):
         item["riskFlags"] = item["evidenceSummary"].get("riskFlags", [])
     if not isinstance(item.get("priceBasis"), dict):
