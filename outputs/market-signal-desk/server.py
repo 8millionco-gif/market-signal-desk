@@ -517,7 +517,7 @@ def db_diag_now() -> str:
 
 
 def set_db_error(error: Exception | str) -> None:
-    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE, DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT
+    global DB_LAST_ERROR, DB_LAST_ERROR_AT, DB_LAST_ERROR_TYPE, DB_LAST_BACKOFF_MESSAGE, DB_LAST_BACKOFF_AT, DB_FAILURE_BACKOFF_UNTIL
     message = str(error)[:240]
     if message.startswith("database temporarily unavailable"):
         DB_LAST_BACKOFF_MESSAGE = message
@@ -528,11 +528,32 @@ def set_db_error(error: Exception | str) -> None:
     if message:
         DB_LAST_ERROR_AT = db_diag_now()
         DB_LAST_ERROR_TYPE = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
+        lower_message = message.lower()
+        error_type = DB_LAST_ERROR_TYPE.lower()
+        connection_failure = (
+            "operationalerror" in error_type
+            or "interfaceerror" in error_type
+            or "connection failed" in lower_message
+            or "connection refused" in lower_message
+            or "server closed the connection" in lower_message
+            or "terminating connection" in lower_message
+            or "connection is closed" in lower_message
+        )
+        if connection_failure:
+            DB_FAILURE_BACKOFF_UNTIL = max(
+                DB_FAILURE_BACKOFF_UNTIL,
+                time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
+            )
+            DB_LAST_BACKOFF_MESSAGE = (
+                f"database operation failed; retry in {SIGNAL_DB_FAILURE_BACKOFF_SECONDS}s"
+            )
+            DB_LAST_BACKOFF_AT = db_diag_now()
     else:
         DB_LAST_ERROR_AT = ""
         DB_LAST_ERROR_TYPE = ""
         DB_LAST_BACKOFF_MESSAGE = ""
         DB_LAST_BACKOFF_AT = ""
+        DB_FAILURE_BACKOFF_UNTIL = 0.0
 
 
 def database_retry_seconds() -> int:
