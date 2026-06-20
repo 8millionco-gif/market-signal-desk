@@ -17055,6 +17055,15 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         recent_runs = recent_scheduler_runs()
         data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent") and news_events.get("persistent"))
         operation_ready = bool(evidence_persistent)
+        display_fallback_ready = bool(analysis_ready and not analysis_persistent)
+        degraded_display_ready = bool(display_fallback_ready and not operation_ready)
+        display_read_mode = (
+            "postgres"
+            if analysis_persistent
+            else "filesystem-fallback"
+            if display_fallback_ready
+            else "empty"
+        )
         if operation_ready:
             message = "Postgres DB에 스냅샷, 후보 풀, Toss 최신값, 뉴스 이벤트를 저장하고 DB 기준으로 읽습니다."
             error = ""
@@ -17078,7 +17087,15 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "analysisPersistent": analysis_persistent,
             "newsReady": news_ready,
             "evidencePersistent": evidence_persistent,
-            "displayFallbackReady": bool(analysis_ready and not analysis_persistent),
+            "displayFallbackReady": display_fallback_ready,
+            "degradedDisplayReady": degraded_display_ready,
+            "lastGoodDisplayReady": bool(operation_ready or display_fallback_ready),
+            "displayReadMode": display_read_mode,
+            "degradedReason": (
+                "DB는 연결됐지만 화면은 아직 파일 스냅샷을 검수용으로 표시합니다."
+                if degraded_display_ready
+                else ""
+            ),
             "dashboardReadMode": "db-snapshot-only" if candidate_data.get("persistent") and market_data.get("persistent") else "fallback",
             "storedCandidateCount": stored_candidate_count,
             "storedPriceCount": stored_price_count,
@@ -17145,6 +17162,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "newsReady": news_ready,
         "evidencePersistent": False,
         "displayFallbackReady": analysis_ready,
+        "degradedDisplayReady": analysis_ready,
+        "lastGoodDisplayReady": analysis_ready,
+        "displayReadMode": "filesystem-fallback" if analysis_ready else "empty",
+        "degradedReason": (
+            "DB 연결 실패로 마지막 파일 스냅샷을 검수용으로 표시합니다."
+            if analysis_ready
+            else "DB 연결 실패로 표시할 최신 스냅샷이 부족합니다."
+        ),
         "dashboardReadMode": "fallback",
         "storedCandidateCount": stored_candidate_count,
         "storedPriceCount": stored_price_count,

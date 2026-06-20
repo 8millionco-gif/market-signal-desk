@@ -3884,6 +3884,8 @@ function renderStorageStatus() {
   const analysisReady = Boolean(status.analysisReady || (Number(candidateData.itemCount ?? 0) > 0 && Number(marketData.itemCount ?? 0) > 0));
   const analysisPersistent = Boolean(status.analysisPersistent || (analysisReady && candidateStorageReady && marketStorageReady));
   const displayFallbackReady = Boolean(status.displayFallbackReady || (analysisReady && !analysisPersistent));
+  const degradedDisplayReady = Boolean(status.degradedDisplayReady || (displayFallbackReady && !analysisPersistent));
+  const lastGoodDisplayReady = Boolean(status.lastGoodDisplayReady || analysisPersistent || degradedDisplayReady);
   const decisionReady = Boolean(operationReady && analysisPersistent);
   const volatileFallback = Boolean(status.volatileFallback || (!operationReady && status.implementation !== "postgres"));
   const modeText = status.implementation === "postgres"
@@ -3891,12 +3893,14 @@ function renderStorageStatus() {
     : volatileFallback
     ? "임시 파일 fallback"
     : status.mode || "-";
-  const persistenceText = decisionReady ? "DB 영구 저장" : displayFallbackReady ? "임시 파일 표시" : "DB 기준 대기";
+  const persistenceText = decisionReady ? "DB 영구 저장" : degradedDisplayReady ? "검수용 스냅샷" : displayFallbackReady ? "임시 파일 표시" : "DB 기준 대기";
   const latestText = status.latestRunCreatedAt
     ? `${status.recentRunCount ?? 0}건 · ${String(status.latestRunCreatedAt).replace("T", " ").slice(5, 16)}`
     : `${status.recentRunCount ?? 0}건`;
   const nextText = decisionReady
     ? "운영 가능"
+    : degradedDisplayReady
+    ? "DB 복구 후 운영 전환"
     : !database.urlConfigured
     ? "DATABASE_URL 연결 필요"
     : database.ready
@@ -3998,13 +4002,16 @@ function renderStorageStatus() {
   };
   const storageWarningText = analysisPersistent
     ? "후보/최신값 DB 기준"
+    : degradedDisplayReady
+    ? `DB 장애 중 · 마지막 스냅샷 표시 · 후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`
     : displayFallbackReady
     ? `임시 표시용 · 후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`
     : `후보 ${candidateData.readSource || "-"} · 최신 ${marketData.readSource || "-"}`;
   const rows = [
+    ["표시 상태", lastGoodDisplayReady, decisionReady ? "실전 DB 표시" : degradedDisplayReady ? "검수용 마지막 스냅샷" : "표시 대기"],
     ["운영 저장소", decisionReady, decisionReady ? "DB 기준" : "DB 기준 미완료"],
     ["분석 저장소", analysisReady, analysisPersistent ? "DB 저장값 확보" : displayFallbackReady ? "임시 저장값만 있음" : "후보/최신값 대기"],
-    ["실전 판단", decisionReady, decisionReady ? "가능" : "DB 기준 전환 전 보류"],
+    ["실전 판단", decisionReady, decisionReady ? "가능" : degradedDisplayReady ? "검수 가능 · 실전 보류" : "DB 기준 전환 전 보류"],
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
@@ -4016,6 +4023,7 @@ function renderStorageStatus() {
     ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],
     ["판단 기준", decisionReady, storageWarningText],
+    ["표시 사유", !degradedDisplayReady, degradedDisplayReady ? shortText(status.degradedReason || "DB 복구 전 파일 스냅샷 표시", 38) : "정상"],
     ["DB 이관", Boolean(migration.done), migrationText],
     ["DB 기록", counts.snapshotCount != null, recordText],
     ["원천 이벤트", Boolean(rawEvents.enabled && Number(rawEvents.count ?? 0) > 0), rawEventText],
