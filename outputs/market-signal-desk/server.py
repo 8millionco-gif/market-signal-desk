@@ -5672,6 +5672,7 @@ def normalize_candidate_live_price_fields(candidate: dict) -> dict:
         live_price["lastPrice"] = raw_price_text
         live_price["price"] = raw_price_text
         live_price["currentPrice"] = raw_price_text
+        item["currentPrice"] = raw_price_text
         if currency:
             display = display_price(raw_price_text, currency)
             item["price"] = display
