@@ -1745,8 +1745,8 @@ function evaluationModeForDisplay(item) {
     display_ready: ["후보 분석 가능", "analysis", "가격과 재료는 확보됐지만 거래 반응 보강 전까지 진입 후보로 올리지 않습니다."],
     collecting_change: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
     change_wait: ["등락률 수집 중", "collecting", "현재가는 있으나 등락률 기준을 서버가 보강 중입니다."],
-    collecting_price: ["가격 수집 중", "collecting", "토스 가격 또는 마감가 기준을 서버가 보강 중입니다."],
-    price_wait: ["가격 수집 중", "collecting", "토스 가격 또는 마감가 기준을 서버가 보강 중입니다."],
+    collecting_price: ["가격 수집 중", "collecting", "토스 가격 또는 장마감 기준가를 서버가 보강 중입니다."],
+    price_wait: ["가격 수집 중", "collecting", "토스 가격 또는 장마감 기준가를 서버가 보강 중입니다."],
     collecting: ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."],
     unavailable: ["평가 불가", "blocked", "필수 데이터가 부족해 현재 후보 평가는 참고용입니다."]
   }[key] || ["서버 수집 중", "collecting", "필수 데이터가 부족해 서버 보강 후 평가합니다."];
@@ -1785,12 +1785,17 @@ function priceFreshnessInfo(item) {
   const freshness = livePrice.freshness ?? {};
   const timestamp = freshness.timestamp || livePrice.timestamp || livePrice.updatedAt || state.livePrice.updatedAt || "";
   const source = livePrice.source || "";
+  const basis = livePrice.basis || item?.priceBasis?.basis || item?.priceBasis?.key || item?.priceReadiness?.key || "";
   const ageMs = timestamp ? Date.now() - Date.parse(timestamp) : NaN;
   const ageSeconds = Number.isFinite(ageMs) ? Math.max(0, Math.round(ageMs / 1000)) : Number(freshness.ageSeconds ?? NaN);
   const freshSeconds = Number(freshness.freshSeconds ?? 30);
   const delayedSeconds = Number(freshness.delayedSeconds ?? 120);
   let status = freshness.status || (source === "toss" ? "unknown" : "snapshot");
-  const serverBaseline = status === "closed-baseline" || Boolean(freshness.isClosedBaseline || freshness.usableForBaseline && freshness.session?.isClosedOrPreopen);
+  const explicitBaseline =
+    basis === "closed_baseline" ||
+    item?.evaluationMode?.key === "closed_baseline" ||
+    item?.finalDecision?.evaluationMode?.key === "closed_baseline";
+  const serverBaseline = status === "closed-baseline" || explicitBaseline || Boolean(freshness.isClosedBaseline || freshness.usableForBaseline && freshness.session?.isClosedOrPreopen);
   const hasDisplayPrice = Boolean(item?.price && item.price !== "-" && !String(item.price).includes("미수신"));
   const hasDisplayChange = parseDisplayPercent(item?.change) != null;
   const closeModeBaseline = state.mode === "close" && hasDisplayPrice && hasDisplayChange && Boolean(freshness.session?.isClosedOrPreopen || status === "snapshot" || source !== "toss");
@@ -1807,7 +1812,7 @@ function priceFreshnessInfo(item) {
   const isSnapshot = status === "snapshot" || source !== "toss";
   const fallbackLabel =
     isFresh ? "실시간" :
-    isBaseline ? "마감가 기준" :
+    isBaseline ? "장마감 기준가" :
     status === "delayed" ? "지연" :
     status === "stale" ? "오래됨" :
     isSnapshot ? "저장값" : "미확인";
@@ -1831,10 +1836,36 @@ function priceFreshnessInfo(item) {
   };
 }
 
+function isClosedBaselineCandidate(item) {
+  const freshness = priceFreshnessInfo(item);
+  const basis = item?.livePrice?.basis || item?.priceBasis?.basis || item?.priceBasis?.key || "";
+  const readiness = item?.priceReadiness ?? {};
+  const evaluation = item?.evaluationMode ?? {};
+  const decisionEvaluation = item?.finalDecision?.evaluationMode ?? {};
+  return Boolean(
+    freshness.isBaseline ||
+    basis === "closed_baseline" ||
+    readiness.key === "closed_baseline" ||
+    evaluation.key === "closed_baseline" ||
+    evaluation.status === "baseline" ||
+    decisionEvaluation.key === "closed_baseline" ||
+    decisionEvaluation.status === "baseline"
+  );
+}
+
+function closedBaselineDecisionLabel(label, fallback = "다음 장 관찰") {
+  const text = String(label ?? "").trim();
+  if (!text) return fallback;
+  if (text.includes("가격 확인") || text.includes("미수신") || text.includes("반응 대기") || text.includes("확인 대기")) {
+    return fallback;
+  }
+  return text;
+}
+
 function livePriceLabel(item) {
   const info = priceFreshnessInfo(item);
   if (info.isFresh) return info.ageText ? `실시간 ${info.ageText}` : "실시간";
-  if (info.isBaseline) return info.ageText ? `마감가 ${info.ageText}` : "마감가 기준";
+  if (info.isBaseline) return info.ageText ? `장마감 ${info.ageText}` : "장마감 기준가";
   if (info.isDelayed) return info.ageText ? `${info.label} ${info.ageText}` : info.label;
   if (info.isSnapshot) return "저장가";
   return "실시간 대기";
@@ -1899,7 +1930,7 @@ function liveDataCoverage(item) {
       label: "가격",
       short: "가",
       tone: priceTone,
-      value: retainedPrice ? "직전가" : freshness.isFresh ? "실시간" : freshness.isBaseline ? "마감가" : freshness.label || "대기",
+      value: retainedPrice ? "직전가" : freshness.isFresh ? "실시간" : freshness.isBaseline ? "장마감" : freshness.label || "대기",
       title: priceMeta(item)
     },
     {
@@ -1963,11 +1994,13 @@ function reactionStageForDisplay(item) {
   const decision = reaction.decision ?? {};
   const metrics = reaction.metrics ?? {};
   const evaluation = evaluationModeForDisplay(item);
+  const freshness = priceFreshnessInfo(item);
+  const closedBaseline = isClosedBaselineCandidate(item);
   const serverCriteria = Array.isArray(reaction.entryCriteria) ? reaction.entryCriteria.filter(Boolean) : [];
   const confirmationCount = Number(metrics.confirmationCount ?? 0);
   const requiredConfirmations = Number(metrics.requiredConfirmations ?? 2);
   const change = parseDisplayPercent(item?.change);
-  const hasLivePrice = priceFreshnessInfo(item).isFresh;
+  const hasLivePrice = freshness.isFresh;
   const hasPositivePrice = change != null && change > 0;
   const hasPrice = Boolean(item?.price && item.price !== "-");
   const hasVolume = metricLooksReady(volumeReactionText(item));
@@ -1975,21 +2008,24 @@ function reactionStageForDisplay(item) {
   const missingFactors = uniqueTexts([...(metrics.missingFactors ?? []), ...(reaction.blockers ?? [])], 4);
   const gate = reaction.reactionGate || "";
 
-  let label = decision.label || reaction.decisionLabel || "가격 확인 필요";
+  let label = decision.label || reaction.decisionLabel || (closedBaseline ? "다음 장 관찰" : "가격 확인 필요");
   let tone = decision.tone || "wait";
   let summary = decision.summary || reaction.nextCheck || "뉴스 재료는 있으나 실시간 가격·거래량이 아직 진입 조건을 통과하지 않았습니다.";
-  const isBaseline = evaluation.status === "baseline";
-  if (evaluation.status === "collecting" || evaluation.status === "blocked") {
+  const isBaseline = closedBaseline || evaluation.status === "baseline";
+  if (isBaseline) {
+    label = closedBaselineDecisionLabel(label);
+    tone = "watch";
+    summary = decision.summary || reaction.nextCheck || evaluation.message || freshness.message || "장마감 기준가로 다음 거래일 우선 관찰 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다.";
+  } else if (evaluation.status === "collecting" || evaluation.status === "blocked") {
     label = evaluation.label;
-    tone = "wait";
-    summary = evaluation.message;
-  } else if (isBaseline) {
-    label = "장마감 기준가";
     tone = "wait";
     summary = evaluation.message;
   }
   if (decision.key && !["collecting", "blocked", "baseline"].includes(evaluation.status)) {
-    if (decision.key === "blocked") tone = "risk";
+    if (isBaseline) {
+      label = closedBaselineDecisionLabel(label);
+      tone = "watch";
+    } else if (decision.key === "blocked") tone = "risk";
     else if (decision.key === "confirmed") tone = "buy";
     else if (decision.key === "watch") tone = "watch";
     else tone = "wait";
@@ -2043,20 +2079,26 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
   const reactionDecision = reaction.decision ?? {};
   const freshness = priceFreshnessInfo(item);
   const evaluation = evaluationModeForDisplay(item);
+  const closedBaseline = isClosedBaselineCandidate(item);
   if (plan.tone === "sell") {
     return { key: "sell", label: "분할매도 점검", detail: plan.summary || "보유 수익을 점검합니다." };
   }
   if (plan.tone === "risk" || decision.actionKey === "exclude" || gate.key === "exclude") {
     return { key: "avoid", label: "오늘 제외", detail: plan.summary || "신규 진입하지 않습니다." };
   }
-  if (reactionDecision.key === "blocked") {
+  if (!closedBaseline && reactionDecision.key === "blocked") {
     return { key: "avoid", label: reactionDecision.action || "오늘 제외", detail: reactionDecision.summary || "가격 반응이 차단되어 신규 진입하지 않습니다." };
   }
-  if (evaluation.status === "collecting" || evaluation.status === "blocked") {
+  if (!closedBaseline && (evaluation.status === "collecting" || evaluation.status === "blocked")) {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
   }
-  if (evaluation.status === "baseline" && !selectedHoldingFor(item)) {
-    return { key: "wait", label: "장마감 기준가", detail: evaluation.message };
+  if (closedBaseline && !selectedHoldingFor(item)) {
+    const label = closedBaselineDecisionLabel(decision.action || reactionDecision.action || reactionDecision.label || reaction.decisionLabel);
+    return {
+      key: "wait",
+      label,
+      detail: decision.summary || reactionDecision.summary || evaluation.message || freshness.message || "장마감 기준가 분석입니다. 다음 장 시작 후 가격·거래량 반응을 확인하세요."
+    };
   }
   if (evaluation.status === "analysis" && decision.actionKey === "verify") {
     return { key: "wait", label: evaluation.label, detail: evaluation.message };
@@ -2421,13 +2463,14 @@ function renderTradeDecisionStatus() {
   const plan = tradePlan(item);
   const stage = reactionStageForDisplay(item);
   const primary = primaryDecisionForDisplay(item, plan);
+  const closedBaseline = isClosedBaselineCandidate(item);
   const currentRow = plan.rows.find(([label]) => label === "관찰 매수")?.[1] ?? "-";
   const holdingRow = plan.holding ? `${plan.holding.judgement ?? "보유"} · ${plan.holding.profitLossRate ?? "-"}` : "미보유";
   const rows = [
     ["선택", true, item.name ?? item.symbol ?? "-"],
     ["뉴스 시그널", Array.isArray(item.sources) && item.sources.length > 0, candidateSignalMeta(item) || "출처 확인 중"],
-    ["가격 반응", stage.tone === "buy", stage.label],
-    ["최종 판단", primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
+    ["가격 반응", closedBaseline || stage.tone === "buy", stage.label],
+    ["최종 판단", closedBaseline || primary.key === "buy" || primary.key === "hold" || primary.key === "sell", primary.label],
     ["관찰 매수", plan.tone === "buy", currentRow],
     ["현재가", plan.hasPrice, `${item.price ?? "-"} ${displayCandidateChangeText(item)}`.trim()],
     ["보유", Boolean(plan.holding), holdingRow]
@@ -3357,7 +3400,7 @@ function renderMetrics() {
       evaluationText
         ? evaluationText
         : entryDataReady || closedBaselineCount || displayDataReady || priceWaitCount || changeWaitCount
-        ? ` · 가격준비 진입 ${entryDataReady} · 마감가 ${closedBaselineCount} · 표시 ${displayDataReady} · 가격대기 ${priceWaitCount} · 등락대기 ${changeWaitCount}`
+        ? ` · 가격준비 진입 ${entryDataReady} · 장마감 ${closedBaselineCount} · 표시 ${displayDataReady} · 가격대기 ${priceWaitCount} · 등락대기 ${changeWaitCount}`
         : "";
     const averageReactionText = averageReaction != null ? ` · 평균 반응 ${averageReaction}/100` : "";
     const portfolioLinked = Number(summary.portfolioLinkedCandidateCount ?? 0);
@@ -4254,16 +4297,26 @@ function tradePlanFromFinalDecision(item, decision, holding = null) {
   const signalCards = Array.isArray(decision.signalCards) ? decision.signalCards : [];
   const rows = Array.isArray(decision.rows) ? decision.rows : [];
   const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+  const closedBaseline = isClosedBaselineCandidate(item);
+  const action = closedBaseline
+    ? closedBaselineDecisionLabel(decision.action)
+    : decision.action || "확인 대기";
+  const summary = closedBaseline
+    ? decision.summary || "장마감 기준가로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
+    : decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.";
+  const displaySignalCards = closedBaseline
+    ? signalCards.map(([label, value]) => [label, label === "현재 판단" ? closedBaselineDecisionLabel(value) : value])
+    : signalCards;
   return {
-    action: decision.action || "확인 대기",
+    action,
     tone: decision.tone || "wait",
-    summary: decision.summary || "가격, 신뢰도, 수급 조건을 추가 확인합니다.",
+    summary,
     holding,
     hasPrice: Boolean(item?.price),
-    signalCards: signalCards.length
-      ? signalCards
+    signalCards: displaySignalCards.length
+      ? displaySignalCards
       : [
-          ["현재 판단", decision.action || "확인 대기"],
+          ["현재 판단", action],
           ["매수 구간", decision.priceLevels?.entryRange || "현재가 확인 후 계산"],
           ["위험 기준", decision.priceLevels?.stopLine ? `${decision.priceLevels.stopLine} 이탈` : "-"]
         ],
@@ -6423,7 +6476,7 @@ function priceMeta(item) {
     const warningText = item.livePrice.baselineWarning
       ? ` · 기준가 차이 확인 필요(${item.livePrice.baselineDifferencePercent ?? ""})`
       : "";
-    const sourceText = freshness.isFresh ? "토스 실시간" : freshness.isBaseline ? "토스 마감가 기준" : `토스 ${freshness.label}`;
+    const sourceText = freshness.isFresh ? "토스 실시간" : freshness.isBaseline ? "토스 장마감 기준가" : `토스 ${freshness.label}`;
     const holdText = freshness.isFresh ? "" : freshness.isBaseline ? " · 개장 후 실시간 반응 확인" : " · 신규 진입 판단 보류";
     return `현재가: ${sourceText}${timestamp}${pollText}${retainedText}${changeText}${warningText}${holdText}${candleText}`;
   }
