@@ -3315,10 +3315,60 @@ def evidence_status() -> dict:
     )
     openai_pending = 0
     stale_prices = bounded_int(market_status.get("stalePriceCount", 0), 0, 10_000_000)
+    persistent = bool(raw_status.get("persistent") or news_status.get("persistent") or market_status.get("persistent"))
+    news_count = bounded_int(by_kind.get("news", 0), 0, 10_000_000)
+    disclosure_count = bounded_int(by_kind.get("disclosure", 0), 0, 10_000_000)
+    price_count = bounded_int(market_status.get("priceCount", 0), 0, 10_000_000)
+    usable_price_count = bounded_int(market_status.get("usablePriceCount", 0), 0, 10_000_000)
+    market_index_count = bounded_int(by_kind.get("market_index", 0), 0, 10_000_000)
+    fx_count = bounded_int(by_kind.get("fx", 0), 0, 10_000_000)
+    chart_count = bounded_int(by_kind.get("chart", 0), 0, 10_000_000)
+    orderbook_count = bounded_int(by_kind.get("orderbook", 0), 0, 10_000_000)
+    trade_count = bounded_int(by_kind.get("trade", 0), 0, 10_000_000)
+    required_kinds = {
+        "news": {"count": news_count, "ready": news_count > 0, "label": "뉴스/트렌드"},
+        "price": {"count": usable_price_count, "ready": usable_price_count > 0, "label": "가격 기준"},
+        "marketContext": {
+            "count": market_index_count + fx_count,
+            "ready": market_index_count > 0 or fx_count > 0,
+            "label": "시장 환경",
+        },
+    }
+    optional_kinds = {
+        "disclosure": {"count": disclosure_count, "ready": disclosure_count > 0, "label": "공시/IR"},
+        "chart": {"count": chart_count, "ready": chart_count > 0, "label": "차트"},
+        "orderbook": {"count": orderbook_count, "ready": orderbook_count > 0, "label": "호가"},
+        "trade": {"count": trade_count, "ready": trade_count > 0, "label": "체결"},
+    }
+    gaps: list[str] = []
+    if not persistent:
+        gaps.append("Postgres 저장소가 아직 evidence 기준 저장소로 고정되지 않음")
+    if news_count <= 0:
+        gaps.append("뉴스/트렌드 근거 없음")
+    if usable_price_count <= 0:
+        gaps.append("판단 가능한 가격 기준 없음")
+    if market_index_count <= 0 and fx_count <= 0:
+        gaps.append("시장 지수/환율 환경 근거 없음")
+    if disclosure_count <= 0:
+        gaps.append("공시/IR 근거 부족")
+    decision_ready = persistent and news_count > 0 and usable_price_count > 0
+    operation_ready = decision_ready and (market_index_count > 0 or fx_count > 0)
+    if operation_ready:
+        next_action = "DB 근거 기반 후보 판단 가능"
+    elif decision_ready:
+        next_action = "시장 환경 근거 보강 후 점수 신뢰도 향상"
+    elif not persistent:
+        next_action = "Postgres 저장 상태 확인"
+    elif usable_price_count <= 0:
+        next_action = "가격 수집 봇 실행 또는 수집 상태 확인"
+    else:
+        next_action = "뉴스/공시 근거 수집 보강"
     return {
         "enabled": True,
-        "implementation": "postgres" if raw_status.get("persistent") or news_status.get("persistent") or market_status.get("persistent") else "filesystem",
-        "persistent": bool(raw_status.get("persistent") or news_status.get("persistent") or market_status.get("persistent")),
+        "implementation": "postgres" if persistent else "filesystem",
+        "persistent": persistent,
+        "operationReady": operation_ready,
+        "decisionReady": decision_ready,
         "totalCount": total_count,
         "byKind": by_kind,
         "latestAt": latest_at,
@@ -3326,14 +3376,36 @@ def evidence_status() -> dict:
         "stalePriceCount": stale_prices,
         "priceCoverage": market_status.get("priceCoverage"),
         "basisCounts": market_status.get("basisCounts", {}),
+        "basisCoverage": market_status.get("basisCoverage", {}),
+        "requiredKinds": required_kinds,
+        "optionalKinds": optional_kinds,
+        "readiness": {
+            "operationReady": operation_ready,
+            "decisionReady": decision_ready,
+            "persistentStorageReady": persistent,
+            "priceReady": usable_price_count > 0,
+            "newsReady": news_count > 0,
+            "marketContextReady": market_index_count > 0 or fx_count > 0,
+            "officialReady": disclosure_count > 0,
+            "depthReady": chart_count > 0 or orderbook_count > 0 or trade_count > 0,
+            "gaps": gaps,
+            "nextAction": next_action,
+        },
         "rawEvents": raw_status,
         "newsEvents": news_status,
         "marketData": {
             "readSource": market_status.get("readSource"),
             "itemCount": market_status.get("itemCount", 0),
             "priceCount": market_status.get("priceCount", 0),
+            "usablePriceCount": usable_price_count,
+            "stalePriceCount": stale_prices,
             "latestAt": market_status.get("latestAt", ""),
             "latestPriceAt": market_status.get("latestPriceAt", ""),
+        },
+        "openAi": {
+            "role": "뉴스/공시 관련성 검증, 리스크 추출, 판단 근거 요약",
+            "pendingCount": openai_pending,
+            "decisionAuthority": "rules_and_market_reaction",
         },
         "pipeline": [
             "collect_evidence",
@@ -3345,6 +3417,7 @@ def evidence_status() -> dict:
         ],
         "scoringWeights": dict(EVIDENCE_SCORING_WEIGHTS),
         "message": "뉴스·공시·가격·시장 근거를 DB 기준 evidence 상태로 집계합니다.",
+        "nextAction": next_action,
     }
 
 
@@ -10447,10 +10520,17 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
     official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
     validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else {}
     reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    price_basis = candidate_public_price_basis(candidate)
     strength = candidate_discovery_evidence_strength(candidate)
     score = bounded_int(strength.get("score", evidence.get("score", 0)), 0, 100)
     official_count = bounded_int(strength.get("officialCount", official.get("count", 0)), 0, 100)
     material_news = bounded_int(strength.get("materialNews", trend.get("materialNewsCount", 0)), 0, 1_000)
+    news_count = bounded_int(
+        trend.get("newsCount", trend.get("totalNewsCount", trend.get("count", material_news))),
+        0,
+        10_000,
+    )
+    reaction_score = bounded_int(reaction.get("score", validation.get("reactionScore", 0)), 0, 100)
     base_reliability = max(
         score,
         90 if official_count > 0 else 0,
@@ -10468,6 +10548,34 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         0,
         100,
     )
+    price_basis_key = str(price_basis.get("basis") or "")
+    usable_price_basis = price_basis_key in {"live", "closed_baseline", "last_good"}
+    decision_use: list[str] = []
+    if official_count > 0:
+        decision_use.append(f"공시/IR {official_count}건")
+    if material_news > 0:
+        decision_use.append(f"재료성 뉴스 {material_news}건")
+    elif news_count > 0:
+        decision_use.append(f"뉴스 {news_count}건")
+    if usable_price_basis:
+        decision_use.append(str(price_basis.get("label") or "가격 기준"))
+    if reaction_score > 0:
+        decision_use.append(f"가격 반응 {reaction_score}/100")
+    if validation.get("confidenceScore") is not None:
+        decision_use.append(f"데이터 신뢰도 {bounded_int(validation.get('confidenceScore', 0), 0, 100)}/100")
+    data_gaps: list[str] = []
+    if material_news <= 0 and news_count <= 0:
+        data_gaps.append("뉴스/트렌드 근거 부족")
+    elif material_news <= 0:
+        data_gaps.append("단순 뉴스와 재료성 뉴스 분리 필요")
+    if official_count <= 0:
+        data_gaps.append("공시/IR 근거 없음")
+    if not usable_price_basis:
+        data_gaps.append("가격 기준 데이터 보강 필요")
+    elif price_basis_key == "last_good":
+        data_gaps.append("실시간 가격 재확인 필요")
+    if reaction_score < 50:
+        data_gaps.append("가격·거래량 반응 보강 필요")
     reasons = unique_texts(
         [
             *text_list(evidence.get("reasons", []), limit=4),
@@ -10486,7 +10594,18 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         "impactScore": impact_score,
         "materialNews": material_news,
         "officialCount": official_count,
-        "priceReactionScore": bounded_int(reaction.get("score", validation.get("reactionScore", 0)), 0, 100),
+        "newsCount": news_count,
+        "priceReactionScore": reaction_score,
+        "sourceCounts": {
+            "news": news_count,
+            "materialNews": material_news,
+            "official": official_count,
+            "priceBasis": 1 if usable_price_basis else 0,
+            "priceReaction": 1 if reaction_score > 0 else 0,
+        },
+        "decisionUse": unique_texts(decision_use, limit=6),
+        "dataGaps": unique_texts(data_gaps, limit=6),
+        "priceBasis": price_basis,
         "riskFlags": candidate_public_risk_flags(candidate),
         "reasons": reasons,
         "weights": dict(EVIDENCE_SCORING_WEIGHTS),
