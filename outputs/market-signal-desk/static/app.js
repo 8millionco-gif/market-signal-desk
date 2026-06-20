@@ -3892,6 +3892,7 @@ function renderStorageStatus() {
   const status = state.storageStatus;
   if (!status) return;
   const database = status.database ?? {};
+  const connectivity = database.connectivity ?? {};
   const databaseUrl = database.url ?? {};
   const migration = database.migration ?? {};
   const counts = database.counts ?? {};
@@ -3932,6 +3933,20 @@ function renderStorageStatus() {
       ? "Postgres 준비"
       : shortText(database.error || "DB 연결 확인", 28)
     : "미연결";
+  const dbConnectionText = database.urlConfigured
+    ? database.connectionReady || connectivity.ready
+      ? "연결 가능"
+      : connectivity.connectionRefused
+      ? "연결 거부"
+      : connectivity.connectionFailure
+      ? "연결 실패"
+      : database.backoffActive
+      ? "재시도 대기"
+      : "확인 필요"
+    : "미설정";
+  const dbActionText = connectivity.needsServiceRestart
+    ? "DB Available 확인 후 Web 재시작"
+    : database.nextAction || nextText;
   const dbHostText = databaseUrl.configured
     ? `${databaseUrl.hostKind || "unknown"}${databaseUrl.host ? ` · ${databaseUrl.host}` : ""}`
     : "DATABASE_URL 미설정";
@@ -4058,10 +4073,12 @@ function renderStorageStatus() {
     ["저장 방식", Boolean(status.mode || status.implementation), modeText],
     ["쓰기 가능", Boolean(status.writable), status.writable ? "가능" : shortText(status.error || "확인 필요", 28)],
     ["DB 상태", Boolean(database.ready), dbText],
-    ["DB URL", Boolean(database.urlConfigured && !databaseUrl.internalRecommended), dbHostText],
+    ["DB 연결", Boolean(database.connectionReady || connectivity.ready), dbConnectionText],
+    ["DB URL", Boolean(database.urlConfigured && databaseUrl.recommendedForRenderWebService), dbHostText],
     ["스키마", Boolean(database.schemaReady), dbSchemaText],
     ["재시도", Boolean(database.ready || Number(database.nextRetrySeconds ?? 0) === 0), dbRetryText],
     ["DB 오류", Boolean(database.ready || !database.lastError), dbLastErrorText],
+    ["DB 조치", Boolean(database.ready), shortText(dbActionText, 42)],
     ["후보 기준", candidateStorageReady, storageBasisText(candidateData)],
     ["최신값 기준", marketStorageReady, storageBasisText(marketData)],
     ["저장 위험", !volatileFallback, volatileFallback ? "배포/재시작 시 유실 가능" : "낮음"],

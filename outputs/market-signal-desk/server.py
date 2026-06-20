@@ -62,7 +62,12 @@ SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
 )
 SIGNAL_DB_TRANSIENT_GRACE_SECONDS = max(30, int(os.getenv("SIGNAL_DB_TRANSIENT_GRACE_SECONDS", "180") or "180"))
 SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_DB_CONNECTION_TTL_SECONDS = max(10, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "45") or "45"))
+SIGNAL_DB_CONNECTION_TTL_SECONDS = max(30, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "180") or "180"))
+SIGNAL_DB_APPLICATION_NAME = os.getenv("SIGNAL_DB_APPLICATION_NAME", "market_signal_desk").strip() or "market_signal_desk"
+SIGNAL_DB_KEEPALIVES = os.getenv("SIGNAL_DB_KEEPALIVES", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DB_KEEPALIVES_IDLE_SECONDS = max(10, int(os.getenv("SIGNAL_DB_KEEPALIVES_IDLE_SECONDS", "30") or "30"))
+SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS = max(5, int(os.getenv("SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS", "10") or "10"))
+SIGNAL_DB_KEEPALIVES_COUNT = max(1, int(os.getenv("SIGNAL_DB_KEEPALIVES_COUNT", "3") or "3"))
 SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRATE", "0").lower() not in {"0", "false", "no", "off"}
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
@@ -680,6 +685,8 @@ def database_url_diagnostics() -> dict:
             "database": "",
             "usernameConfigured": False,
             "passwordConfigured": False,
+            "usingInternalUrl": False,
+            "recommendedForRenderWebService": False,
             "internalRecommended": True,
             "message": "Render Web Service 환경변수에 Postgres Internal Database URL을 연결하세요.",
         }
@@ -694,6 +701,8 @@ def database_url_diagnostics() -> dict:
             "database": "",
             "usernameConfigured": False,
             "passwordConfigured": False,
+            "usingInternalUrl": False,
+            "recommendedForRenderWebService": False,
             "internalRecommended": True,
             "message": "DATABASE_URL 형식을 확인하세요.",
         }
@@ -720,6 +729,8 @@ def database_url_diagnostics() -> dict:
         "database": parsed.path.lstrip("/")[:48],
         "usernameConfigured": bool(parsed.username),
         "passwordConfigured": bool(parsed.password),
+        "usingInternalUrl": host_kind == "render-internal",
+        "recommendedForRenderWebService": host_kind == "render-internal",
         "internalRecommended": host_kind != "render-internal",
         "message": message,
     }
@@ -741,9 +752,20 @@ def db_connect_with_retry():
     for attempt in range(SIGNAL_DB_CONNECT_RETRIES):
         try:
             psycopg, Jsonb = psycopg_modules()
+            connect_kwargs = {
+                "connect_timeout": SIGNAL_DB_CONNECT_TIMEOUT_SECONDS,
+                "application_name": SIGNAL_DB_APPLICATION_NAME,
+            }
+            if SIGNAL_DB_KEEPALIVES:
+                connect_kwargs.update({
+                    "keepalives": 1,
+                    "keepalives_idle": SIGNAL_DB_KEEPALIVES_IDLE_SECONDS,
+                    "keepalives_interval": SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS,
+                    "keepalives_count": SIGNAL_DB_KEEPALIVES_COUNT,
+                })
             conn = psycopg.connect(
                 DATABASE_URL,
-                connect_timeout=SIGNAL_DB_CONNECT_TIMEOUT_SECONDS,
+                **connect_kwargs,
             )
             DB_FAILURE_BACKOFF_UNTIL = 0.0
             DB_LAST_SUCCESS_AT = db_diag_now()
@@ -804,6 +826,11 @@ def db_connection_reuse_status() -> dict:
     return {
         "enabled": SIGNAL_DB_REUSE_CONNECTION,
         "ttlSeconds": SIGNAL_DB_CONNECTION_TTL_SECONDS,
+        "applicationName": SIGNAL_DB_APPLICATION_NAME,
+        "keepalives": SIGNAL_DB_KEEPALIVES,
+        "keepaliveIdleSeconds": SIGNAL_DB_KEEPALIVES_IDLE_SECONDS if SIGNAL_DB_KEEPALIVES else 0,
+        "keepaliveIntervalSeconds": SIGNAL_DB_KEEPALIVES_INTERVAL_SECONDS if SIGNAL_DB_KEEPALIVES else 0,
+        "keepaliveCount": SIGNAL_DB_KEEPALIVES_COUNT if SIGNAL_DB_KEEPALIVES else 0,
         "staleBackoffSeconds": SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS,
         "hasConnection": DB_SHARED_CONNECTION is not None and not db_connection_closed(DB_SHARED_CONNECTION),
         "ageSeconds": age_seconds,
@@ -3735,6 +3762,10 @@ def database_status(fast: bool = False) -> dict:
     requested = database_storage_requested()
     transient_degraded = bool(enabled and not ready and database_transient_degraded())
     operational_ready = bool(ready or transient_degraded)
+    retry_seconds = database_retry_seconds()
+    url_info = database_url_diagnostics()
+    active_error = DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE
+    active_classification = db_error_classification(active_error)
     if ready:
         maybe_migrate_files_to_database_once()
         migration_done_after_check = bool(DB_MIGRATION_STATUS.get("done"))
@@ -3751,16 +3782,21 @@ def database_status(fast: bool = False) -> dict:
         message = "Postgres 스키마는 준비됐지만 최근 DB 작업 실패로 잠시 재시도 대기 중입니다."
         next_action = "재시도 대기 후 상태 새로고침"
     elif DATABASE_URL:
-        message = "DATABASE_URL은 설정되어 있으나 DB 연결 또는 스키마 확인에 실패했습니다."
-        next_action = "DB 연결 오류 확인"
+        if active_classification.get("connectionRefused"):
+            message = "DATABASE_URL은 설정됐지만 Render Postgres TCP 연결이 거부되었습니다."
+            next_action = "DB가 Available인지 확인하고 Web Service 재시작 또는 재배포"
+        elif url_info.get("configured") and not url_info.get("recommendedForRenderWebService"):
+            message = "DATABASE_URL은 설정되어 있으나 Render Web Service용 Internal URL인지 확인이 필요합니다."
+            next_action = "Internal Database URL과 같은 리전/프로젝트 연결 확인"
+        else:
+            message = "DATABASE_URL은 설정되어 있으나 DB 연결 또는 스키마 확인에 실패했습니다."
+            next_action = "DB 연결 오류 확인"
     elif requested:
         message = "DATABASE_URL이 없어 서버 수집 데이터가 임시 파일 저장소로 대체됩니다."
         next_action = "Postgres DATABASE_URL 연결"
     else:
         message = "DB 저장소가 비활성화되어 파일 저장소를 사용합니다."
         next_action = "운영 전 DB 저장소 검토"
-    retry_seconds = database_retry_seconds()
-    url_info = database_url_diagnostics()
     migration_ran = bool(DB_MIGRATION_STATUS.get("ran"))
     migration_done = bool(DB_MIGRATION_STATUS.get("done"))
     return {
@@ -3793,7 +3829,7 @@ def database_status(fast: bool = False) -> dict:
         "lastErrorClassification": (
             {"connectionFailure": False, "staleConnection": False, "connectionRefused": False}
             if ready and not transient_degraded
-            else db_error_classification(DB_LAST_ERROR or DB_LAST_BACKOFF_MESSAGE)
+            else active_classification
         ),
         "lastBackoffMessage": DB_LAST_BACKOFF_MESSAGE if transient_degraded else ("" if ready else DB_LAST_BACKOFF_MESSAGE),
         "lastBackoffAt": DB_LAST_BACKOFF_AT if transient_degraded else ("" if ready else DB_LAST_BACKOFF_AT),
@@ -3803,6 +3839,22 @@ def database_status(fast: bool = False) -> dict:
         "nextRetrySeconds": retry_seconds,
         "backoffActive": retry_seconds > 0,
         "connectionReuse": db_connection_reuse_status(),
+        "connectivity": {
+            "ready": ready,
+            "operationalReady": operational_ready,
+            "connectionRefused": bool(active_classification.get("connectionRefused")),
+            "connectionFailure": bool(active_classification.get("connectionFailure")),
+            "staleConnection": bool(active_classification.get("staleConnection")),
+            "usingInternalUrl": url_info.get("hostKind") == "render-internal",
+            "recommendedForRenderWebService": bool(url_info.get("recommendedForRenderWebService")),
+            "retrySeconds": retry_seconds,
+            "needsServiceRestart": bool(active_classification.get("connectionRefused") and retry_seconds > 0),
+            "message": (
+                "DB가 연결되지 않으면 서버는 파일 fallback을 사용하므로 실전 운영 기준이 아닙니다."
+                if not operational_ready
+                else "Postgres 기준 저장소를 사용할 수 있습니다."
+            ),
+        },
         "connectionBackoff": {
             "operationSeconds": SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
             "refusedSeconds": SIGNAL_DB_REFUSED_BACKOFF_SECONDS,
