@@ -6466,14 +6466,17 @@ def candidate_has_usable_price_basis(candidate: dict) -> bool:
     freshness = live_price.get("freshness") if isinstance(live_price.get("freshness"), dict) else live_price_freshness(live_price, market=str(candidate.get("market", "")))
     if not candidate_has_stored_price_value(candidate):
         return False
-    if str(live_price.get("source", "")) == "toss":
-        return bool(
-            freshness.get("usableForBaseline")
-            or freshness.get("usableForReaction")
-            or str(freshness.get("status", "")) == "closed-baseline"
-            or str(freshness.get("status", "")) == "last-good"
-        )
-    return True
+    status = str(freshness.get("status", "")).strip()
+    basis = normalize_price_basis(
+        live_price.get("basis") or freshness.get("basis"),
+        str(candidate.get("market", "")),
+        bool(live_price.get("retainedOnFailure") or live_price.get("retained")),
+    )
+    if status == "live" and basis == "live":
+        return True
+    if status == "closed-baseline" and basis == "closed_baseline":
+        return True
+    return False
 
 
 def live_price_freshness_counts(candidates: list[dict]) -> dict:
@@ -11426,6 +11429,8 @@ def candidate_public_price_basis(candidate: dict) -> dict:
             "lastGoodAt": live_price.get("lastGoodAt") or "",
             "stale": True,
             "usable": False,
+            "displayUsable": False,
+            "decisionUsable": False,
             "missingFields": unique_texts([*missing_fields, "price"], limit=8),
             "message": "DB에 저장된 가격 기준이 없어 진입 후보가 아니라 데이터 보강 대상으로 분리합니다.",
         }
@@ -11465,6 +11470,8 @@ def candidate_public_price_basis(candidate: dict) -> dict:
             or freshness.get("message")
             or "서버가 저장한 실시간 가격 기준입니다."
         )
+    display_usable = basis in {"live", "closed_baseline", "last_good"} and has_price
+    decision_usable = basis in {"live", "closed_baseline"} and not stale and has_price
     return {
         "basis": basis,
         "label": label_map.get(basis, "데이터 보강 대기"),
@@ -11472,7 +11479,9 @@ def candidate_public_price_basis(candidate: dict) -> dict:
         "updatedAt": live_price.get("updatedAt") or live_price.get("timestamp") or "",
         "lastGoodAt": live_price.get("lastGoodAt") or live_price.get("updatedAt") or "",
         "stale": stale,
-        "usable": basis in {"live", "closed_baseline", "last_good"},
+        "usable": decision_usable,
+        "displayUsable": display_usable,
+        "decisionUsable": decision_usable,
         "retainedOnFailure": retained,
         "missingFields": unique_texts(missing_fields, limit=8),
         "message": message,
@@ -11520,13 +11529,12 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         100,
     )
     price_basis_key = str(price_basis.get("basis") or "")
-    usable_price_basis = bool(price_basis.get("usable")) and price_basis_key in {"live", "closed_baseline", "last_good"}
+    usable_price_basis = bool(price_basis.get("decisionUsable", price_basis.get("usable"))) and price_basis_key in {"live", "closed_baseline"}
     price_reaction_component = (
         max(
             reaction_score,
             62 if price_basis_key == "live" else 0,
             55 if price_basis_key == "closed_baseline" else 0,
-            42 if price_basis_key == "last_good" else 0,
         )
         if usable_price_basis
         else 0
@@ -11594,10 +11602,10 @@ def candidate_public_evidence_summary(candidate: dict) -> dict:
         data_gaps.append("단순 뉴스와 재료성 뉴스 분리 필요")
     if official_count <= 0:
         data_gaps.append("공시/IR 근거 없음")
-    if not usable_price_basis:
-        data_gaps.append("가격 기준 데이터 보강 필요")
-    elif price_basis_key == "last_good":
+    if price_basis_key == "last_good":
         data_gaps.append("실시간 가격 재확인 필요")
+    elif not usable_price_basis:
+        data_gaps.append("가격 기준 데이터 보강 필요")
     if reaction_score < 50:
         data_gaps.append("가격·거래량 반응 보강 필요")
     reasons = unique_texts(
