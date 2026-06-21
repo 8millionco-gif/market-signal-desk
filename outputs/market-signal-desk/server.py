@@ -65,7 +65,7 @@ SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
     0,
     int(os.getenv("SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS", "2") or "2"),
 )
-SIGNAL_DB_TRANSIENT_GRACE_SECONDS = max(30, int(os.getenv("SIGNAL_DB_TRANSIENT_GRACE_SECONDS", "180") or "180"))
+SIGNAL_DB_TRANSIENT_GRACE_SECONDS = max(30, int(os.getenv("SIGNAL_DB_TRANSIENT_GRACE_SECONDS", "900") or "900"))
 SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_CONNECTION_TTL_SECONDS = max(30, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "180") or "180"))
 SIGNAL_DB_APPLICATION_NAME = os.getenv("SIGNAL_DB_APPLICATION_NAME", "market_signal_desk").strip() or "market_signal_desk"
@@ -77,9 +77,9 @@ SIGNAL_STORAGE_STATUS_AUTO_MIGRATE = os.getenv("SIGNAL_STORAGE_STATUS_AUTO_MIGRA
 SIGNAL_STORAGE_STATUS_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_STORAGE_STATUS_CACHE_SECONDS", "30") or "30"))
 SIGNAL_STORAGE_STATUS_DEGRADED_CACHE_SECONDS = max(
     1,
-    int(os.getenv("SIGNAL_STORAGE_STATUS_DEGRADED_CACHE_SECONDS", "5") or "5"),
+    int(os.getenv("SIGNAL_STORAGE_STATUS_DEGRADED_CACHE_SECONDS", "20") or "20"),
 )
-SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "8") or "8"))
+SIGNAL_DB_KV_READ_CACHE_SECONDS = max(0, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_SECONDS", "180") or "180"))
 SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS = max(16, int(os.getenv("SIGNAL_DB_KV_READ_CACHE_MAX_ITEMS", "256") or "256"))
 SIGNAL_DB_MIGRATE_RUN_LIMIT = int(os.getenv("SIGNAL_DB_MIGRATE_RUN_LIMIT", "200"))
 SIGNAL_DB_MIGRATION_RETRY_SECONDS = max(5, int(os.getenv("SIGNAL_DB_MIGRATION_RETRY_SECONDS", "45") or "45"))
@@ -693,11 +693,16 @@ def database_recent_success_age_seconds() -> int | None:
     return db_diag_age_seconds(DB_LAST_SUCCESS_AT)
 
 
+def database_effective_transient_grace_seconds() -> int:
+    collector_close_seconds = int(globals().get("SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS", 600) or 600)
+    return max(SIGNAL_DB_TRANSIENT_GRACE_SECONDS, collector_close_seconds + 300)
+
+
 def database_recently_succeeded(max_age_seconds: int | None = None) -> bool:
     age_seconds = database_recent_success_age_seconds()
     if age_seconds is None:
         return False
-    limit = SIGNAL_DB_TRANSIENT_GRACE_SECONDS if max_age_seconds is None else max_age_seconds
+    limit = database_effective_transient_grace_seconds() if max_age_seconds is None else max_age_seconds
     return age_seconds <= max(1, int(limit))
 
 
@@ -2655,14 +2660,17 @@ def market_data_latest_status(fast: bool = False) -> dict:
     preloaded_db_payload: object = DB_PAYLOAD_UNSET
     preloaded_database_ready: bool | None = None
     if fast and database_storage_enabled():
-        if database_fast_read_allowed():
-            payloads = db_read_kv_many_fast([MARKET_DATA_LATEST_KV_KEY])
-            preloaded_db_payload = payloads.get(MARKET_DATA_LATEST_KV_KEY)
-            preloaded_database_ready = bool(DB_LAST_ERROR == "" or isinstance(preloaded_db_payload, dict))
-            data = preloaded_db_payload if isinstance(preloaded_db_payload, dict) else None
-        else:
-            preloaded_database_ready = False
-            data = None
+        payloads = db_read_kv_many_fast([MARKET_DATA_LATEST_KV_KEY])
+        preloaded_db_payload = payloads.get(MARKET_DATA_LATEST_KV_KEY, DB_PAYLOAD_UNSET)
+        has_preloaded_db_payload = isinstance(preloaded_db_payload, dict)
+        preloaded_database_ready = bool(
+            database_fast_read_allowed()
+            or has_preloaded_db_payload
+            or database_transient_degraded()
+        )
+        data = preloaded_db_payload if has_preloaded_db_payload else None
+        if preloaded_db_payload is DB_PAYLOAD_UNSET:
+            preloaded_db_payload = None
         if not isinstance(data, dict):
             data = safe_read_json_file(MARKET_DATA_LATEST_FILE) or market_data_latest_empty()
         if not isinstance(data, dict):
@@ -4208,8 +4216,9 @@ def database_status(fast: bool = False) -> dict:
     transient_degraded = bool(enabled and schema_ready and not connection_ready and database_transient_degraded())
     recent_success_age_seconds = database_recent_success_age_seconds()
     recent_success_ready = database_recently_succeeded()
+    recent_success_grace_seconds = database_effective_transient_grace_seconds()
     recent_success_remaining_seconds = (
-        max(0, SIGNAL_DB_TRANSIENT_GRACE_SECONDS - recent_success_age_seconds)
+        max(0, recent_success_grace_seconds - recent_success_age_seconds)
         if recent_success_age_seconds is not None
         else 0
     )
@@ -4290,7 +4299,7 @@ def database_status(fast: bool = False) -> dict:
         "lastSuccessfulConnectAt": DB_LAST_SUCCESS_AT,
         "lastSuccessfulAgeSeconds": recent_success_age_seconds,
         "recentSuccessReady": recent_success_ready,
-        "recentSuccessGraceSeconds": SIGNAL_DB_TRANSIENT_GRACE_SECONDS,
+        "recentSuccessGraceSeconds": recent_success_grace_seconds,
         "recentSuccessRemainingSeconds": recent_success_remaining_seconds,
         "nextRetrySeconds": retry_seconds,
         "backoffActive": backoff_active,
@@ -8313,14 +8322,17 @@ def candidate_data_snapshot_status(fast: bool = False) -> dict:
     preloaded_db_payload: object = DB_PAYLOAD_UNSET
     preloaded_database_ready: bool | None = None
     if fast and database_storage_enabled():
-        if database_fast_read_allowed():
-            payloads = db_read_kv_many_fast([CANDIDATE_DATA_KV_KEY])
-            preloaded_db_payload = payloads.get(CANDIDATE_DATA_KV_KEY)
-            preloaded_database_ready = bool(DB_LAST_ERROR == "" or isinstance(preloaded_db_payload, dict))
-            data = preloaded_db_payload if isinstance(preloaded_db_payload, dict) else None
-        else:
-            preloaded_database_ready = False
-            data = None
+        payloads = db_read_kv_many_fast([CANDIDATE_DATA_KV_KEY])
+        preloaded_db_payload = payloads.get(CANDIDATE_DATA_KV_KEY, DB_PAYLOAD_UNSET)
+        has_preloaded_db_payload = isinstance(preloaded_db_payload, dict)
+        preloaded_database_ready = bool(
+            database_fast_read_allowed()
+            or has_preloaded_db_payload
+            or database_transient_degraded()
+        )
+        data = preloaded_db_payload if has_preloaded_db_payload else None
+        if preloaded_db_payload is DB_PAYLOAD_UNSET:
+            preloaded_db_payload = None
         if not isinstance(data, dict):
             data = safe_read_json_file(CANDIDATE_DATA_FILE) or candidate_data_snapshot_empty()
         if not isinstance(data, dict):
