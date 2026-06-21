@@ -291,10 +291,42 @@ function displayChangeText(change) {
 
 function displayIndexDetailValue(detail) {
   if (!detail || typeof detail !== "object") return "";
-  const keys = ["value", "display", "price", "close", "last", "current", "level", "indexValue"];
+  const placeholderMarkers = [
+    "값 대기",
+    "저장값 대기",
+    "대기",
+    "수집",
+    "대체",
+    "sample",
+    "pending",
+    "wait",
+    "fallback",
+    "unavailable",
+    "unknown",
+    "none",
+    "null"
+  ];
+  const keys = [
+    "value",
+    "display",
+    "price",
+    "close",
+    "last",
+    "current",
+    "level",
+    "indexValue",
+    "closePrice",
+    "lastPrice",
+    "currentPrice",
+    "regularMarketPrice",
+    "tradePrice"
+  ];
   for (const key of keys) {
     const value = String(detail[key] ?? "").trim();
-    if (value && value !== "-") return value;
+    const normalized = value.toLowerCase();
+    if (!value || value === "-") continue;
+    if (placeholderMarkers.some((marker) => normalized.includes(marker))) continue;
+    if (/\d/.test(value)) return value;
   }
   return "";
 }
@@ -4436,7 +4468,8 @@ function renderNotificationStatus() {
 function marketIndexDisplay(market, key) {
   const detail = market?.indexDetails?.[key] ?? {};
   const change = displayChangeText(detail.change || market?.[key] || "-");
-  const value = displayIndexDetailValue(detail);
+  const directValue = String(market?.[`${key}Value`] ?? "").trim();
+  const value = displayIndexDetailValue(detail) || (directValue && directValue !== "-" ? directValue : "");
   const hasStoredIndex = Number(market?.indexSource?.count ?? 0) > 0;
   return {
     value: value || (hasStoredIndex ? "저장값 대기" : "-"),

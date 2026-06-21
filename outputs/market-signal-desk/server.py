@@ -3138,6 +3138,108 @@ def market_data_record_payload_row(record: dict) -> dict:
     return row
 
 
+MARKET_DATA_IDENTITY_KEYS = (
+    "symbol",
+    "ticker",
+    "code",
+    "stockCode",
+    "stock_code",
+    "isuSrtCd",
+    "itemCode",
+    "shortCode",
+    "localCode",
+    "reutersCode",
+    "ric",
+)
+
+
+def market_identity_aliases_from_value(value: object) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    candidates = {text.upper()}
+    stripped = re.sub(r"^(KRX|KOSPI|KOSDAQ|NASDAQ|NYSE|AMEX|TOSS)[:./_-]+", "", text, flags=re.IGNORECASE)
+    if stripped:
+        candidates.add(stripped.upper())
+    compact_values = set()
+    for item in list(candidates):
+        compact = re.sub(r"[^A-Z0-9]", "", item.upper())
+        if compact:
+            compact_values.add(compact)
+            if re.fullmatch(r"\d{6}", compact):
+                compact_values.add(f"A{compact}")
+            if re.fullmatch(r"A\d{6}", compact):
+                compact_values.add(compact[1:])
+    candidates.update(compact_values)
+    return {item for item in candidates if item}
+
+
+def collect_market_identity_aliases_from_dict(value: object) -> set[str]:
+    aliases: set[str] = set()
+    if not isinstance(value, dict):
+        return aliases
+    for key in MARKET_DATA_IDENTITY_KEYS:
+        aliases.update(market_identity_aliases_from_value(value.get(key)))
+    for nested_key in ("metadata", "livePrice", "candidatePool", "search", "marketDataLatest"):
+        nested = value.get(nested_key)
+        if isinstance(nested, dict):
+            aliases.update(collect_market_identity_aliases_from_dict(nested))
+    row = market_data_record_payload_row(value)
+    if row and row is not value:
+        aliases.update(collect_market_identity_aliases_from_dict(row))
+    payload = value.get("payload", {}) if isinstance(value.get("payload"), dict) else {}
+    if payload and payload is not value:
+        aliases.update(collect_market_identity_aliases_from_dict(payload))
+    query = str(value.get("query") or "").strip()
+    if query and len(query) <= 24:
+        aliases.update(market_identity_aliases_from_value(query))
+    return aliases
+
+
+def market_data_record_aliases(symbol: str, record: dict) -> set[str]:
+    aliases = set()
+    aliases.update(market_identity_aliases_from_value(symbol))
+    aliases.update(collect_market_identity_aliases_from_dict(record))
+    row = market_data_record_payload_row(record)
+    aliases.update(collect_market_identity_aliases_from_dict(row))
+    return aliases
+
+
+def candidate_market_data_aliases(candidate: dict) -> set[str]:
+    aliases = collect_market_identity_aliases_from_dict(candidate)
+    aliases.update(market_identity_aliases_from_value(candidate.get("symbol")))
+    aliases.update(market_identity_aliases_from_value(candidate.get("code")))
+    aliases.update(market_identity_aliases_from_value(candidate.get("ticker")))
+    return aliases
+
+
+def market_data_record_alias_lookup(records: dict[str, dict]) -> dict[str, dict]:
+    lookup: dict[str, dict] = {}
+    timestamps: dict[str, str] = {}
+    if not isinstance(records, dict):
+        return lookup
+    for symbol, record in records.items():
+        if not isinstance(record, dict):
+            continue
+        timestamp = market_data_record_timestamp(record)
+        for alias in market_data_record_aliases(symbol, record):
+            previous_timestamp = timestamps.get(alias, "")
+            if alias not in lookup or timestamp_is_newer(timestamp, previous_timestamp):
+                lookup[alias] = record
+                timestamps[alias] = timestamp
+    return lookup
+
+
+def market_data_record_for_candidate(records_or_lookup: dict[str, dict], candidate: dict) -> dict | None:
+    if not isinstance(records_or_lookup, dict) or not isinstance(candidate, dict):
+        return None
+    for alias in candidate_market_data_aliases(candidate):
+        record = records_or_lookup.get(alias)
+        if isinstance(record, dict):
+            return record
+    return None
+
+
 def market_data_record_timestamp(record: dict) -> str:
     row = market_data_record_payload_row(record)
     return str(
@@ -3255,7 +3357,7 @@ def stored_live_price_for_candidate(
     market_records = market_records if isinstance(market_records, dict) else stored_market_data_latest_records("toss", "prices")
     candidate_records = candidate_records if isinstance(candidate_records, dict) else stored_candidate_data_latest_records()
 
-    market_record = market_records.get(symbol)
+    market_record = market_data_record_for_candidate(market_data_record_alias_lookup(market_records), candidate)
     if isinstance(market_record, dict):
         live_price = live_price_from_market_data_record(market_record, fallback_updated_at, market)
         if live_price is not None:
@@ -3373,6 +3475,10 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
     trade_records = market_data_latest_records_from_data(latest_data, "toss", "trades")
     if not (records or candle_records or orderbook_records or trade_records):
         return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 수집값이 아직 없습니다."}
+    record_lookup = market_data_record_alias_lookup(records)
+    candle_record_lookup = market_data_record_alias_lookup(candle_records)
+    orderbook_record_lookup = market_data_record_alias_lookup(orderbook_records)
+    trade_record_lookup = market_data_record_alias_lookup(trade_records)
 
     merged: list[dict] = []
     updated_candidate_count = 0
@@ -3389,8 +3495,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
             merged.append(candidate)
             continue
         item = copy.deepcopy(candidate)
-        symbol = str(item.get("symbol", "")).strip().upper()
-        record = records.get(symbol)
+        record = market_data_record_for_candidate(record_lookup, item)
         record_timestamp = ""
         merged_any = False
         applied_any = False
@@ -3425,7 +3530,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                     change_merged_count += 1
                     merged_any = True
 
-        candle_record = candle_records.get(symbol)
+        candle_record = market_data_record_for_candidate(candle_record_lookup, item)
         if candle_record and not candidate_data_source_ok(item.get("liveCandles", {})):
             stored_candles = stored_candles_from_market_data_record(candle_record)
             if stored_candles:
@@ -3462,7 +3567,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                 merged_any = True
                 applied_any = True
 
-        orderbook_record = orderbook_records.get(symbol)
+        orderbook_record = market_data_record_for_candidate(orderbook_record_lookup, item)
         if orderbook_record and not candidate_data_source_ok(item.get("liveOrderbook", {})):
             stored_orderbook = stored_orderbook_from_market_data_record(orderbook_record)
             if stored_orderbook:
@@ -3476,7 +3581,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                 merged_any = True
                 applied_any = True
 
-        trade_record = trade_records.get(symbol)
+        trade_record = market_data_record_for_candidate(trade_record_lookup, item)
         if trade_record and not candidate_data_source_ok(item.get("liveTrades", {})):
             stored_trades = stored_trades_from_market_data_record(trade_record)
             if stored_trades:
@@ -3491,12 +3596,14 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                 applied_any = True
 
         if applied_any:
+            latest_record = record or candle_record or orderbook_record or trade_record or {}
+            latest_record_timestamp = record_timestamp or market_data_record_timestamp(latest_record) if latest_record else ""
             item["marketDataLatest"] = {
                 "source": "market_data_latest",
                 "eventType": "prices/depth",
-                "collectedAt": record.get("collectedAt", "") if record else "",
-                "updatedAt": record.get("updatedAt", "") if record else "",
-                "ageSeconds": seconds_since_timestamp(record_timestamp),
+                "collectedAt": latest_record.get("collectedAt", "") if latest_record else "",
+                "updatedAt": latest_record.get("updatedAt", "") if latest_record else "",
+                "ageSeconds": seconds_since_timestamp(latest_record_timestamp),
                 "updated": bool(merged_any),
                 "retained": bool(applied_any and not merged_any),
                 "message": (
@@ -6018,11 +6125,14 @@ def enrich_market_with_indices(market: dict) -> tuple[dict, dict]:
             payload,
             metadata={"provider": market_index_provider_label(), "count": len(payload.get("indices", {}))},
         )
-        indices = payload.get("indices", {})
+        indices = normalize_market_index_details(payload.get("indices", {}))
         errors = payload.get("errors", {})
         for key, item in indices.items():
             if item.get("change"):
                 enriched[key] = item["change"]
+            value = market_index_detail_value(item)
+            if value:
+                enriched[f"{key}Value"] = value
         source = "index-api" if not errors else "index-api-partial"
         latest_timestamp = max(
             [str(item.get("timestamp", "")) for item in indices.values() if item.get("timestamp")],
@@ -6168,9 +6278,26 @@ def market_index_data_from_latest_item(item: dict | None) -> tuple[dict, dict, s
     return indices, errors, timestamp
 
 
-def market_index_item_has_value(index_item: object) -> bool:
+MARKET_INDEX_VALUE_KEYS = (
+    "value",
+    "display",
+    "price",
+    "close",
+    "last",
+    "current",
+    "level",
+    "indexValue",
+    "closePrice",
+    "lastPrice",
+    "currentPrice",
+    "regularMarketPrice",
+    "tradePrice",
+)
+
+
+def market_index_detail_value(index_item: object) -> str:
     if not isinstance(index_item, dict):
-        return False
+        return ""
     placeholder_markers = (
         "값 대기",
         "저장값 대기",
@@ -6186,22 +6313,7 @@ def market_index_item_has_value(index_item: object) -> bool:
         "none",
         "null",
     )
-    value_keys = (
-        "value",
-        "display",
-        "price",
-        "close",
-        "last",
-        "current",
-        "level",
-        "indexValue",
-        "closePrice",
-        "lastPrice",
-        "currentPrice",
-        "regularMarketPrice",
-        "tradePrice",
-    )
-    for key in value_keys:
+    for key in MARKET_INDEX_VALUE_KEYS:
         value = str(index_item.get(key) or "").strip()
         normalized = value.lower()
         if not value or value == "-":
@@ -6209,8 +6321,27 @@ def market_index_item_has_value(index_item: object) -> bool:
         if any(marker in normalized for marker in placeholder_markers):
             continue
         if re.search(r"\d", value):
-            return True
-    return False
+            return value
+    return ""
+
+
+def normalize_market_index_details(indices: object) -> dict:
+    if not isinstance(indices, dict):
+        return {}
+    normalized = {}
+    for key, index_item in indices.items():
+        if not isinstance(index_item, dict):
+            continue
+        item = dict(index_item)
+        value = market_index_detail_value(item)
+        if value:
+            item["value"] = value
+        normalized[key] = item
+    return normalized
+
+
+def market_index_item_has_value(index_item: object) -> bool:
+    return bool(market_index_detail_value(index_item))
 
 
 def market_index_payload_has_values(indices: object) -> bool:
@@ -6352,9 +6483,13 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
             "message": "DB에 저장된 정상 지수 값이 없어 기존 지수 표시를 유지합니다.",
         }
     indices, errors, latest_timestamp = market_index_data_from_latest_item(item)
+    indices = normalize_market_index_details(indices)
     for key, index_item in indices.items():
         if isinstance(index_item, dict) and index_item.get("change"):
             enriched[key] = index_item["change"]
+        value = market_index_detail_value(index_item)
+        if value:
+            enriched[f"{key}Value"] = value
     enriched["indexDetails"] = indices
     enriched["indexSource"] = {
         "source": source_label,
