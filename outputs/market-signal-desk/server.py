@@ -21342,6 +21342,36 @@ def update_discovery_bot_progress(phase: str) -> None:
         DISCOVERY_BOT_STATE["lastProgressAt"] = now
 
 
+def lightweight_discovery_dashboard_cache_payload(mode: str, fallback_error: str = "") -> tuple[dict | None, str]:
+    """Build a dashboard snapshot from stored server data only.
+
+    Discovery can take a long time because it expands news/materials and enriches candidates.
+    This lightweight path lets the UI see the latest DB-backed candidate/price state before
+    the heavier discovery pass finishes.
+    """
+    selected_mode = normalize_signal_mode(mode)
+
+    payload = stored_candidate_data_dashboard_payload(selected_mode, fallback_error=fallback_error)
+    if payload is not None:
+        return payload, "candidate_data_snapshots"
+
+    payload = stored_candidate_pool_dashboard_payload(selected_mode, fallback_error=fallback_error)
+    if payload is not None:
+        return payload, "candidate_pool"
+
+    market_payload = dashboard_payload_from_market_data_latest_store(selected_mode)
+    if market_payload is not None:
+        payload, source = market_payload
+        return payload, source
+
+    payload = cached_dashboard_payload(selected_mode, fallback_error=fallback_error, include_discovery=False)
+    if payload is not None:
+        cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+        return payload, str(cache.get("source") or "dashboard_cache")
+
+    return None, "none"
+
+
 def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") -> dict:
     selected_mode = discovery_bot_mode(mode)
     with DISCOVERY_BOT_LOCK:
@@ -21363,6 +21393,25 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
 
     try:
         now = datetime.now(KST)
+        update_discovery_bot_progress("publishing-stored-dashboard-cache")
+        stored_payload, stored_source = lightweight_discovery_dashboard_cache_payload(
+            selected_mode,
+            fallback_error=f"discovery {trigger} running",
+        )
+        stored_cache_updated = False
+        if stored_payload is not None:
+            if isinstance(stored_payload.get("summary"), dict):
+                stored_payload["summary"].update({
+                    "dashboardCacheUpdateSource": f"discovery-{trigger}-stored",
+                    "dashboardCacheUpdatePhase": "stored",
+                    "dashboardCacheBaseSource": stored_source,
+                })
+            stored_cache_updated = write_dashboard_cache_record(
+                selected_mode,
+                stored_payload,
+                source=f"discovery-{trigger}-stored",
+            )
+
         update_discovery_bot_progress("building-dashboard")
         payload = dashboard(selected_mode, force_discovery=True)
         update_discovery_bot_progress("writing-initial-dashboard-cache")
@@ -21370,6 +21419,8 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             payload["summary"].update({
                 "dashboardCacheUpdateSource": f"discovery-{trigger}-initial",
                 "dashboardCacheUpdatePhase": "initial",
+                "storedDashboardCacheUpdated": stored_cache_updated,
+                "storedDashboardCacheSource": stored_source,
             })
         initial_cache_updated = write_dashboard_cache_record(
             selected_mode,
@@ -21392,6 +21443,8 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
         summary = dashboard_summary(payload)
         summary["candidatePrefetch"] = prefetch_status
         summary["postPrefetchMerge"] = post_prefetch_status
+        summary["storedDashboardCacheUpdated"] = stored_cache_updated
+        summary["storedDashboardCacheSource"] = stored_source
         summary["dashboardCacheUpdateSource"] = f"discovery-{trigger}"
         update_discovery_bot_progress("writing-final-dashboard-cache")
         cache_updated = write_dashboard_cache_record(
