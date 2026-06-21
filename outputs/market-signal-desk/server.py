@@ -319,6 +319,21 @@ SIGNAL_DISCOVERY_MAX_SYMBOLS = max(
     SIGNAL_DISCOVERY_SELECTION_LIMIT,
     SIGNAL_DOMESTIC_CANDIDATE_LIMIT + SIGNAL_OVERSEAS_CANDIDATE_LIMIT + 80,
 )
+SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS = max(
+    int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS", "320")),
+    SIGNAL_DISCOVERY_MAX_SYMBOLS,
+)
+SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT = max(
+    int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT", "120")),
+    SIGNAL_DISCOVERY_SELECTION_LIMIT,
+)
+SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET", "80")))
+SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET", "10")))
+SIGNAL_DISCOVERY_CORE_ENTRY_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_CORE_ENTRY_TARGET", "3")))
+try:
+    SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal(os.getenv("SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER", "0.35"))
+except (InvalidOperation, ValueError):
+    SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal("0.35")
 SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
@@ -16192,15 +16207,165 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
     return base
 
 
+def summary_count_value(*values, maximum: int = 1_000_000) -> int:
+    for value in values:
+        if value not in (None, ""):
+            return bounded_int(value, 0, maximum)
+    return 0
+
+
+def discovery_expansion_profile(summary: dict | None = None, pool_status: dict | None = None) -> dict:
+    summary = summary if isinstance(summary, dict) else {}
+    if not isinstance(pool_status, dict):
+        try:
+            pool_status = candidate_pool_summary(fast=True)
+        except Exception:
+            pool_status = {}
+
+    compression_counts = summary.get("candidateCompressionCounts", {})
+    if not isinstance(compression_counts, dict):
+        compression_counts = {}
+    pool_counts = pool_status.get("statusCounts", {})
+    if not isinstance(pool_counts, dict):
+        pool_counts = summary.get("candidatePoolStatusCounts", {})
+    if not isinstance(pool_counts, dict):
+        pool_counts = {}
+
+    core_count = summary_count_value(summary.get("coreCandidateCount"), compression_counts.get("core"))
+    entry_count = summary_count_value(
+        summary.get("entryCandidateCount"),
+        summary.get("actionCandidateCount"),
+        compression_counts.get("entry"),
+        compression_counts.get("action"),
+    )
+    wait_count = summary_count_value(
+        summary.get("waitCandidateCount"),
+        summary.get("waitCandidateCompressionCount"),
+        compression_counts.get("wait"),
+    )
+    portfolio_count = summary_count_value(
+        summary.get("portfolioLinkedCandidateCount"),
+        summary.get("portfolioCandidateCompressionCount"),
+        compression_counts.get("portfolio"),
+    )
+    data_wait_count = sum(
+        summary_count_value(summary.get(key))
+        for key in (
+            "serverCollectingCount",
+            "priceBasisWaitCount",
+            "changeWaitCount",
+            "unavailableEvaluationCount",
+        )
+    )
+    excluded_count = max(
+        summary_count_value(
+            summary.get("hiddenExcludedCount"),
+            summary.get("excludeCandidateCount"),
+            summary.get("excludeCandidateCompressionCount"),
+            compression_counts.get("exclude"),
+        ),
+        summary_count_value(pool_counts.get("excluded")) + summary_count_value(pool_counts.get("expired")),
+    )
+    active_pool_count = summary_count_value(
+        pool_status.get("activeCount"),
+        summary.get("candidatePoolActiveCount"),
+        summary.get("candidatePoolCount"),
+    )
+    total_pool_count = summary_count_value(
+        pool_status.get("totalCount"),
+        summary.get("candidatePoolCount"),
+        active_pool_count + excluded_count,
+    )
+    visible_candidate_count = core_count + entry_count + wait_count + portfolio_count
+    if not visible_candidate_count:
+        visible_candidate_count = summary_count_value(summary.get("candidateCount"))
+    visible_domestic_count = summary_count_value(
+        summary.get("domesticVisibleCandidateCount"),
+        summary.get("domesticMainCandidateCount"),
+        summary.get("domesticSelected"),
+        summary.get("domesticCandidateCount"),
+    )
+    new_candidate_count = summary_count_value(summary.get("candidatePoolNewCount"), pool_status.get("newCount"))
+    try:
+        excluded_ratio = Decimal(excluded_count) / Decimal(total_pool_count) if total_pool_count else Decimal("0")
+    except (InvalidOperation, ZeroDivisionError):
+        excluded_ratio = Decimal("0")
+
+    triggers: list[str] = []
+    reasons: list[str] = []
+    if core_count + entry_count < SIGNAL_DISCOVERY_CORE_ENTRY_TARGET:
+        triggers.append("core_entry_shortfall")
+        reasons.append("핵심·진입 후보가 목표보다 부족")
+    if entry_count <= 0:
+        triggers.append("entry_empty")
+        reasons.append("진입 후보가 없음")
+    visible_basis = visible_domestic_count or visible_candidate_count
+    if visible_basis and visible_basis < SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET:
+        triggers.append("domestic_visible_shortfall")
+        reasons.append("국내 표시 후보가 목표보다 적음")
+    if active_pool_count < SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET:
+        triggers.append("pool_active_shortfall")
+        reasons.append("후보 풀 활성 종목 부족")
+    if total_pool_count and excluded_ratio >= SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER:
+        triggers.append("high_exclusion_ratio")
+        reasons.append("제외 후보 비율이 높음")
+
+    expansion_active = bool(triggers)
+    scan_limit = SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS if expansion_active else SIGNAL_DISCOVERY_MAX_SYMBOLS
+    selection_limit = SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT if expansion_active else SIGNAL_DISCOVERY_SELECTION_LIMIT
+    message = (
+        "서버가 후보 풀을 넓혀 핵심/진입 가능 종목을 계속 찾고 있습니다."
+        if expansion_active
+        else "현재 후보 풀 기준으로 압축 후보를 유지합니다."
+    )
+
+    return {
+        "expansionActive": expansion_active,
+        "active": expansion_active,
+        "expansionTrigger": triggers[0] if triggers else "",
+        "expansionTriggers": triggers,
+        "reasons": reasons,
+        "scanLimit": scan_limit,
+        "normalScanLimit": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+        "expandedScanLimit": SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS,
+        "selectionLimit": selection_limit,
+        "normalSelectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
+        "expandedSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+        "poolActiveCount": active_pool_count,
+        "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
+        "poolTotalCount": total_pool_count,
+        "visibleCandidateCount": visible_candidate_count,
+        "visibleDomesticCount": visible_domestic_count,
+        "newCandidateCount": new_candidate_count,
+        "excludedHiddenCount": excluded_count,
+        "dataWaitCount": data_wait_count,
+        "coreCount": core_count,
+        "entryCount": entry_count,
+        "waitCount": wait_count,
+        "portfolioCount": portfolio_count,
+        "excludedRatio": float(round(excluded_ratio, 4)),
+        "title": "후보 풀 확장 중" if expansion_active else "후보 풀 유지",
+        "message": message,
+    }
+
+
 def auto_candidate_cache_key(watched: set[str]) -> str:
+    pool_summary = candidate_pool_summary(fast=True)
+    expansion_profile = discovery_expansion_profile(pool_status=pool_summary)
     return json.dumps(
         {
             "enabled": SIGNAL_AUTO_CANDIDATES_ENABLED,
             "limit": SIGNAL_AUTO_CANDIDATE_LIMIT,
             "selectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
+            "expandedSelectionLimit": expansion_profile.get("expandedSelectionLimit"),
             "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
             "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+            "expandedMaxSymbols": expansion_profile.get("expandedScanLimit"),
+            "poolActiveTarget": expansion_profile.get("poolActiveTarget"),
+            "discoveryExpansionActive": expansion_profile.get("expansionActive"),
+            "discoveryScanLimit": expansion_profile.get("scanLimit"),
+            "poolActiveCount": expansion_profile.get("poolActiveCount"),
             "scanRotation": SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED,
             "scanBucket": discovery_scan_bucket(),
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
@@ -16210,7 +16375,7 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "qualifiedEvidenceScore": SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE,
             "poolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
             "poolRetainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
-            "poolUpdatedAt": candidate_pool_summary().get("updatedAt", ""),
+            "poolUpdatedAt": pool_summary.get("updatedAt", ""),
             "symbols": SIGNAL_DISCOVERY_SYMBOLS,
             "watch": sorted(watched),
             "naverReady": NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"],
@@ -16226,11 +16391,20 @@ def discovery_scan_bucket() -> int:
     return int(datetime.now(KST).timestamp() // interval)
 
 
-def discovery_scan_entries(entries: list[dict]) -> tuple[list[dict], dict]:
+def discovery_scan_entries(entries: list[dict], expansion_profile: dict | None = None) -> tuple[list[dict], dict]:
     total = len(entries)
-    limit = max(1, SIGNAL_DISCOVERY_MAX_SYMBOLS)
+    profile = expansion_profile if isinstance(expansion_profile, dict) else discovery_expansion_profile()
+    limit = max(1, bounded_int(profile.get("scanLimit", SIGNAL_DISCOVERY_MAX_SYMBOLS), 1, 10_000))
+    status_base = {
+        "normalLimit": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+        "expandedLimit": SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS,
+        "expansionActive": bool(profile.get("expansionActive")),
+        "expansionTrigger": profile.get("expansionTrigger", ""),
+        "expansionTriggers": profile.get("expansionTriggers", []),
+    }
     if total <= limit:
         return entries, {
+            **status_base,
             "rotationEnabled": False,
             "offset": 0,
             "limit": limit,
@@ -16239,6 +16413,7 @@ def discovery_scan_entries(entries: list[dict]) -> tuple[list[dict], dict]:
         }
     if not SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED:
         return entries[:limit], {
+            **status_base,
             "rotationEnabled": False,
             "offset": 0,
             "limit": limit,
@@ -16249,6 +16424,7 @@ def discovery_scan_entries(entries: list[dict]) -> tuple[list[dict], dict]:
     offset = (bucket * limit) % total
     rotated = [*entries[offset:], *entries[:offset]]
     return rotated[:limit], {
+        **status_base,
         "rotationEnabled": True,
         "bucket": bucket,
         "offset": offset,
@@ -16386,9 +16562,21 @@ def prepare_quality_candidates(discovered: list[dict], watched: set[str]) -> tup
     return prepared, counts
 
 
-def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> tuple[list[dict], dict]:
+def balanced_candidate_selection(
+    discovered: list[dict],
+    watched: set[str],
+    expansion_profile: dict | None = None,
+) -> tuple[list[dict], dict]:
+    profile = expansion_profile if isinstance(expansion_profile, dict) else discovery_expansion_profile()
     quality_candidates, quality_counts = prepare_quality_candidates(discovered, watched)
-    selection_limit = max(1, SIGNAL_DISCOVERY_SELECTION_LIMIT)
+    selection_limit = max(
+        1,
+        bounded_int(
+            profile.get("selectionLimit", SIGNAL_DISCOVERY_SELECTION_LIMIT),
+            1,
+            SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+        ),
+    )
     domestic_target = max(SIGNAL_DOMESTIC_CANDIDATE_LIMIT, selection_limit // 2)
     overseas_target = max(SIGNAL_OVERSEAS_CANDIDATE_LIMIT, selection_limit // 2)
     selectable = [
@@ -16488,6 +16676,13 @@ def balanced_candidate_selection(discovered: list[dict], watched: set[str]) -> t
         "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
         "targetCandidateCount": selection_limit,
         "selectionLimit": selection_limit,
+        "discoveryExpansionActive": bool(profile.get("expansionActive")),
+        "discoveryExpansionTrigger": profile.get("expansionTrigger", ""),
+        "discoveryExpansionTriggers": profile.get("expansionTriggers", []),
+        "discoveryExpansionReasons": profile.get("reasons", []),
+        "discoveryScanLimit": profile.get("scanLimit"),
+        "discoveryExpandedScanLimit": profile.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": profile.get("poolActiveTarget"),
         "domesticSelected": domestic_selected_count,
         "overseasSelected": overseas_selected_count,
         "domesticLimit": domestic_target,
@@ -16534,6 +16729,18 @@ DISCOVERY_STATUS_SUMMARY_KEYS = [
     "candidatePoolMemoryAppliedCount",
     "candidatePoolSelectedCount",
     "candidatePoolSelectedSymbols",
+    "discoveryExpansionActive",
+    "discoveryExpansionTrigger",
+    "discoveryExpansionTriggers",
+    "discoveryExpansionReasons",
+    "discoveryScanLimit",
+    "discoveryExpandedScanLimit",
+    "candidatePoolActiveTarget",
+    "visibleCandidateCount",
+    "visibleDomesticCount",
+    "newCandidateCount",
+    "excludedHiddenCount",
+    "dataWaitCount",
 ]
 
 
@@ -16611,7 +16818,16 @@ def stored_discovery_initial_candidates(mode: str, watched: set[str]) -> tuple[l
 
 
 def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[str], mode: str) -> tuple[list[dict], dict] | None:
-    pool_records = candidate_pool_retainable_records(limit=SIGNAL_DISCOVERY_SELECTION_LIMIT)
+    expansion_profile = discovery_expansion_profile()
+    pool_limit = max(
+        1,
+        bounded_int(
+            expansion_profile.get("selectionLimit", SIGNAL_DISCOVERY_SELECTION_LIMIT),
+            1,
+            SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+        ),
+    )
+    pool_records = candidate_pool_retainable_records(limit=pool_limit)
     if not pool_records:
         return None
     candidates = []
@@ -16646,10 +16862,23 @@ def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[
         "stored": True,
         "message": "저장된 후보 풀을 사용합니다. 새 발굴 결과가 저장되기 전까지 상시 관찰 대상을 우선 표시합니다.",
         "candidateCount": len(candidates),
+        "selectionLimit": pool_limit,
         "candidatePoolRetainedInputCount": len(pool_records),
         "candidatePoolRetainedScanCount": len(pool_records),
         "candidatePoolSelectedCount": len(candidates),
         "candidatePoolSelectedSymbols": [item.get("symbol", "") for item in candidates],
+        "discoveryExpansionActive": bool(expansion_profile.get("expansionActive")),
+        "discoveryExpansionTrigger": expansion_profile.get("expansionTrigger", ""),
+        "discoveryExpansionTriggers": expansion_profile.get("expansionTriggers", []),
+        "discoveryExpansionReasons": expansion_profile.get("reasons", []),
+        "discoveryScanLimit": expansion_profile.get("scanLimit"),
+        "discoveryExpandedScanLimit": expansion_profile.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "visibleCandidateCount": expansion_profile.get("visibleCandidateCount"),
+        "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
+        "newCandidateCount": expansion_profile.get("newCandidateCount"),
+        "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "dataWaitCount": expansion_profile.get("dataWaitCount"),
         "requestedMode": mode,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
@@ -16744,6 +16973,12 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
     records = stored_candidate_data_latest_records()
     if not records:
         return None
+    expansion_profile = discovery_expansion_profile()
+    selection_limit = bounded_int(
+        expansion_profile.get("selectionLimit", SIGNAL_DISCOVERY_SELECTION_LIMIT),
+        1,
+        SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+    )
     fresh_records = []
     skipped_incomplete = 0
     max_age = max(SIGNAL_CLOSED_MARKET_BASELINE_MAX_AGE_SECONDS, 60 * 60 * 24)
@@ -16766,7 +17001,7 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
         return None
     fresh_records.sort(key=stored_candidate_data_sort_key, reverse=True)
     candidates = []
-    for record in fresh_records[: max(1, SIGNAL_DISCOVERY_SELECTION_LIMIT)]:
+    for record in fresh_records[: max(1, selection_limit)]:
         candidate = candidate_from_stored_candidate_data_record(record, watched)
         if candidate:
             candidates.append(candidate)
@@ -16778,9 +17013,24 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
         "stored": True,
         "message": "저장된 후보별 수집 데이터를 우선 사용합니다. 새 후보 발굴은 봇/스케줄러/수동 실행에서 수행합니다.",
         "candidateCount": len(candidates),
+        "selectionLimit": selection_limit,
         "storedCandidateDataCount": len(fresh_records),
         "storedCandidateIncompleteCount": skipped_incomplete,
         "candidateDataSelectedSymbols": [item.get("symbol", "") for item in candidates],
+        "discoveryExpansionActive": expansion_profile.get("expansionActive"),
+        "discoveryExpansionTrigger": expansion_profile.get("expansionTrigger"),
+        "discoveryExpansionTriggers": expansion_profile.get("expansionTriggers", []),
+        "discoveryExpansionReasons": expansion_profile.get("reasons", []),
+        "discoveryScanLimit": expansion_profile.get("scanLimit"),
+        "discoveryExpandedScanLimit": expansion_profile.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "candidatePoolActiveCount": expansion_profile.get("poolActiveCount"),
+        "candidatePoolTotalCount": expansion_profile.get("poolTotalCount"),
+        "visibleCandidateCount": expansion_profile.get("visibleCandidateCount"),
+        "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
+        "newCandidateCount": expansion_profile.get("newCandidateCount"),
+        "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "dataWaitCount": expansion_profile.get("dataWaitCount"),
         "requestedMode": mode,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
     }
@@ -16819,8 +17069,9 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         cached = copy.deepcopy(DISCOVERY_CACHE["payload"])  # type: ignore[index]
         return cached["candidates"], cached["status"]
 
+    expansion_profile = discovery_expansion_profile()
     base_entries = candidate_universe_entries()
-    scan_entries, scan_rotation_status = discovery_scan_entries(base_entries)
+    scan_entries, scan_rotation_status = discovery_scan_entries(base_entries, expansion_profile)
     pool_records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_POOL_SCAN_LIMIT)
     entries, pool_input_status = merge_candidate_pool_scan_entries(
         scan_entries,
@@ -16852,7 +17103,13 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         reverse=True,
     )
     pool_scan_status = update_candidate_pool(discovered, mode=mode, stage="discovered") if discovered else {}
-    selected, balance_status = balanced_candidate_selection(discovered, watched) if discovered else (seed_candidates[:SIGNAL_DISCOVERY_SELECTION_LIMIT], {})
+    if pool_scan_status:
+        expansion_profile = discovery_expansion_profile(pool_status=pool_scan_status)
+    selected, balance_status = (
+        balanced_candidate_selection(discovered, watched, expansion_profile)
+        if discovered
+        else (seed_candidates[:SIGNAL_DISCOVERY_SELECTION_LIMIT], {})
+    )
     pool_selected = [
         item
         for item in selected
@@ -16889,6 +17146,18 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         "candidatePoolRetainLimit": SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT,
         "candidatePoolScanLimit": SIGNAL_CANDIDATE_POOL_SCAN_LIMIT,
         "candidatePoolRetainMinScore": SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE,
+        "discoveryExpansionActive": bool(expansion_profile.get("expansionActive")),
+        "discoveryExpansionTrigger": expansion_profile.get("expansionTrigger", ""),
+        "discoveryExpansionTriggers": expansion_profile.get("expansionTriggers", []),
+        "discoveryExpansionReasons": expansion_profile.get("reasons", []),
+        "discoveryScanLimit": expansion_profile.get("scanLimit"),
+        "discoveryExpandedScanLimit": expansion_profile.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "visibleCandidateCount": expansion_profile.get("visibleCandidateCount"),
+        "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
+        "newCandidateCount": expansion_profile.get("newCandidateCount"),
+        "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "dataWaitCount": expansion_profile.get("dataWaitCount"),
         "candidatePoolRetainedInputCount": pool_input_status.get("retainedInputCount", 0),
         "candidatePoolRetainedExistingCount": pool_input_status.get("retainedExistingCount", 0),
         "candidatePoolRetainedAddedCount": pool_input_status.get("retainedAddedCount", 0),
@@ -17352,6 +17621,35 @@ def build_dashboard_payload(context: dict) -> dict:
     candidate_market_data_status = context["statuses"].get("candidate_market_data_latest", {})
     market_data_merge_status = context["statuses"].get("market_data_merge", {})
     toss_data_coverage = candidate_toss_data_coverage(candidates)
+    dashboard_expansion_summary = discovery_expansion_profile(
+        {
+            "coreCandidateCount": selection_status.get("coreCandidateCount"),
+            "entryCandidateCount": selection_status.get("entryCandidateCount", selection_status.get("actionCandidateCount")),
+            "waitCandidateCount": selection_status.get("waitCandidateCount"),
+            "portfolioLinkedCandidateCount": context["statuses"].get("portfolio", {}).get("linkedCandidateCount", 0),
+            "excludeCandidateCount": selection_status.get("excludeCandidateCount"),
+            "candidateCount": len(candidates),
+            "domesticSelected": discovery_status.get("domesticSelected"),
+            "candidatePoolCount": pool_status.get("totalCount"),
+            "candidatePoolActiveCount": pool_status.get("activeCount"),
+            "candidatePoolNewCount": pool_status.get("newCount"),
+            "serverCollectingCount": selection_status.get("serverCollectingCount"),
+            "priceBasisWaitCount": selection_status.get("priceBasisWaitCount"),
+            "changeWaitCount": selection_status.get("changeWaitCount"),
+            "unavailableEvaluationCount": selection_status.get("unavailableEvaluationCount"),
+            "candidatePoolStatusCounts": pool_status.get("statusCounts", {}),
+        },
+        pool_status,
+    )
+    dashboard_discovery_notice = {
+        "active": bool(dashboard_expansion_summary.get("expansionActive")),
+        "title": dashboard_expansion_summary.get("title"),
+        "message": dashboard_expansion_summary.get("message"),
+        "trigger": dashboard_expansion_summary.get("expansionTrigger"),
+        "triggers": dashboard_expansion_summary.get("expansionTriggers", []),
+        "scanLimit": dashboard_expansion_summary.get("scanLimit"),
+        "poolActiveTarget": dashboard_expansion_summary.get("poolActiveTarget"),
+    }
     return {
         "generatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         "mode": context["mode"],
@@ -17459,6 +17757,18 @@ def build_dashboard_payload(context: dict) -> dict:
             "candidatePoolSelectedCount": discovery_status.get("candidatePoolSelectedCount"),
             "candidatePoolSelectedSymbols": discovery_status.get("candidatePoolSelectedSymbols", []),
             "candidatePoolTopCandidates": pool_status.get("topCandidates", []),
+            "candidatePoolSummary": dashboard_expansion_summary,
+            "hiddenExcludedCount": dashboard_expansion_summary.get("excludedHiddenCount"),
+            "discoveryNotice": dashboard_discovery_notice,
+            "discoveryExpansionActive": dashboard_expansion_summary.get("expansionActive"),
+            "discoveryExpansionTrigger": dashboard_expansion_summary.get("expansionTrigger"),
+            "discoveryExpansionReasons": dashboard_expansion_summary.get("reasons", []),
+            "discoveryScanLimit": dashboard_expansion_summary.get("scanLimit"),
+            "discoveryExpandedScanLimit": dashboard_expansion_summary.get("expandedScanLimit"),
+            "candidatePoolActiveTarget": dashboard_expansion_summary.get("poolActiveTarget"),
+            "visibleCandidateCount": dashboard_expansion_summary.get("visibleCandidateCount"),
+            "visibleDomesticCandidateCount": dashboard_expansion_summary.get("visibleDomesticCount"),
+            "newCandidateCount": dashboard_expansion_summary.get("newCandidateCount"),
             "confirmedSignalCount": selection_status.get("confirmedSignalCount"),
             "evidenceWaitSignalCount": selection_status.get("evidenceWaitSignalCount"),
             "reactionOnlySignalCount": selection_status.get("reactionOnlySignalCount"),
@@ -17624,6 +17934,8 @@ def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: st
         "candidateCompressionCounts",
         "signalValidationCounts",
         "decisionGroups",
+        "coreCandidateCount",
+        "entryCandidateCount",
         "investableCandidateCount",
         "watchCandidateCount",
         "deferCandidateCount",
@@ -17633,10 +17945,67 @@ def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: st
     ):
         if key in selection_status:
             summary[key] = selection_status.get(key)
-    refreshed["summary"] = summary
 
     integrations = refreshed.get("integrations", {}) if isinstance(refreshed.get("integrations"), dict) else {}
+    pool_status = integrations.get("candidatePool", {}) if isinstance(integrations.get("candidatePool"), dict) else {}
+    if not pool_status:
+        pool_status = candidate_pool_summary(fast=True)
+    refreshed_expansion_summary = discovery_expansion_profile(
+        {
+            "coreCandidateCount": selection_status.get("coreCandidateCount", summary.get("coreCandidateCount")),
+            "entryCandidateCount": selection_status.get(
+                "entryCandidateCount",
+                selection_status.get("actionCandidateCount", summary.get("entryCandidateCount", summary.get("actionCandidateCount"))),
+            ),
+            "waitCandidateCount": selection_status.get("waitCandidateCount", summary.get("waitCandidateCount")),
+            "portfolioLinkedCandidateCount": summary.get("portfolioLinkedCandidateCount"),
+            "excludeCandidateCount": selection_status.get("excludeCandidateCount", summary.get("excludeCandidateCount")),
+            "candidateCount": len(candidates),
+            "domesticSelected": summary.get("domesticSelected"),
+            "candidatePoolCount": summary.get("candidatePoolCount"),
+            "candidatePoolActiveCount": summary.get("candidatePoolActiveCount"),
+            "candidatePoolNewCount": summary.get("candidatePoolNewCount"),
+            "serverCollectingCount": selection_status.get("serverCollectingCount", summary.get("serverCollectingCount")),
+            "priceBasisWaitCount": selection_status.get("priceBasisWaitCount", summary.get("priceBasisWaitCount")),
+            "changeWaitCount": selection_status.get("changeWaitCount", summary.get("changeWaitCount")),
+            "unavailableEvaluationCount": selection_status.get(
+                "unavailableEvaluationCount",
+                summary.get("unavailableEvaluationCount"),
+            ),
+            "candidatePoolStatusCounts": summary.get("candidatePoolStatusCounts", {}),
+        },
+        pool_status,
+    )
+    refreshed_discovery_notice = {
+        "active": bool(refreshed_expansion_summary.get("expansionActive")),
+        "title": refreshed_expansion_summary.get("title"),
+        "message": refreshed_expansion_summary.get("message"),
+        "trigger": refreshed_expansion_summary.get("expansionTrigger"),
+        "triggers": refreshed_expansion_summary.get("expansionTriggers", []),
+        "reasons": refreshed_expansion_summary.get("reasons", []),
+        "scanLimit": refreshed_expansion_summary.get("scanLimit"),
+        "poolActiveTarget": refreshed_expansion_summary.get("poolActiveTarget"),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    summary.update({
+        "candidatePoolSummary": refreshed_expansion_summary,
+        "hiddenExcludedCount": refreshed_expansion_summary.get("excludedHiddenCount"),
+        "discoveryNotice": refreshed_discovery_notice,
+        "discoveryExpansionActive": refreshed_expansion_summary.get("expansionActive"),
+        "discoveryExpansionTrigger": refreshed_expansion_summary.get("expansionTrigger"),
+        "discoveryExpansionReasons": refreshed_expansion_summary.get("reasons", []),
+        "discoveryScanLimit": refreshed_expansion_summary.get("scanLimit"),
+        "discoveryExpandedScanLimit": refreshed_expansion_summary.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": refreshed_expansion_summary.get("poolActiveTarget"),
+        "visibleCandidateCount": refreshed_expansion_summary.get("visibleCandidateCount"),
+        "visibleDomesticCandidateCount": refreshed_expansion_summary.get("visibleDomesticCount"),
+        "newCandidateCount": refreshed_expansion_summary.get("newCandidateCount"),
+    })
+    refreshed["summary"] = summary
+
     integrations["selection"] = selection_status
+    integrations["candidatePoolExpansion"] = refreshed_expansion_summary
+    integrations["discoveryNotice"] = refreshed_discovery_notice
     integrations["candidateDataMerge"] = candidate_data_merge
     integrations["liveStateMerge"] = live_state_merge
     integrations["marketDataMerge"] = market_data_merge
@@ -18711,6 +19080,18 @@ def dashboard_summary(payload: dict) -> dict:
         "candidatePoolSelectedCount": summary.get("candidatePoolSelectedCount"),
         "candidatePoolSelectedSymbols": summary.get("candidatePoolSelectedSymbols", []),
         "candidatePoolTopCandidates": summary.get("candidatePoolTopCandidates", []),
+        "candidatePoolSummary": summary.get("candidatePoolSummary", {}),
+        "hiddenExcludedCount": summary.get("hiddenExcludedCount"),
+        "discoveryNotice": summary.get("discoveryNotice", {}),
+        "discoveryExpansionActive": summary.get("discoveryExpansionActive"),
+        "discoveryExpansionTrigger": summary.get("discoveryExpansionTrigger"),
+        "discoveryExpansionReasons": summary.get("discoveryExpansionReasons", []),
+        "discoveryScanLimit": summary.get("discoveryScanLimit"),
+        "discoveryExpandedScanLimit": summary.get("discoveryExpandedScanLimit"),
+        "candidatePoolActiveTarget": summary.get("candidatePoolActiveTarget"),
+        "visibleCandidateCount": summary.get("visibleCandidateCount"),
+        "visibleDomesticCandidateCount": summary.get("visibleDomesticCandidateCount"),
+        "newCandidateCount": summary.get("newCandidateCount"),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
@@ -18774,6 +19155,14 @@ def discovery_bot_config_status() -> dict:
         "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
+        "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
+        "expandedMaxSymbols": SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS,
+        "selectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
+        "expandedSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+        "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
+        "visibleDomesticTarget": SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET,
+        "coreEntryTarget": SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
+        "excludedRatioTrigger": float(SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER),
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
@@ -18924,9 +19313,11 @@ def discovery_bot_status() -> dict:
             "unavailableEvaluationCount",
         )
     )
+    pool_snapshot = candidate_pool_summary(fast=True)
+    expansion_profile = discovery_expansion_profile(summary, pool_snapshot)
     pool_total = summary_count(summary.get("candidatePoolCount"), summary.get("candidatePoolActiveCount"), summary.get("candidateCount"))
     visible_total = core_count + entry_count + wait_count + portfolio_count
-    expanding = core_count + entry_count <= 0
+    expanding = bool(expansion_profile.get("expansionActive"))
     pool_status = {
         "poolCount": pool_total,
         "visibleCandidateCount": visible_total,
@@ -18938,6 +19329,18 @@ def discovery_bot_status() -> dict:
         "dataWaitCount": data_wait_count,
         "statusCounts": pool_counts,
         "searchExpansionActive": expanding,
+        "expansionActive": expanding,
+        "expansionTrigger": expansion_profile.get("expansionTrigger", ""),
+        "expansionTriggers": expansion_profile.get("expansionTriggers", []),
+        "expansionReasons": expansion_profile.get("reasons", []),
+        "scanLimit": expansion_profile.get("scanLimit"),
+        "expandedScanLimit": expansion_profile.get("expandedScanLimit"),
+        "poolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "poolActiveCount": expansion_profile.get("poolActiveCount"),
+        "poolTotalCount": expansion_profile.get("poolTotalCount"),
+        "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
+        "newCandidateCount": expansion_profile.get("newCandidateCount"),
+        "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
         "message": (
             "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
             if expanding

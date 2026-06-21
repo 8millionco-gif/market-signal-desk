@@ -257,8 +257,8 @@ const SETTINGS_TAB_COPY = {
 };
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
 const CANDIDATE_FEED_VISIBLE_LIMIT = 4;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 5;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 6;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 6;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 10;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1668,8 +1668,72 @@ function visibleFeedCandidates(candidates = []) {
   };
 }
 
+function numericSummaryValue(...values) {
+  for (const value of values) {
+    const numberValue = Number(value);
+    if (Number.isFinite(numberValue) && numberValue > 0) return Math.round(numberValue);
+  }
+  return 0;
+}
+
+function dashboardCandidatePoolSummary() {
+  const summary = state.dashboard?.summary || {};
+  return summary.candidatePoolSummary || {};
+}
+
+function candidatePoolDisplaySummary(totalCount = 0) {
+  const summary = state.dashboard?.summary || {};
+  const pool = dashboardCandidatePoolSummary();
+  const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, totalCount);
+  const domesticDb = numericSummaryValue(
+    pool.visibleDomesticCount,
+    summary.visibleDomesticCandidateCount,
+    summary.domesticSelected,
+    summary.domesticCandidateCount
+  );
+  const poolActive = numericSummaryValue(
+    pool.poolActiveCount,
+    summary.candidatePoolActiveCount,
+    summary.candidatePoolCount
+  );
+  const excluded = numericSummaryValue(
+    pool.excludedHiddenCount,
+    summary.hiddenExcludedCount,
+    summary.excludeCandidateCount,
+    summary.excludeCandidateCompressionCount
+  );
+  const parts = [`표시 ${visible || totalCount}`];
+  if (domesticDb) parts.push(`국내 DB ${domesticDb}`);
+  if (poolActive) parts.push(`후보 풀 ${poolActive}`);
+  if (excluded) parts.push(`제외 ${excluded} 숨김`);
+  return parts.join(" / ");
+}
+
+function candidateDiscoveryNoticeMarkup() {
+  const summary = state.dashboard?.summary || {};
+  const notice = summary.discoveryNotice || {};
+  const pool = dashboardCandidatePoolSummary();
+  const core = numericSummaryValue(pool.coreCount, summary.coreCandidateCount);
+  const entry = numericSummaryValue(pool.entryCount, summary.entryCandidateCount, summary.actionCandidateCount);
+  const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
+  if (core + entry > 0 && !active) return "";
+  const title = core + entry > 0 ? (notice.title || "후보 풀 확장 중") : "조건 충족 후보 없음";
+  const message = core + entry > 0
+    ? (notice.message || "서버가 후보 풀을 계속 넓히고 있습니다.")
+    : "서버가 후보를 계속 발굴 중입니다.";
+  const reason = Array.isArray(notice.triggers) && notice.triggers.length ? notice.triggers[0] : "";
+  return `
+    <div class="feed-discovery-notice ${active ? "active" : ""}">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(message)}</span>
+      ${reason ? `<em>${escapeHtml(reason)}</em>` : ""}
+    </div>
+  `;
+}
+
 function candidateFeedToggleMarkup(feedView, totalCount) {
   if (!feedView?.canToggle) return "";
+  const summaryText = candidatePoolDisplaySummary(totalCount);
   const hiddenText = feedView.expanded
     ? feedView.hiddenCount > 0
       ? `${feedView.hiddenCount}개 후보는 설정/성과 화면에서 확인하고 서버가 계속 관찰합니다.`
@@ -1683,6 +1747,7 @@ function candidateFeedToggleMarkup(feedView, totalCount) {
     <button class="feed-limit-panel" type="button" data-feed-toggle>
       <span>
         <strong>${escapeHtml(titleText)}</strong>
+        <em>${escapeHtml(summaryText)}</em>
         <em>${escapeHtml(hiddenText)}</em>
       </span>
       <b>${escapeHtml(actionText)}</b>
@@ -6168,6 +6233,7 @@ function candidatePersonalizationBadges(item) {
 function renderFeed() {
   const candidates = filteredCandidates();
   const feedView = visibleFeedCandidates(candidates);
+  const discoveryNotice = candidateDiscoveryNoticeMarkup();
   renderStrategyCounts();
   const selectionChanged = syncSelectedToVisibleCandidates(candidates);
   renderQuickSearch();
@@ -6175,6 +6241,7 @@ function renderFeed() {
   if (!candidates.length) {
     const label = strategyLabel(state.strategy);
     els.candidateFeed.innerHTML = `
+      ${discoveryNotice}
       <div class="empty-state">
         <h2>${escapeHtml(label)} 후보가 없습니다</h2>
         <p>${escapeHtml(strategyEmptyMessage(state.strategy))}</p>
@@ -6232,7 +6299,7 @@ function renderFeed() {
       `;
     })
     .join("");
-  els.candidateFeed.innerHTML = `${feedItemsHtml}${candidateFeedToggleMarkup(feedView, candidates.length)}`;
+  els.candidateFeed.innerHTML = `${discoveryNotice}${feedItemsHtml}${candidateFeedToggleMarkup(feedView, candidates.length)}`;
 
   if (selectionChanged && state.view === "signals") {
     window.requestAnimationFrame(() => {
