@@ -15743,6 +15743,89 @@ def candidate_universe_entries() -> list[dict]:
     return entries
 
 
+def discovery_source_expanded_entries(base_entries: list[dict], expansion_profile: dict | None = None) -> tuple[list[dict], dict]:
+    profile = expansion_profile if isinstance(expansion_profile, dict) else {}
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for entry in base_entries:
+        item = normalize_stock_search_entry(entry, "candidate-universe", "감시 유니버스")
+        if not item:
+            continue
+        symbol = str(item.get("symbol", "")).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        entries.append(item)
+        seen.add(symbol)
+
+    target = bounded_int(profile.get("scanLimit", SIGNAL_DISCOVERY_MAX_SYMBOLS), 1, SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS)
+    requested = bool(profile.get("expansionActive")) or len(entries) < min(target, SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET)
+    source_counts: dict[str, int] = {}
+    added_by_source: dict[str, int] = {}
+    scanned_by_source: dict[str, int] = {}
+    if not requested or len(entries) >= target:
+        return entries, {
+            "requested": requested,
+            "active": False,
+            "target": target,
+            "baseUniverseCount": len(base_entries),
+            "expandedUniverseCount": len(entries),
+            "addedCount": 0,
+            "sourceCounts": source_counts,
+            "addedBySource": added_by_source,
+            "scannedBySource": scanned_by_source,
+        }
+
+    source_lists: list[tuple[str, list[dict], str, int | None]] = [
+        ("stock-search-generated", stock_search_generated_entries(), "저장 검색 마스터", None),
+        ("stock-search-master", stock_search_master_entries(), "검색 확장 마스터", None),
+        ("manual-etf", STOCK_SEARCH_MANUAL_UNIVERSE, "수동 ETF 마스터", None),
+    ]
+    if profile.get("expansionActive"):
+        dart_limit = max(40, min(SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT, max(0, target - len(entries))))
+        source_lists.append(("opendart-corp-code", dart_stock_search_entries(), "OpenDART 종목마스터", dart_limit))
+
+    for source_name, source_entries, default_label, source_limit in source_lists:
+        source_counts[source_name] = len(source_entries) if isinstance(source_entries, list) else 0
+        added_by_source[source_name] = 0
+        scanned_by_source[source_name] = 0
+        for raw_entry in source_entries if isinstance(source_entries, list) else []:
+            if len(entries) >= target:
+                break
+            if source_limit is not None and added_by_source[source_name] >= source_limit:
+                break
+            scanned_by_source[source_name] += 1
+            item = normalize_stock_search_entry(raw_entry, source_name, default_label)
+            if not item:
+                continue
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            focus = bounded_int(item.get("focusWeight", 3), 0, 15)
+            item["focusWeight"] = max(3, focus)
+            item["query"] = str(item.get("query") or item.get("name") or symbol).strip()
+            item["discoveryTier"] = item.get("discoveryTier") or "expanded"
+            item["opportunityType"] = item.get("opportunityType") or "expanded"
+            item["sourceExpansion"] = True
+            entries.append(item)
+            seen.add(symbol)
+            added_by_source[source_name] += 1
+        if len(entries) >= target:
+            break
+
+    added_count = max(0, len(entries) - len(base_entries))
+    return entries, {
+        "requested": requested,
+        "active": added_count > 0,
+        "target": target,
+        "baseUniverseCount": len(base_entries),
+        "expandedUniverseCount": len(entries),
+        "addedCount": added_count,
+        "sourceCounts": source_counts,
+        "addedBySource": added_by_source,
+        "scannedBySource": scanned_by_source,
+    }
+
+
 def universe_query(entry: dict) -> str:
     query = str(entry.get("query", "")).strip()
     if query:
@@ -17184,7 +17267,8 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
 
     expansion_profile = discovery_expansion_profile()
     base_entries = candidate_universe_entries()
-    scan_entries, scan_rotation_status = discovery_scan_entries(base_entries, expansion_profile)
+    source_entries, source_expansion_status = discovery_source_expanded_entries(base_entries, expansion_profile)
+    scan_entries, scan_rotation_status = discovery_scan_entries(source_entries, expansion_profile)
     pool_records = candidate_pool_retainable_records(limit=SIGNAL_CANDIDATE_POOL_SCAN_LIMIT)
     entries, pool_input_status = merge_candidate_pool_scan_entries(
         scan_entries,
@@ -17251,7 +17335,12 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
             if quality_selected
             else ("뉴스와 유니버스 점수로 오늘 후보를 자동 생성했습니다." if source == "auto-news" else "유니버스 기본 점수로 오늘 후보를 구성했습니다.")
         ),
-        "universeCount": len(base_entries),
+        "universeCount": len(source_entries),
+        "baseUniverseCount": len(base_entries),
+        "sourceExpansion": source_expansion_status,
+        "sourceExpansionAddedCount": source_expansion_status.get("addedCount", 0),
+        "sourceExpansionAddedBySource": source_expansion_status.get("addedBySource", {}),
+        "sourceExpansionSourceCounts": source_expansion_status.get("sourceCounts", {}),
         "scanTargetCount": len(entries),
         "scanRotation": scan_rotation_status,
         "scannedCount": len(discovered),
