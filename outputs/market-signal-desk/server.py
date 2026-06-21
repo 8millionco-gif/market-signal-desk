@@ -20851,6 +20851,83 @@ def run_scheduler_candidate_prefetch(now: datetime | None = None) -> dict:
         CANDIDATE_PREFETCH_LOCK.release()
 
 
+def dashboard_market_open_readiness(candidates: list, summary: dict | None = None) -> dict:
+    summary = summary if isinstance(summary, dict) else {}
+    session = market_session_context("KR")
+    compression_counts = summary.get("candidateCompressionCounts", {})
+    if not isinstance(compression_counts, dict):
+        compression_counts = {}
+    core_count = bounded_int(summary.get("coreCandidateCount", 0), 0, 100000)
+    entry_count = bounded_int(
+        summary.get("entryCandidateCount", summary.get("actionCandidateCount", 0)),
+        0,
+        100000,
+    )
+    wait_count = bounded_int(
+        summary.get("waitCandidateCompressionCount", compression_counts.get("wait", 0)),
+        0,
+        100000,
+    )
+    visible_count = bounded_int(
+        summary.get("visibleCandidateCount", summary.get("candidateCount", len(candidates or []))),
+        0,
+        100000,
+    )
+    data_wait_count = bounded_int(
+        summary.get("priceBasisWaitCount", summary.get("serverCollectingCount", 0)),
+        0,
+        100000,
+    )
+    expansion_active = bool(summary.get("discoveryExpansionActive") or summary.get("candidateRefillActive"))
+    is_regular = bool(session.get("isRegular"))
+    is_preopen = bool(session.get("isClosedOrPreopen")) and datetime.now(KST).weekday() < 5
+    if is_regular:
+        if entry_count > 0:
+            status = "entry-ready"
+            label = "장중 진입 후보 확인"
+            message = f"실시간 가격 반응을 통과한 진입 후보 {entry_count}개를 우선 점검합니다."
+        elif core_count > 0:
+            status = "core-watch"
+            label = "장중 핵심 후보 관찰"
+            message = f"핵심 후보 {core_count}개를 가격·거래량 반응 기준으로 확인합니다."
+        elif expansion_active:
+            status = "expanding"
+            label = "장중 후보 확장 중"
+            message = "진입 후보가 부족해 서버가 후보 풀과 가격 데이터를 계속 보강합니다."
+        else:
+            status = "needs-discovery"
+            label = "장중 후보 부족"
+            message = "조건 충족 후보가 부족합니다. 무리한 진입보다 새 신호를 기다립니다."
+    else:
+        if core_count > 0 or wait_count > 0:
+            status = "preopen-watch-ready"
+            label = "다음 장 관찰 준비"
+            message = f"장마감 기준 후보 {core_count + wait_count}개를 다음 장 시작 후 가격 반응으로 재확인합니다."
+        elif expansion_active:
+            status = "preopen-expanding"
+            label = "장전 후보 확장 중" if is_preopen else "후보 확장 중"
+            message = "핵심·진입 후보가 부족해 서버가 뉴스·공시·가격 근거를 추가 수집합니다."
+        else:
+            status = "preopen-needs-discovery"
+            label = "다음 장 후보 부족"
+            message = "다음 장에 바로 점검할 후보가 부족합니다. 후보 발굴을 먼저 보강합니다."
+    return {
+        "status": status,
+        "label": label,
+        "message": message,
+        "mode": "intraday" if is_regular else "close",
+        "sessionPhase": session.get("phase", ""),
+        "isRegular": is_regular,
+        "coreCount": core_count,
+        "entryCount": entry_count,
+        "waitCount": wait_count,
+        "visibleCandidateCount": visible_count,
+        "dataWaitCount": data_wait_count,
+        "expansionActive": expansion_active,
+        "checkedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
 def dashboard_summary(payload: dict) -> dict:
     candidates = payload.get("candidates", [])
     if not isinstance(candidates, list):
@@ -20883,9 +20960,14 @@ def dashboard_summary(payload: dict) -> dict:
     pipeline = integrations.get("pipeline", [])
     if not isinstance(pipeline, list):
         pipeline = []
+    readiness = summary.get("marketOpenReadiness")
+    if not isinstance(readiness, dict):
+        readiness = dashboard_market_open_readiness(candidates, summary)
     return {
         "mode": payload.get("mode"),
         "generatedAt": payload.get("generatedAt"),
+        "marketOpenReadiness": readiness,
+        "preopenReadiness": readiness,
         "candidateCount": summary.get("candidateCount", len(candidates)),
         "highScoreCount": summary.get("highScoreCount", 0),
         "readyCount": summary.get("readyCount", 0),
@@ -22145,6 +22227,11 @@ def attach_dashboard_revision(payload: dict, source: str = "") -> dict:
     if not isinstance(summary, dict):
         summary = {}
         payload["summary"] = summary
+    readiness = summary.get("marketOpenReadiness")
+    if not isinstance(readiness, dict):
+        readiness = dashboard_market_open_readiness(payload.get("candidates", []), summary)
+    summary["marketOpenReadiness"] = readiness
+    summary["preopenReadiness"] = readiness
     selected_mode = normalize_signal_mode(payload.get("mode") or summary.get("analysisMode") or "auto")
     snapshot_id = f"{selected_mode}:{revision}"
     summary["candidateListRevision"] = revision

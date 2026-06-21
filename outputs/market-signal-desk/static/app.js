@@ -1604,7 +1604,6 @@ async function refreshLivePrices() {
     requestedCount: symbols.length
   };
   const payload = await safeFetchJson(`/api/dashboard/live-prices?${params.toString()}`, fallback, 12000);
-  maybeShowDashboardSignalUpdate(payload);
   const priceOnlyPayload = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const stableDecisionCount = state.livePrice.stableDecisionCount ?? 0;
   const finalDecisionStabilitySeconds = state.livePrice.finalDecisionStabilitySeconds ?? 0;
@@ -4486,6 +4485,7 @@ function candidateBriefForMain(summary = {}) {
   const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
   const sourceLabel = candidateSourceLabel(summary);
   const compressionCounts = summary.candidateCompressionCounts ?? {};
+  const readiness = summary.marketOpenReadiness ?? summary.preopenReadiness ?? {};
   const visibility = currentCandidateScopeSummary();
   const visibleCounts = visibility.counts ?? {};
   const hasVisibleBasis = visibility.totalCount > 0;
@@ -4525,6 +4525,7 @@ function candidateBriefForMain(summary = {}) {
     : sourceLabel;
   const line = [
     sourceText,
+    readiness?.label ? readiness.label : "",
     candidateCount ? `후보 ${candidateCount}` : "",
     storedCount && storedCount !== candidateCount ? `저장 기록 ${storedCount}` : "",
     `핵심 ${coreCount}`,
@@ -4535,7 +4536,7 @@ function candidateBriefForMain(summary = {}) {
   ].filter(Boolean).join(" · ");
   return {
     line: shortText(line || sourceLabel, 64),
-    title: line || sourceLabel
+    title: [line || sourceLabel, readiness?.message || ""].filter(Boolean).join(" · ")
   };
 }
 
@@ -4674,16 +4675,34 @@ function statusSignalKey(schedulerStatus = state.schedulerStatus, discoveryStatu
   ].filter(Boolean).join("|");
 }
 
+function dashboardCandidateSignature(dashboard = state.dashboard) {
+  const candidates = Array.isArray(dashboard?.candidates) ? dashboard.candidates : [];
+  if (!candidates.length) return "";
+  return candidates.slice(0, 80).map((item) => {
+    const pool = item?.candidatePool ?? {};
+    const compression = item?.candidateCompression ?? item?.compression ?? {};
+    const decision = item?.finalDecision ?? {};
+    const score = Math.floor(Number(item?.totalScore ?? item?.score ?? 0) / 5) * 5;
+    return [
+      String(item?.symbol ?? "").trim().toUpperCase(),
+      String(pool.stateKey ?? item?.decisionGroup?.key ?? ""),
+      String(compression.key ?? compression.tier ?? compression.label ?? ""),
+      String(decision.actionKey ?? decision.key ?? item?.finalActionKey ?? ""),
+      Number.isFinite(score) ? score : 0
+    ].join(":");
+  }).join("|");
+}
+
 function dashboardSignalKey(dashboard = state.dashboard) {
   const summary = dashboard?.summary ?? {};
-  const value = summary.candidateSignalKey
-    ?? summary.candidateListRevision
-    ?? summary.snapshotId
-    ?? dashboard?.snapshotId
-    ?? summary.runId
-    ?? summary.generatedAt
-    ?? dashboard?.generatedAt
-    ?? dashboard?.asOf;
+  const value = [
+    summary.candidateSignalKey,
+    summary.candidateListRevision,
+    dashboardCandidateSignature(dashboard),
+    summary.snapshotId,
+    dashboard?.snapshotId,
+    summary.runId
+  ].find((item) => String(item ?? "").trim());
   return String(value ?? "").trim();
 }
 
@@ -4747,6 +4766,11 @@ function maybeShowSignalUpdate(schedulerStatus = state.schedulerStatus, discover
 
 function maybeShowDashboardSignalUpdate(payload) {
   if (!state.dashboard || state.activity.active || !payload || typeof payload !== "object") return;
+  if (payload.detail === "price" || payload.selectionCycle === "price-only" || payload.priceOnly) return;
+  const hasCandidateSignal =
+    Boolean(payload.summary?.candidateSignalKey || payload.summary?.candidateListRevision) ||
+    Array.isArray(payload.candidates);
+  if (!hasCandidateSignal) return;
   const nextDashboardKey = dashboardSignalKey(payload);
   if (!nextDashboardKey) return;
   const key = [statusSignalKey(), nextDashboardKey].filter(Boolean).join("|");
@@ -4759,8 +4783,12 @@ function maybeShowDashboardSignalUpdate(payload) {
   if (key === state.signalUpdate.currentKey || key === state.signalUpdate.dismissedKey) return;
   const summary = payload.summary ?? {};
   const count = Number(summary.candidateCount ?? payload.candidates?.length ?? 0);
+  const newCount = Number(summary.newCandidateCount ?? summary.relatedSignalExpansionAddedCount ?? 0);
+  const coreCount = Number(summary.coreCandidateCount ?? 0);
+  const entryCount = Number(summary.entryCandidateCount ?? summary.actionCandidateCount ?? 0);
+  const waitCount = Number(summary.waitCandidateCompressionCount ?? summary.candidateCompressionCounts?.wait ?? 0);
   const detail = Number.isFinite(count) && count > 0
-    ? `${modeLabel(payload.mode || state.mode)} · 후보 ${count.toLocaleString("ko-KR")}개 스냅샷이 새로 저장됐습니다 · 클릭 시 목록 반영`
+    ? `${modeLabel(payload.mode || state.mode)} · 후보 ${count.toLocaleString("ko-KR")}개${newCount ? ` · 새 후보 ${newCount.toLocaleString("ko-KR")}개` : ""}${coreCount || entryCount || waitCount ? ` · 핵심 ${coreCount} · 진입 ${entryCount} · 대기 ${waitCount}` : ""} · 클릭 시 목록 반영`
     : `${modeLabel(payload.mode || state.mode)} · 새 후보 스냅샷이 저장됐습니다 · 클릭 시 목록 반영`;
   state.signalUpdate.pending = {
     key,
