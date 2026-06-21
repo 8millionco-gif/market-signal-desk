@@ -16406,6 +16406,141 @@ def summary_count_value(*values, maximum: int = 1_000_000) -> int:
     return 0
 
 
+HIDDEN_CANDIDATE_POOL_STATES = {"excluded", "expired"}
+
+
+def candidate_hidden_record_reason(candidate: dict) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    compression = candidate.get("candidateCompression") if isinstance(candidate.get("candidateCompression"), dict) else {}
+    pool = candidate.get("candidatePool") if isinstance(candidate.get("candidatePool"), dict) else {}
+    discovery = candidate.get("discovery") if isinstance(candidate.get("discovery"), dict) else {}
+    pool_memory = discovery.get("poolMemory") if isinstance(discovery.get("poolMemory"), dict) else {}
+    decision_group = candidate.get("decisionGroup") if isinstance(candidate.get("decisionGroup"), dict) else {}
+    final_decision = candidate.get("finalDecision") if isinstance(candidate.get("finalDecision"), dict) else {}
+    tier = str(compression.get("tier") or "").strip().lower()
+    state_key = str(pool.get("stateKey") or pool_memory.get("stateKey") or "").strip().lower()
+    decision_key = str(decision_group.get("key") or "").strip().lower()
+    action_key = str(final_decision.get("actionKey") or "").strip().lower()
+    if state_key in HIDDEN_CANDIDATE_POOL_STATES:
+        return state_key
+    if tier in {"exclude", "excluded"}:
+        return "compression_exclude"
+    if decision_key == "exclude":
+        return "decision_exclude"
+    if action_key == "exclude":
+        return "final_exclude"
+    return ""
+
+
+def split_visible_candidate_records(candidates: list[dict] | None) -> tuple[list[dict], list[dict]]:
+    visible: list[dict] = []
+    hidden: list[dict] = []
+    if not isinstance(candidates, list):
+        return visible, hidden
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate_hidden_record_reason(candidate):
+            hidden.append(candidate)
+        else:
+            visible.append(candidate)
+    return visible, hidden
+
+
+def normalize_dashboard_visible_candidates(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+    visible_candidates, hidden_candidates = split_visible_candidate_records(candidates)
+    selected_record = payload.get("selected") if isinstance(payload.get("selected"), dict) else None
+    selected_hidden = bool(candidate_hidden_record_reason(selected_record)) if selected_record else False
+    if len(visible_candidates) == len(candidates) and not hidden_candidates and not selected_hidden:
+        return payload
+
+    normalized = copy.deepcopy(payload)
+    normalized["candidates"] = [copy.deepcopy(item) for item in visible_candidates]
+    visible_count = len(visible_candidates)
+    hidden_count = len(hidden_candidates)
+    raw_count = len([item for item in candidates if isinstance(item, dict)])
+    normalized["candidateCount"] = visible_count
+
+    selected = normalized.get("selected") if isinstance(normalized.get("selected"), dict) else None
+    if selected and candidate_hidden_record_reason(selected):
+        normalized["selected"] = copy.deepcopy(visible_candidates[0]) if visible_candidates else None
+    elif not selected and visible_candidates:
+        normalized["selected"] = copy.deepcopy(visible_candidates[0])
+
+    summary = normalized.get("summary", {}) if isinstance(normalized.get("summary"), dict) else {}
+    existing_hidden = summary_count_value(
+        summary.get("hiddenExcludedCount"),
+        summary.get("excludedRecordCount"),
+        summary.get("excludeCandidateCount"),
+        summary.get("excludeCandidateCompressionCount"),
+    )
+    effective_hidden = max(existing_hidden, hidden_count)
+    compression_counts = summary.get("candidateCompressionCounts", {})
+    if isinstance(compression_counts, dict):
+        compression_counts = dict(compression_counts)
+        effective_hidden = max(effective_hidden, summary_count_value(compression_counts.get("exclude")))
+        compression_counts["exclude"] = 0
+    else:
+        compression_counts = {}
+
+    summary.update({
+        "rawCandidateCount": summary_count_value(summary.get("rawCandidateCount"), raw_count),
+        "candidateCount": visible_count,
+        "visibleCandidateCount": visible_count,
+        "displayCandidateCount": visible_count,
+        "hiddenExcludedCount": effective_hidden,
+        "excludedRecordCount": effective_hidden,
+        "excludeCandidateCount": 0,
+        "excludeCandidateCompressionCount": 0,
+        "hiddenCandidateCompressionCount": effective_hidden,
+        "candidateCompressionCounts": compression_counts,
+    })
+    pool_summary = summary.get("candidatePoolSummary")
+    if isinstance(pool_summary, dict):
+        pool_summary = dict(pool_summary)
+        pool_summary["visibleCandidateCount"] = visible_count
+        pool_summary["hiddenExcludedCount"] = effective_hidden
+        pool_summary["excludedHiddenCount"] = effective_hidden
+        pool_summary["excludedRecordCount"] = effective_hidden
+        summary["candidatePoolSummary"] = pool_summary
+        normalized["candidatePoolSummary"] = pool_summary
+    normalized["summary"] = summary
+
+    integrations = normalized.get("integrations", {}) if isinstance(normalized.get("integrations"), dict) else {}
+    selection_status = integrations.get("selection", {}) if isinstance(integrations.get("selection"), dict) else {}
+    if isinstance(selection_status, dict):
+        selection_counts = selection_status.get("candidateCompressionCounts", {})
+        if isinstance(selection_counts, dict):
+            selection_counts = dict(selection_counts)
+            selection_counts["exclude"] = 0
+            selection_status["candidateCompressionCounts"] = selection_counts
+        selection_status.update({
+            "candidateCount": visible_count,
+            "visibleCandidateCount": visible_count,
+            "excludeCandidateCount": 0,
+            "excludeCandidateCompressionCount": 0,
+            "hiddenExcludedCount": effective_hidden,
+            "excludedRecordCount": effective_hidden,
+        })
+        integrations["selection"] = selection_status
+    expansion = integrations.get("candidatePoolExpansion")
+    if isinstance(expansion, dict):
+        expansion = dict(expansion)
+        expansion["visibleCandidateCount"] = visible_count
+        expansion["hiddenExcludedCount"] = effective_hidden
+        expansion["excludedHiddenCount"] = effective_hidden
+        expansion["excludedRecordCount"] = effective_hidden
+        integrations["candidatePoolExpansion"] = expansion
+    normalized["integrations"] = integrations
+    return normalized
+
+
 def discovery_expansion_profile(summary: dict | None = None, pool_status: dict | None = None) -> dict:
     summary = summary if isinstance(summary, dict) else {}
     if not isinstance(pool_status, dict):
@@ -18326,6 +18461,8 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         candidates,
         enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
     )
+    candidates, hidden_records = split_visible_candidate_records(candidates)
+    hidden_record_count = len(hidden_records)
     final_core_expansion = ensure_core_expansion_for_visible_candidates(candidates)
     enriched["selected"] = synchronize_selected_candidate_from_candidates(
         candidates,
@@ -18355,8 +18492,51 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         compression_counts = fallback_selection.get("candidateCompressionCounts", {})
     if not isinstance(compression_counts, dict):
         compression_counts = {}
+    if hidden_record_count:
+        hidden_existing = summary_count_value(
+            summary.get("hiddenExcludedCount"),
+            summary.get("excludedRecordCount"),
+            summary.get("excludeCandidateCount"),
+            summary.get("excludeCandidateCompressionCount"),
+            compression_counts.get("exclude"),
+        )
+        hidden_total = max(hidden_existing, hidden_record_count)
+        compression_counts = dict(compression_counts)
+        compression_counts["exclude"] = 0
+        summary.update({
+            "rawCandidateCount": summary_count_value(
+                summary.get("rawCandidateCount"),
+                len(candidates) + hidden_record_count,
+            ),
+            "hiddenExcludedCount": hidden_total,
+            "excludedRecordCount": hidden_total,
+            "hiddenCandidateCompressionCount": hidden_total,
+            "excludeCandidateCount": 0,
+            "excludeCandidateCompressionCount": 0,
+            "candidateCount": len(candidates),
+            "visibleCandidateCount": len(candidates),
+            "candidateCompressionCounts": compression_counts,
+        })
+        if isinstance(selection_status, dict):
+            selection_status.update({
+                "candidateCount": len(candidates),
+                "visibleCandidateCount": len(candidates),
+                "hiddenExcludedCount": hidden_total,
+                "excludedRecordCount": hidden_total,
+                "excludeCandidateCount": 0,
+                "excludeCandidateCompressionCount": 0,
+                "candidateCompressionCounts": compression_counts,
+            })
 
     summary.update(actual_selection)
+    if hidden_record_count:
+        summary["hiddenExcludedCount"] = max(summary_count_value(summary.get("hiddenExcludedCount")), hidden_record_count)
+        summary["excludedRecordCount"] = summary["hiddenExcludedCount"]
+        summary["excludeCandidateCount"] = 0
+        summary["excludeCandidateCompressionCount"] = 0
+        summary["hiddenCandidateCompressionCount"] = summary["hiddenExcludedCount"]
+        if isinstance(summary.get("candidateCompressionCounts"), dict):
+            summary["candidateCompressionCounts"]["exclude"] = 0
     if final_core_expansion.get("applied"):
         expansion_selection_fields = {
             "selectionExpansionActive": True,
@@ -18416,13 +18596,9 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
             else None,
         ),
         "excludeCandidateCount": summary_count_value(
-            actual_selection.get("excludeCandidateCompressionCount"),
-            selection_status.get("excludeCandidateCount"),
             summary.get("hiddenExcludedCount"),
-            summary.get("excludeCandidateCount"),
-            fallback_selection.get("candidateCompressionCounts", {}).get("exclude")
-            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
-            else None,
+            summary.get("excludedRecordCount"),
+            hidden_record_count,
         ),
         "candidateCount": summary_count_value(summary.get("candidateCount"), len(candidates)),
         "domesticSelected": summary_count_value(summary.get("domesticSelected")),
@@ -18475,7 +18651,7 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     integrations["discoveryNotice"] = notice
     enriched["summary"] = summary
     enriched["integrations"] = integrations
-    return enriched
+    return normalize_dashboard_visible_candidates(enriched)
 
 
 def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: str) -> tuple[dict, dict]:
@@ -21894,7 +22070,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
             live_price_status["cache"] = payload["cache"]
             integrations["livePrice"] = live_price_status
             payload["integrations"] = integrations
-            return payload
+            return normalize_dashboard_visible_candidates(payload)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     store_payloads = live_price_fast_store_payloads()
     base_payload, base_source = dashboard_base_for_live_prices_fast(mode, store_payloads=store_payloads)
@@ -22061,6 +22237,7 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         "ageSeconds": 0,
         "message": "DB 최신 스냅샷 응답을 새로 구성했습니다.",
     }
+    payload = normalize_dashboard_visible_candidates(payload)
     if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
         with LIVE_PRICE_RESPONSE_CACHE_LOCK:
             LIVE_PRICE_RESPONSE_CACHE[cache_key] = {
