@@ -21145,8 +21145,11 @@ def discovery_bot_status() -> dict:
         state = {
             "started": bool(DISCOVERY_BOT_STATE.get("started")),
             "running": bool(DISCOVERY_BOT_STATE.get("running")),
+            "phase": DISCOVERY_BOT_STATE.get("phase", "idle"),
             "lastError": DISCOVERY_BOT_STATE.get("lastError", ""),
             "lastCheckedAt": DISCOVERY_BOT_STATE.get("lastCheckedAt", ""),
+            "lastStartedAt": DISCOVERY_BOT_STATE.get("lastStartedAt", ""),
+            "lastProgressAt": DISCOVERY_BOT_STATE.get("lastProgressAt", ""),
             "lastRun": DISCOVERY_BOT_STATE.get("lastRun") or discovery_latest_record(False),
         }
     latest = discovery_latest_record(False)
@@ -21331,6 +21334,14 @@ def discovery_bot_status() -> dict:
     }
 
 
+def update_discovery_bot_progress(phase: str) -> None:
+    now = datetime.now(KST).isoformat(timespec="seconds")
+    with DISCOVERY_BOT_LOCK:
+        DISCOVERY_BOT_STATE["phase"] = phase
+        DISCOVERY_BOT_STATE["lastCheckedAt"] = now
+        DISCOVERY_BOT_STATE["lastProgressAt"] = now
+
+
 def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") -> dict:
     selected_mode = discovery_bot_mode(mode)
     with DISCOVERY_BOT_LOCK:
@@ -21340,14 +21351,34 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
                 "ok": False,
                 "skipped": True,
                 "message": "발굴 봇이 이미 실행 중입니다.",
+                "phase": DISCOVERY_BOT_STATE.get("phase", "running"),
                 "latest": latest,
             }
         DISCOVERY_BOT_STATE["running"] = True
-        DISCOVERY_BOT_STATE["lastCheckedAt"] = datetime.now(KST).isoformat(timespec="seconds")
+        started_at = datetime.now(KST).isoformat(timespec="seconds")
+        DISCOVERY_BOT_STATE["lastStartedAt"] = started_at
+        DISCOVERY_BOT_STATE["lastCheckedAt"] = started_at
+        DISCOVERY_BOT_STATE["lastProgressAt"] = started_at
+        DISCOVERY_BOT_STATE["phase"] = "starting"
 
     try:
         now = datetime.now(KST)
+        update_discovery_bot_progress("building-dashboard")
         payload = dashboard(selected_mode, force_discovery=True)
+        update_discovery_bot_progress("writing-initial-dashboard-cache")
+        if isinstance(payload.get("summary"), dict):
+            payload["summary"].update({
+                "dashboardCacheUpdateSource": f"discovery-{trigger}-initial",
+                "dashboardCacheUpdatePhase": "initial",
+            })
+        initial_cache_updated = write_dashboard_cache_record(
+            selected_mode,
+            payload,
+            source=f"discovery-{trigger}-initial",
+        )
+        if isinstance(payload.get("summary"), dict):
+            payload["summary"]["dashboardCacheUpdated"] = initial_cache_updated
+        update_discovery_bot_progress("prefetching-candidate-market-data")
         prefetch_status = prefetch_candidate_pool_market_data(
             selected_mode,
             trigger=trigger,
@@ -21355,12 +21386,14 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
             seed_candidates=payload.get("candidates", []),
         )
         payload.setdefault("integrations", {})["candidatePrefetch"] = prefetch_status
+        update_discovery_bot_progress("refreshing-prefetch-results")
         post_prefetch_status = refresh_discovery_payload_after_prefetch(payload, selected_mode, trigger)
         payload.setdefault("integrations", {})["postPrefetchRefresh"] = post_prefetch_status
         summary = dashboard_summary(payload)
         summary["candidatePrefetch"] = prefetch_status
         summary["postPrefetchMerge"] = post_prefetch_status
         summary["dashboardCacheUpdateSource"] = f"discovery-{trigger}"
+        update_discovery_bot_progress("writing-final-dashboard-cache")
         cache_updated = write_dashboard_cache_record(
             selected_mode,
             payload,
@@ -21388,14 +21421,18 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
         with DISCOVERY_BOT_LOCK:
             DISCOVERY_BOT_STATE["lastRun"] = public_record
             DISCOVERY_BOT_STATE["lastError"] = ""
+            DISCOVERY_BOT_STATE["phase"] = "completed"
         return record
     except Exception as error:
         with DISCOVERY_BOT_LOCK:
             DISCOVERY_BOT_STATE["lastError"] = str(error)[:240]
+            DISCOVERY_BOT_STATE["phase"] = "error"
         raise
     finally:
         with DISCOVERY_BOT_LOCK:
             DISCOVERY_BOT_STATE["running"] = False
+            if DISCOVERY_BOT_STATE.get("phase") not in {"error"}:
+                DISCOVERY_BOT_STATE["phase"] = "idle"
 
 
 def scheduler_record_from_snapshot(path: Path, snapshot: dict) -> dict:
