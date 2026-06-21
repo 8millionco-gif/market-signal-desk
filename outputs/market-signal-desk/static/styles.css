@@ -1549,6 +1549,17 @@ h3 {
   font-weight: 900;
 }
 
+.compact-detail-chips {
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.muted-chip {
+  color: var(--muted);
+  border: 1px solid rgba(180, 193, 216, 0.16);
+  background: rgba(180, 193, 216, 0.06);
+}
+
 .hero-side {
   display: grid;
   align-content: space-between;

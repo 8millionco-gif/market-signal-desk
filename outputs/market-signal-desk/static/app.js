@@ -1177,7 +1177,7 @@ function updateSelectedPriceFragments(options = {}) {
     setClassIfChanged(changeNode, candidateChangeClass(item));
   }
   setTextIfChanged(sourceNode, priceMeta(item));
-  setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item));
+  setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item, true));
   if (priceOnly) {
     updateSelectedLivePriceOnlyFragments(item);
     return;
@@ -5714,6 +5714,16 @@ function officialSignalSection(item) {
   `;
 }
 
+function detailTagChips(item, limit = 5) {
+  const tags = Array.isArray(item?.tags) ? item.tags.filter(Boolean) : [];
+  const visibleTags = tags.slice(0, limit);
+  const hiddenTagCount = Math.max(0, tags.length - visibleTags.length);
+  return `
+    ${visibleTags.map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
+    ${hiddenTagCount ? `<span class="chip muted-chip">+${hiddenTagCount}</span>` : ""}
+  `;
+}
+
 function renderDetail() {
   const item = selectedCandidate();
   if (!item) {
@@ -5755,10 +5765,10 @@ function renderDetail() {
         </p>
         <p class="data-source" data-selected-price-meta>${escapeHtml(priceMeta(item))}</p>
         <div class="live-data-strip detail-live-data-strip" data-selected-live-data>
-          ${liveDataCoverageChips(item)}
+          ${liveDataCoverageChips(item, true)}
         </div>
-        <div class="chips">
-          ${item.tags.map((tag) => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
+        <div class="chips compact-detail-chips">
+          ${detailTagChips(item)}
         </div>
       </div>
       <div class="hero-side">
