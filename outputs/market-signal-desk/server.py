@@ -12399,6 +12399,10 @@ def candidate_core_eligible(candidate: dict) -> bool:
 
 
 def candidate_entry_eligible(candidate: dict) -> bool:
+    return bool(candidate_entry_reaction_gate(candidate).get("ready"))
+
+
+def candidate_entry_reaction_gate(candidate: dict) -> dict:
     final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
     gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
     confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
@@ -12409,15 +12413,12 @@ def candidate_entry_eligible(candidate: dict) -> bool:
     source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
     evidence = candidate_discovery_evidence_strength(candidate)
     trade_gate = candidate_trade_data_gate(candidate)
-    if candidate_is_portfolio_linked(candidate):
-        return False
-    if trade_gate.get("closedBaseline") or not trade_gate.get("tradeReady") or not trade_gate.get("entryReady"):
-        return False
-    if not validation.get("entryReady") or str(validation.get("key", "")) != "confirmed":
-        return False
     action_key = str(final_decision.get("actionKey", ""))
     gate_key = str(gate.get("key", ""))
     reaction_gate = str(reaction.get("reactionGate", "wait"))
+    reaction_metrics = reaction.get("metrics", {}) if isinstance(reaction.get("metrics"), dict) else {}
+    price_basis = candidate_public_price_basis(candidate)
+    price_basis_key = str(price_basis.get("basis", "unknown"))
     risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
     heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
     confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
@@ -12425,22 +12426,91 @@ def candidate_entry_eligible(candidate: dict) -> bool:
     total = bounded_int(candidate.get("totalScore", 0), 0, 100)
     readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
+    validation_key = str(validation.get("key", "insufficient"))
+    validation_confirmed = bool(validation.get("entryReady") and validation_key == "confirmed")
+    price_confirmed = bool(reaction_metrics.get("priceConfirmed"))
+    volume_confirmed = bool(reaction_metrics.get("volumeConfirmed"))
+    liquidity_confirmed = bool(reaction_metrics.get("liquidityConfirmed"))
+    market_response_confirmed = bool(volume_confirmed or liquidity_confirmed)
+    checks = {
+        "livePrice": bool(candidate_has_fresh_live_price(candidate)),
+        "price": bool(trade_gate.get("displayReady")),
+        "change": bool((price_basis.get("change") or "") and str(price_basis.get("change")) != "-"),
+        "tradeReady": bool(trade_gate.get("tradeReady")),
+        "entryReady": bool(trade_gate.get("entryReady")),
+        "validationConfirmed": validation_confirmed,
+        "reactionConfirmed": bool(reaction_gate == "confirmed" and not reaction.get("entryBlock")),
+        "priceConfirmed": price_confirmed,
+        "volumeConfirmed": volume_confirmed,
+        "liquidityConfirmed": liquidity_confirmed,
+        "marketResponseConfirmed": market_response_confirmed,
+        "evidenceQualified": bool(evidence.get("qualified")),
+        "riskAllowed": risk < 22,
+        "heatAllowed": heat < 14,
+        "scoreAllowed": bool(total >= 72 and readiness >= 68 and confidence_score >= 58 and reliability_score >= 50 and reaction_score >= 56),
+    }
+
+    def result(ready: bool, key: str, label: str, reason: str) -> dict:
+        return {
+            "ready": bool(ready),
+            "key": key,
+            "label": label,
+            "reason": reason,
+            "tradeReady": bool(trade_gate.get("tradeReady")),
+            "entryReady": bool(trade_gate.get("entryReady")),
+            "closedBaseline": bool(trade_gate.get("closedBaseline")),
+            "displayReady": bool(trade_gate.get("displayReady")),
+            "priceBasis": price_basis_key,
+            "basis": price_basis_key,
+            "readinessKey": trade_gate.get("readinessKey", ""),
+            "evaluationKey": trade_gate.get("evaluationKey", ""),
+            "validationKey": validation_key,
+            "reactionGate": reaction_gate,
+            "reactionScore": reaction_score,
+            "totalScore": total,
+            "triggerReadiness": readiness,
+            "confidenceScore": confidence_score,
+            "sourceReliabilityScore": reliability_score,
+            "riskPenalty": risk,
+            "heatPenalty": heat,
+            "missing": text_list(trade_gate.get("missing", []), limit=6),
+            "checks": checks,
+        }
+
+    if candidate_is_portfolio_linked(candidate):
+        return result(False, "portfolio", "보유 판단", "보유 종목은 신규 진입 후보가 아니라 보유·추가매수·매도 판단으로 분리합니다.")
+    if trade_gate.get("closedBaseline") or price_basis_key == "closed_baseline":
+        return result(False, "closed_baseline", "다음 장 관찰", "장마감 기준가는 다음 거래일 우선 관찰 근거이며, 진입 승격은 장중 실시간 반응 확인 후에만 허용합니다.")
+    if not trade_gate.get("displayReady"):
+        return result(False, "data_wait", str(trade_gate.get("label") or "데이터 보강"), str(trade_gate.get("reason") or "가격·등락률 필수값을 서버가 보강 중입니다."))
+    if not checks["livePrice"]:
+        return result(False, "live_price_wait", "실시간 가격 대기", "진입 후보는 토스 실시간 가격이 확인된 종목만 허용합니다.")
+    if not trade_gate.get("tradeReady") or not trade_gate.get("entryReady"):
+        return result(False, "reaction_data_wait", "반응 데이터 대기", str(trade_gate.get("reason") or "가격·등락률·차트/호가/체결 반응 확인 전입니다."))
     if official.get("riskLevel") in {"medium", "high"}:
-        return False
+        return result(False, "risk_block", "리스크 차단", "공시/뉴스 리스크가 중간 이상으로 감지되어 신규 진입에서 제외합니다.")
     if action_key in {"exclude", "stop"} or gate_key == "exclude":
-        return False
+        return result(False, "quality_block", "품질 기준 차단", "최종 판단 또는 품질 게이트가 신규 진입 제외로 분류했습니다.")
+    if not validation_confirmed:
+        return result(False, "validation_wait", "검증 대기", str(validation.get("reason") or validation.get("label") or "뉴스·공시와 가격 반응의 결합 검증이 아직 끝나지 않았습니다."))
     if reaction_gate != "confirmed" or reaction.get("entryBlock"):
-        return False
-    return (
-        evidence["qualified"]
-        and total >= 72
-        and readiness >= 68
-        and confidence_score >= 58
-        and reliability_score >= 50
-        and reaction_score >= 56
-        and risk < 22
-        and heat < 14
-    )
+        blocker = next((str(value).strip() for value in [
+            *text_list(reaction.get("blockers", []), limit=3),
+            *text_list(reaction.get("warnings", []), limit=3),
+            reaction.get("nextCheck", ""),
+        ] if str(value).strip()), "") or "가격·거래량 반응이 진입 기준을 충족하지 못했습니다."
+        return result(False, "reaction_wait", "반응 검증 대기", blocker)
+    if not price_confirmed or not market_response_confirmed:
+        return result(False, "market_response_wait", "거래 반응 대기", "가격 방향과 거래량·호가·체결 중 하나 이상의 시장 자금 반응이 함께 확인되어야 합니다.")
+    if not evidence["qualified"]:
+        return result(False, "evidence_wait", "근거 보강 대기", "뉴스·공시·트렌드 근거가 진입 기준을 충족하지 못했습니다.")
+    if risk >= 22:
+        return result(False, "risk_wait", "리스크 점검", "리스크 차감 점수가 높아 신규 진입을 보류합니다.")
+    if heat >= 14:
+        return result(False, "overheat_wait", "과열 점검", "단기 과열 가능성이 있어 추격 진입을 보류합니다.")
+    if not checks["scoreAllowed"]:
+        return result(False, "score_wait", "점수 보강 대기", "총점·진입 준비도·원천 신뢰도·가격 반응 점수가 진입 기준을 모두 넘지 못했습니다.")
+    return result(True, "entry_ready", "진입 가능", "실시간 가격·등락률·거래 반응과 발굴 근거가 함께 확인된 매수 관찰 후보입니다.")
 
 
 def candidate_core_expansion_eligible(candidate: dict) -> tuple[bool, str]:
@@ -12549,6 +12619,8 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         price_readiness = candidate_price_readiness(item)
         trade_gate = candidate_trade_data_gate(item)
         item["tradeDataGate"] = trade_gate
+        entry_gate = candidate_entry_reaction_gate(item)
+        item["entryReactionGate"] = entry_gate
         action_key = str(final_decision.get("actionKey", "verify"))
         gate_key = str(gate.get("key", "defer"))
         reaction_gate = str(reaction.get("reactionGate", "wait"))
@@ -12575,7 +12647,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             reason = "가격 반응 데이터가 미완성이고 리스크 기준에 걸려 신규 진입 제외"
         elif id(item) in entry_item_ids:
             tier, label = "entry", "진입"
-            reason = "실시간 가격·등락률·거래 반응과 발굴 근거가 함께 확인된 매수 관찰 후보"
+            reason = str(entry_gate.get("reason") or "실시간 가격·등락률·거래 반응과 발굴 근거가 함께 확인된 매수 관찰 후보")
         elif id(item) in core_item_ids:
             tier, label = "core", "핵심"
             if trade_gate.get("closedBaseline"):
@@ -12634,6 +12706,9 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "validationKey": validation_key,
             "validationLabel": validation.get("label", ""),
             "poolBonus": pool_bonus,
+            "entryGateKey": entry_gate.get("key", ""),
+            "entryGateLabel": entry_gate.get("label", ""),
+            "entryGate": entry_gate,
         }
         item["candidateCompression"] = compression
         if tier in {"core", "entry"}:
@@ -14330,6 +14405,17 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     average_official = sum(official_scores) / len(official_scores) if official_scores else 0
     hidden_opportunity_count = len([score for score in opportunity_scores if score >= 8])
     compression_status = assign_candidate_compression(enriched)
+    entry_gate_counts: dict[str, int] = {}
+    entry_gate_labels: dict[str, str] = {}
+    entry_ready_symbols: list[str] = []
+    for item in enriched:
+        entry_gate = item.get("entryReactionGate", {}) if isinstance(item.get("entryReactionGate"), dict) else candidate_entry_reaction_gate(item)
+        key = str(entry_gate.get("key") or "unknown")
+        entry_gate_counts[key] = entry_gate_counts.get(key, 0) + 1
+        if key not in entry_gate_labels:
+            entry_gate_labels[key] = str(entry_gate.get("label") or key)
+        if entry_gate.get("ready") and str(item.get("symbol", "")).strip():
+            entry_ready_symbols.append(str(item.get("symbol", "")).upper())
     groups = decision_group_counts(enriched)
     return enriched, {
         "source": "live-rules",
@@ -14372,6 +14458,10 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
         "priceBasisWaitCount": price_readiness_counts.get("price_wait", 0),
         "changeWaitCount": price_readiness_counts.get("change_wait", 0),
         "priceReactionEntryBlockedCount": len([item for item in enriched if item.get("priceReaction", {}).get("entryBlock")]),
+        "entryReactionGateCounts": entry_gate_counts,
+        "entryReactionGateLabels": entry_gate_labels,
+        "entryReadySymbolCount": len(entry_ready_symbols),
+        "entryReadySymbols": entry_ready_symbols[:8],
         "finalDecisionCounts": final_decision_counts,
         "stableDecisionCount": stable_decision_count,
         "finalDecisionStabilitySeconds": SIGNAL_FINAL_DECISION_STABILITY_SECONDS if stabilize_decisions and SIGNAL_FINAL_DECISION_STABILITY_ENABLED else 0,
