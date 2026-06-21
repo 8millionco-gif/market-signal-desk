@@ -16403,11 +16403,15 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
     expansion_active = bool(triggers)
     scan_limit = SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS if expansion_active else SIGNAL_DISCOVERY_MAX_SYMBOLS
     selection_limit = SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT if expansion_active else SIGNAL_DISCOVERY_SELECTION_LIMIT
-    message = (
-        "서버가 후보 풀을 넓혀 핵심/진입 가능 종목을 계속 찾고 있습니다."
-        if expansion_active
-        else "현재 후보 풀 기준으로 압축 후보를 유지합니다."
-    )
+    if expansion_active and entry_count <= 0:
+        title = "다음 장 후보 탐색 중"
+        message = "조건을 통과한 진입 후보가 없어 서버가 후보를 더 넓게 발굴하고 있습니다."
+    elif expansion_active:
+        title = "후보 보강 중"
+        message = "핵심/진입 가능 후보를 보강하되 기존 판단은 다음 스냅샷까지 유지합니다."
+    else:
+        title = "후보 풀 유지"
+        message = "현재 후보 풀 기준으로 압축 후보를 유지합니다."
 
     return {
         "expansionActive": expansion_active,
@@ -16415,6 +16419,7 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "expansionTrigger": triggers[0] if triggers else "",
         "expansionTriggers": triggers,
         "reasons": reasons,
+        "reasonLabels": reasons,
         "scanLimit": scan_limit,
         "normalScanLimit": SIGNAL_DISCOVERY_MAX_SYMBOLS,
         "expandedScanLimit": SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS,
@@ -16434,7 +16439,7 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "waitCount": wait_count,
         "portfolioCount": portfolio_count,
         "excludedRatio": float(round(excluded_ratio, 4)),
-        "title": "후보 풀 확장 중" if expansion_active else "후보 풀 유지",
+        "title": title,
         "message": message,
     }
 

@@ -1709,6 +1709,34 @@ function candidatePoolDisplaySummary(totalCount = 0) {
   return parts.join(" / ");
 }
 
+function discoveryTriggerLabel(trigger) {
+  const labels = {
+    core_entry_shortfall: "핵심·진입 후보 부족",
+    entry_empty: "진입 조건 미충족",
+    domestic_visible_shortfall: "국내 후보 보강 중",
+    pool_active_shortfall: "감시 후보 확장 중",
+    high_exclusion_ratio: "제외 후보 대체 중"
+  };
+  return labels[String(trigger || "")] || "";
+}
+
+function discoveryNoticeReason(notice) {
+  const reasonLists = [notice.reasonLabels, notice.reasons];
+  for (const reasons of reasonLists) {
+    if (Array.isArray(reasons)) {
+      const found = reasons.find((reason) => typeof reason === "string" && reason.trim());
+      if (found) return found;
+    }
+  }
+  const triggers = Array.isArray(notice.triggers)
+    ? notice.triggers
+    : Array.isArray(notice.expansionTriggers)
+      ? notice.expansionTriggers
+      : [];
+  const firstTrigger = triggers.find((trigger) => typeof trigger === "string" && trigger.trim());
+  return discoveryTriggerLabel(firstTrigger);
+}
+
 function candidateDiscoveryNoticeMarkup() {
   const summary = state.dashboard?.summary || {};
   const notice = summary.discoveryNotice || {};
@@ -1717,11 +1745,11 @@ function candidateDiscoveryNoticeMarkup() {
   const entry = numericSummaryValue(pool.entryCount, summary.entryCandidateCount, summary.actionCandidateCount);
   const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
   if (core + entry > 0 && !active) return "";
-  const title = core + entry > 0 ? (notice.title || "후보 풀 확장 중") : "조건 충족 후보 없음";
+  const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "조건 충족 진입 후보 없음";
   const message = core + entry > 0
-    ? (notice.message || "서버가 후보 풀을 계속 넓히고 있습니다.")
-    : "서버가 후보를 계속 발굴 중입니다.";
-  const reason = Array.isArray(notice.triggers) && notice.triggers.length ? notice.triggers[0] : "";
+    ? (notice.message || "기존 판단은 유지하고 서버가 추가 후보를 보강합니다.")
+    : "무리한 진입 후보는 제외하고 다음 장 관찰 후보를 계속 찾고 있습니다.";
+  const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
       <strong>${escapeHtml(title)}</strong>
