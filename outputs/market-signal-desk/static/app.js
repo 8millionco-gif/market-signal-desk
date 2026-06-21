@@ -196,9 +196,9 @@ const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 5;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 6;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 10;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 4;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 5;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 8;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -2976,6 +2976,18 @@ function render() {
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
+  renderPortfolioStatus();
+  renderFeed();
+  if (state.view === "settings") {
+    renderSettingsPanels();
+  }
+  renderCurrentView();
+  if (state.view === "signals") {
+    maybeNotifyDashboard();
+  }
+}
+
+function renderSettingsPanels() {
   renderLivePriceStatus();
   renderCandidatePoolStatus();
   renderAuthStatus();
@@ -2985,7 +2997,6 @@ function render() {
   renderStorageStatus();
   renderEvidenceStatus();
   renderStockMasterStatus();
-  renderPortfolioStatus();
   renderSnapshotHistory();
   renderNotificationStatus();
   renderMarketStatus();
@@ -2995,11 +3006,6 @@ function render() {
   renderNewsStatus();
   renderOpenAIStatus();
   renderPrinciples();
-  renderFeed();
-  renderCurrentView();
-  if (state.view === "signals") {
-    maybeNotifyDashboard();
-  }
 }
 
 function renderCurrentView() {
@@ -6953,6 +6959,9 @@ function showSettingsView() {
   state.view = state.view === "settings" ? "signals" : "settings";
   updateViewButtons();
   updateShellView();
+  if (state.view === "settings") {
+    renderSettingsPanels();
+  }
   if (state.view === "signals") {
     renderDetail();
   }
