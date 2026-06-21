@@ -198,7 +198,7 @@ const LIVE_CHANGE_RETAIN_SECONDS = 180;
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
 const CANDIDATE_FEED_VISIBLE_LIMIT = 4;
 const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 5;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 8;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 6;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -5334,7 +5334,7 @@ function renderFeed() {
       const primaryDecision = primaryDecisionForDisplay(item, plan);
       const liveText = livePriceLabel(item);
       const reasonText = feedReasonText(item, plan);
-      const headlineText = shortText(item.headline, 64);
+      const headlineText = shortText(item.headline, active ? 64 : 48);
       return `
         <button class="feed-item ${active} ${retained}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -5345,11 +5345,13 @@ function renderFeed() {
               <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}" data-feed-decision>${escapeHtml(primaryDecision.label)}</span>
             </span>
             <span class="feed-subtitle">${escapeHtml(headlineText)}</span>
-            <span class="feed-signal-line ${escapeHtml(plan.tone)}">
-              <strong>근거</strong>
-              <em>${escapeHtml(reasonText)}</em>
-            </span>
-            ${active ? `<span class="live-data-strip feed-live-data-strip" data-feed-live>${liveDataCoverageChips(item, true)}</span>` : ""}
+            ${active ? `
+              <span class="feed-signal-line ${escapeHtml(plan.tone)}">
+                <strong>근거</strong>
+                <em>${escapeHtml(reasonText)}</em>
+              </span>
+              <span class="live-data-strip feed-live-data-strip" data-feed-live>${liveDataCoverageChips(item, true)}</span>
+            ` : ""}
           </span>
           <span class="feed-meta">
             <span class="feed-price-line">
