@@ -6249,32 +6249,101 @@ def latest_market_data_item(source_values: set[str], event_values: set[str]) -> 
     return latest_item
 
 
+MARKET_INDEX_KEYS = {"kospi", "kosdaq", "nasdaq"}
+
+
+def market_index_payload_candidates(item: dict | None) -> list[dict]:
+    if not isinstance(item, dict):
+        return []
+    candidates: list[dict] = []
+    queue: list[dict] = []
+    seen: set[int] = set()
+
+    def add_candidate(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+        queue.append(value)
+
+    add_candidate(item)
+    add_candidate(item.get("payload"))
+    nested_keys = (
+        "payload",
+        "data",
+        "body",
+        "response",
+        "result",
+        "market",
+        "quote",
+        "raw",
+        "metadata",
+        "item",
+    )
+    while queue and len(candidates) < 120:
+        current = queue.pop(0)
+        candidates.append(current)
+        for nested_key in nested_keys:
+            nested = current.get(nested_key)
+            if isinstance(nested, dict):
+                add_candidate(nested)
+            elif isinstance(nested, list):
+                for entry in nested[:8]:
+                    add_candidate(entry)
+        datas = current.get("datas")
+        if isinstance(datas, list):
+            for entry in datas[:8]:
+                add_candidate(entry)
+    return candidates
+
+
 def market_index_data_from_latest_item(item: dict | None) -> tuple[dict, dict, str]:
     if not isinstance(item, dict):
         return {}, {}, ""
-    payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
-    data_candidates = [payload]
-    payload_data = payload.get("data") if isinstance(payload, dict) else None
-    if isinstance(payload_data, dict):
-        data_candidates.append(payload_data)
-        nested_data = payload_data.get("data")
-        if isinstance(nested_data, dict):
-            data_candidates.append(nested_data)
     data = {}
-    for candidate in data_candidates:
-        if isinstance(candidate, dict) and isinstance(candidate.get("indices"), dict):
+    candidates = market_index_payload_candidates(item)
+    for candidate in candidates:
+        if isinstance(candidate.get("indices"), dict):
             data = candidate
             break
+    if not data:
+        for candidate in candidates:
+            direct_indices = {
+                key: value
+                for key, value in candidate.items()
+                if str(key).strip().lower() in MARKET_INDEX_KEYS and isinstance(value, dict)
+            }
+            if direct_indices:
+                data = {
+                    "indices": direct_indices,
+                    "errors": candidate.get("errors", {}) if isinstance(candidate.get("errors"), dict) else {},
+                }
+                break
     indices = data.get("indices", {}) if isinstance(data.get("indices"), dict) else {}
     errors = data.get("errors", {}) if isinstance(data.get("errors"), dict) else {}
-    timestamp = max(
-        [
-            str(index_item.get("timestamp", ""))
-            for index_item in indices.values()
-            if isinstance(index_item, dict) and index_item.get("timestamp")
-        ],
-        default=str(item.get("updatedAt") or item.get("collectedAt") or ""),
-    )
+    timestamp_candidates = [
+        str(item.get("updatedAt") or ""),
+        str(item.get("collectedAt") or ""),
+        str(data.get("timestamp") or ""),
+        str(data.get("updatedAt") or ""),
+        str(data.get("collectedAt") or ""),
+    ]
+    for candidate in candidates:
+        timestamp_candidates.extend([
+            str(candidate.get("timestamp") or ""),
+            str(candidate.get("updatedAt") or ""),
+            str(candidate.get("collectedAt") or ""),
+        ])
+    for index_item in indices.values():
+        if isinstance(index_item, dict):
+            timestamp_candidates.extend([
+                str(index_item.get("timestamp") or ""),
+                str(index_item.get("updatedAt") or ""),
+                str(index_item.get("collectedAt") or ""),
+            ])
+    timestamp = max([value for value in timestamp_candidates if value], default="")
     return indices, errors, timestamp
 
 
@@ -6295,6 +6364,41 @@ MARKET_INDEX_VALUE_KEYS = (
 )
 
 
+def market_index_detail_candidates(index_item: object) -> list[dict]:
+    if not isinstance(index_item, dict):
+        return []
+    candidates: list[dict] = []
+    queue: list[dict] = []
+    seen: set[int] = set()
+
+    def add_candidate(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+        queue.append(value)
+
+    add_candidate(index_item)
+    nested_keys = ("raw", "data", "quote", "meta", "payload", "item", "result")
+    while queue and len(candidates) < 40:
+        current = queue.pop(0)
+        candidates.append(current)
+        for nested_key in nested_keys:
+            nested = current.get(nested_key)
+            if isinstance(nested, dict):
+                add_candidate(nested)
+            elif isinstance(nested, list):
+                for entry in nested[:5]:
+                    add_candidate(entry)
+        datas = current.get("datas")
+        if isinstance(datas, list):
+            for entry in datas[:5]:
+                add_candidate(entry)
+    return candidates
+
+
 def market_index_detail_value(index_item: object) -> str:
     if not isinstance(index_item, dict):
         return ""
@@ -6313,15 +6417,16 @@ def market_index_detail_value(index_item: object) -> str:
         "none",
         "null",
     )
-    for key in MARKET_INDEX_VALUE_KEYS:
-        value = str(index_item.get(key) or "").strip()
-        normalized = value.lower()
-        if not value or value == "-":
-            continue
-        if any(marker in normalized for marker in placeholder_markers):
-            continue
-        if re.search(r"\d", value):
-            return value
+    for candidate in market_index_detail_candidates(index_item):
+        for key in MARKET_INDEX_VALUE_KEYS:
+            value = str(candidate.get(key) or "").strip()
+            normalized = value.lower()
+            if not value or value == "-":
+                continue
+            if any(marker in normalized for marker in placeholder_markers):
+                continue
+            if re.search(r"\d", value):
+                return value
     return ""
 
 
