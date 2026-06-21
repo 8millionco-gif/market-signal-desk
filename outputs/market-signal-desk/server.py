@@ -11708,12 +11708,27 @@ def candidate_core_eligible(candidate: dict) -> bool:
     total = bounded_int(candidate.get("totalScore", 0), 0, 100)
     readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
     reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
+    closed_baseline = bool(trade_gate.get("closedBaseline"))
     if candidate_is_portfolio_linked(candidate):
         return False
-    if not trade_gate.get("tradeReady"):
+    if not trade_gate.get("tradeReady") and not closed_baseline:
         return False
-    if not validation.get("entryReady") or str(validation.get("key", "")) != "confirmed":
-        return False
+    if closed_baseline:
+        if official.get("riskLevel") in {"medium", "high"}:
+            return False
+        if action_key in {"exclude", "stop"} or gate_key == "exclude":
+            return False
+        if reaction_gate == "blocked":
+            return False
+        return (
+            total >= 65
+            and readiness >= 45
+            and confidence_score >= 58
+            and reliability_score >= 55
+            and evidence["qualified"]
+            and risk < 22
+            and heat < 16
+        )
     if official.get("riskLevel") in {"medium", "high"}:
         return False
     if action_key in {"exclude", "stop"} or gate_key == "exclude":
@@ -11722,9 +11737,19 @@ def candidate_core_eligible(candidate: dict) -> bool:
         return False
     if not evidence["qualified"]:
         return False
+    validation_confirmed = bool(validation.get("entryReady") and str(validation.get("key", "")) == "confirmed")
+    if not validation_confirmed:
+        return (
+            total >= 68
+            and readiness >= 50
+            and confidence_score >= 58
+            and reliability_score >= 55
+            and risk < 22
+            and heat < 16
+        )
     return (
-        total >= (70 if validation.get("entryReady") else 60)
-        and readiness >= (68 if validation.get("entryReady") else 50)
+        total >= 70
+        and readiness >= 60
         and confidence_score >= 58
         and reliability_score >= 50
         and reaction_gate == "confirmed"
@@ -11734,8 +11759,54 @@ def candidate_core_eligible(candidate: dict) -> bool:
     )
 
 
+def candidate_entry_eligible(candidate: dict) -> bool:
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    validation = candidate.get("signalValidation", {}) if isinstance(candidate.get("signalValidation"), dict) else candidate_signal_validation_profile(candidate)
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    evidence = candidate_discovery_evidence_strength(candidate)
+    trade_gate = candidate_trade_data_gate(candidate)
+    if candidate_is_portfolio_linked(candidate):
+        return False
+    if trade_gate.get("closedBaseline") or not trade_gate.get("tradeReady") or not trade_gate.get("entryReady"):
+        return False
+    if not validation.get("entryReady") or str(validation.get("key", "")) != "confirmed":
+        return False
+    action_key = str(final_decision.get("actionKey", ""))
+    gate_key = str(gate.get("key", ""))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
+    total = bounded_int(candidate.get("totalScore", 0), 0, 100)
+    readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
+    reaction_score = bounded_int(reaction.get("score", 0), 0, 100)
+    if official.get("riskLevel") in {"medium", "high"}:
+        return False
+    if action_key in {"exclude", "stop"} or gate_key == "exclude":
+        return False
+    if reaction_gate != "confirmed" or reaction.get("entryBlock"):
+        return False
+    return (
+        evidence["qualified"]
+        and total >= 72
+        and readiness >= 68
+        and confidence_score >= 58
+        and reliability_score >= 50
+        and reaction_score >= 56
+        and risk < 22
+        and heat < 14
+    )
+
+
 def assign_candidate_compression(candidates: list[dict]) -> dict:
     max_core = 3
+    max_entry = 5
     for item in candidates:
         item["signalValidation"] = candidate_signal_validation_profile(item)
     ranked = sorted(candidates, key=candidate_compression_score, reverse=True)
@@ -11750,8 +11821,14 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             break
         if candidate_core_eligible(item):
             core_item_ids.add(id(item))
+    entry_item_ids: set[int] = set()
+    for item in ranked:
+        if len(entry_item_ids) >= max_entry:
+            break
+        if candidate_entry_eligible(item):
+            entry_item_ids.add(id(item))
 
-    counts = {"core": 0, "review": 0, "wait": 0, "portfolio": 0, "exclude": 0}
+    counts = {"core": 0, "entry": 0, "wait": 0, "portfolio": 0, "exclude": 0}
     validation_counts = {"confirmed": 0, "evidence_wait": 0, "reaction_only": 0, "insufficient": 0, "blocked": 0}
     top_candidates: list[dict] = []
     for item in candidates:
@@ -11795,9 +11872,14 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             else:
                 tier, label = "wait", "보강 대기"
             reason = f"{trade_gate.get('reason') or price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
+        elif id(item) in entry_item_ids:
+            tier, label = "entry", "진입"
+            reason = "실시간 가격·등락률·거래 반응과 발굴 근거가 함께 확인된 매수 관찰 후보"
         elif id(item) in core_item_ids:
             tier, label = "core", "핵심"
-            if validation_key == "confirmed":
+            if trade_gate.get("closedBaseline"):
+                reason = "장마감 기준가와 강한 뉴스·공시 근거로 다음 장 우선 관찰할 핵심 후보"
+            elif validation_key == "confirmed":
                 reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
             else:
                 reason = "강한 뉴스·공시 근거와 신뢰도 기준으로 우선 추적할 핵심 후보"
@@ -11805,8 +11887,8 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             tier, label = "exclude", "제외"
             reason = "리스크나 최종 판단 기준으로 오늘 신규 진입 제외"
         elif soft_exclude and (evidence["qualified"] or validation_key in {"evidence_wait", "reaction_only"}):
-            tier, label = "review", "검토"
-            reason = "재료는 있으나 가격·거래량 또는 원천 데이터 확인 전이라 검토로 유지"
+            tier, label = "wait", "대기"
+            reason = "재료는 있으나 가격·거래량 또는 원천 데이터 확인 전이라 대기로 유지"
         elif soft_exclude:
             tier, label = "wait", "대기"
             reason = "리스크 차단은 아니지만 근거와 가격 반응이 부족해 대기"
@@ -11814,16 +11896,16 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             tier, label = "portfolio", "보유"
             reason = "보유 자산 기준으로 추가매수·보유·매도 판단 대상"
         elif validation_key == "evidence_wait":
-            tier, label = "review", "검토"
+            tier, label = "wait", "대기"
             reason = "근거는 있으나 가격·거래량 반응 확인 전"
         elif validation_key == "reaction_only":
-            tier, label = "review", "검토"
+            tier, label = "wait", "대기"
             reason = "가격은 움직였지만 뉴스·공시 근거 검증 필요"
         elif validation_key == "insufficient":
             tier, label = "wait", "대기"
             reason = "발굴 근거와 가격 반응이 함께 부족해 다음 갱신까지 대기"
         elif gate_key == "watch" or action_key in {"watch", "pullback"} or compression_score >= 62:
-            tier, label = "review", "검토"
+            tier, label = "wait", "대기"
             reason = "재료는 있으나 가격·거래량 또는 진입가 확인이 필요"
         else:
             tier, label = "wait", "대기"
@@ -11836,7 +11918,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "rank": rank_by_symbol.get(symbol, 0),
             "score": compression_score,
             "coreLimit": max_core,
-            "tradeReady": tier == "core" and bool(trade_gate.get("tradeReady")) and validation_key == "confirmed",
+            "tradeReady": tier == "entry" and bool(trade_gate.get("tradeReady")) and validation_key == "confirmed",
             "entryReady": bool(trade_gate.get("entryReady")),
             "readinessKey": trade_gate.get("readinessKey", ""),
             "reason": reason,
@@ -11847,10 +11929,11 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             "poolBonus": pool_bonus,
         }
         item["candidateCompression"] = compression
-        if tier == "core":
+        if tier in {"core", "entry"}:
             top_candidates.append({
                 "symbol": item.get("symbol", ""),
                 "name": item.get("name", ""),
+                "tier": tier,
                 "score": item.get("totalScore", 0),
                 "compressionScore": compression_score,
                 "decision": final_decision.get("action", ""),
@@ -11861,7 +11944,8 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
     return {
         "candidateCompressionCounts": counts,
         "coreCandidateCount": counts.get("core", 0),
-        "reviewCandidateCount": counts.get("review", 0),
+        "entryCandidateCount": counts.get("entry", 0),
+        "reviewCandidateCount": 0,
         "waitCandidateCompressionCount": counts.get("wait", 0),
         "portfolioCandidateCompressionCount": counts.get("portfolio", 0),
         "excludeCandidateCompressionCount": counts.get("exclude", 0),
@@ -18023,7 +18107,12 @@ def discovery_bot_status() -> dict:
         return 0
 
     core_count = summary_count(summary.get("coreCandidateCount"), compression_counts.get("core"))
-    entry_count = summary_count(summary.get("actionCandidateCount"), summary.get("entryCandidateCount"), compression_counts.get("action"))
+    entry_count = summary_count(
+        summary.get("entryCandidateCount"),
+        compression_counts.get("entry"),
+        summary.get("actionCandidateCount"),
+        compression_counts.get("action"),
+    )
     wait_count = summary_count(summary.get("waitCandidateCount"), compression_counts.get("wait"))
     portfolio_count = summary_count(summary.get("portfolioLinkedCandidateCount"), compression_counts.get("portfolio"))
     exclude_count = summary_count(summary.get("excludeCandidateCount"), compression_counts.get("exclude"))

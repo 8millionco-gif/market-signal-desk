@@ -810,6 +810,7 @@ function livePricePriority(item) {
   if (group === "action") priority -= 24;
   if (plan.tone === "buy") priority -= 22;
   if (compression === "core") priority -= 18;
+  if (compression === "entry") priority -= 30;
   if (compression === "review") priority -= 10;
   if (state.strategy === "pullback" && isPullbackCandidate(item)) priority -= 14;
   if (state.strategy === "portfolio" && isHoldingCandidate(item)) priority -= 16;
@@ -1696,7 +1697,7 @@ function applyStrategyFilter(candidates = []) {
 function candidatesForStrategy(candidates = [], strategy = "all") {
   if (strategy === "all") return candidates;
   if (strategy === "core") return candidates.filter(isCoreCandidate);
-  if (strategy === "review") return candidates.filter(isReviewCandidate);
+  if (strategy === "review") return candidates.filter(isWaitBucketCandidate);
   if (strategy === "wait") return candidates.filter(isWaitBucketCandidate);
   if (strategy === "pullback") return candidates.filter(isPullbackCandidate);
   if (strategy === "hidden") return candidates.filter(isHiddenOpportunity);
@@ -1715,7 +1716,7 @@ function resolveCandidateStrategy(candidates = [], preferred = "core") {
   if (preferredCandidates.length || preferred === "all") {
     return { strategy: preferred, candidates: preferredCandidates };
   }
-  const fallbackOrder = ["core", "action", "review", "wait", "pullback", "hidden", "momentum", "holding"];
+  const fallbackOrder = ["core", "action", "wait", "holding"];
   for (const strategy of fallbackOrder) {
     if (strategy === preferred) continue;
     const matched = candidatesForStrategy(candidates, strategy);
@@ -1746,8 +1747,10 @@ function isReviewCandidate(item) {
 }
 
 function isWaitBucketCandidate(item) {
+  const tier = compressionForDisplay(item).tier;
   if (isActionCandidate(item) || isHoldingCandidate(item) || isExcludeCandidate(item) || isCoreCandidate(item)) return false;
   return (
+    tier === "wait" ||
     isReviewCandidate(item) ||
     isPullbackCandidate(item) ||
     isHiddenOpportunity(item) ||
@@ -2318,8 +2321,9 @@ function candidatePoolStateForDisplay(item) {
   const pool = item?.candidatePool ?? {};
   const memory = item?.discovery?.poolMemory ?? {};
   const fallbackByCompression = {
-    core: ["entry_candidate", "진입 후보"],
-    review: ["validating", "관찰 중"],
+    core: ["core_candidate", "핵심 관찰"],
+    entry: ["entry_candidate", "진입 후보"],
+    review: ["watching", "대기"],
     wait: ["watching", "관찰 중"],
     portfolio: ["portfolio", "보유 판단"],
     exclude: ["excluded", "제외"]
@@ -2368,8 +2372,9 @@ function candidatePoolStateForDisplay(item) {
 
 function isActionCandidate(item) {
   const gate = item?.qualityGate;
-  if (gate?.key === "actionable") return true;
   if (["defer", "exclude"].includes(gate?.key)) return false;
+  if (compressionForDisplay(item).tier === "entry") return true;
+  if (gate?.key === "actionable") return true;
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
   const score = Number(item?.totalScore ?? 0);
@@ -2453,7 +2458,7 @@ function actionPriority(item) {
 
 function strategyPriority(item, strategy) {
   if (strategy === "core" && isCoreCandidate(item)) return 0;
-  if (strategy === "review" && isReviewCandidate(item)) return 0;
+  if (strategy === "review" && isWaitBucketCandidate(item)) return 0;
   if (strategy === "wait" && isWaitBucketCandidate(item)) return 0;
   if (strategy === "hidden" && isHiddenOpportunity(item)) return 0;
   if (strategy === "momentum" && hasMomentumSignal(item)) return 0;
@@ -2515,7 +2520,8 @@ function compressionPriority(item) {
   const tier = compressionForDisplay(item).tier;
   return {
     core: 0,
-    review: 1,
+    entry: 1,
+    review: 3,
     portfolio: 2,
     wait: 3,
     exclude: 4
@@ -2986,7 +2992,7 @@ function candidateSourceDetailRows(summary = {}) {
   const visibility = currentCandidateScopeSummary();
   const visibleCounts = visibility.counts ?? {};
   const coreCount = visibility.totalCount ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
-  const actionCount = visibility.totalCount ? Number(visibleCounts.action ?? 0) : Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const actionCount = visibility.totalCount ? Number(visibleCounts.action ?? 0) : Number(summary.entryCandidateCount ?? compressionCounts.entry ?? summary.actionCandidateCount ?? compressionCounts.action ?? 0);
   const waitCount = visibility.totalCount ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
   const portfolioCount = visibility.totalCount ? Number(visibleCounts.holding ?? 0) : Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
   const excludedCount = visibility.excludedCount || Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
@@ -3536,7 +3542,7 @@ function candidateBriefForMain(summary = {}) {
   const visibleCounts = visibility.counts ?? {};
   const hasVisibleBasis = visibility.totalCount > 0;
   const coreCount = hasVisibleBasis ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
-  const actionCount = hasVisibleBasis ? Number(visibleCounts.action ?? 0) : Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const actionCount = hasVisibleBasis ? Number(visibleCounts.action ?? 0) : Number(summary.entryCandidateCount ?? compressionCounts.entry ?? summary.actionCandidateCount ?? compressionCounts.action ?? 0);
   const waitCount = hasVisibleBasis ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
   const candidateCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
   const excludedCount = hasVisibleBasis ? visibility.excludedCount : Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
@@ -5505,9 +5511,9 @@ function renderFeed() {
 }
 
 function strategyLabel(value) {
-  if (value === "core") return "핵심 후보";
+  if (value === "core") return "핵심 관찰";
   if (value === "review") return "검토 후보";
-  if (value === "action") return "진입 가능";
+  if (value === "action") return "진입 후보";
   if (value === "wait") return "대기 후보";
   if (value === "pullback") return "눌림 대기";
   if (value === "hidden") return "숨은 기회";
@@ -5519,7 +5525,7 @@ function strategyLabel(value) {
 }
 
 function strategyEmptyMessage(value) {
-  if (value === "core") return "신뢰도, 가격 반응, 리스크를 동시에 통과한 핵심 후보가 없습니다. 제외 후보는 메인에서 숨기고 서버가 새 후보를 계속 수집합니다.";
+  if (value === "core") return "강한 뉴스·공시·트렌드 근거를 통과한 핵심 관찰 후보가 없습니다. 제외 후보는 메인에서 숨기고 서버가 새 후보를 계속 수집합니다.";
   if (value === "review") return "핵심은 아니지만 추가 확인할 후보가 없습니다. 지금은 대기 또는 전체 후보만 참고하세요.";
   if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 서버가 후보 풀을 보강할 때까지 무리한 진입은 보류합니다.";
   if (value === "wait") return "추가 확인 후보가 없습니다. 제외 후보는 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
