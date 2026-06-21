@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import copy
 import re
+import secrets
 import threading
 import time
 import zipfile
@@ -129,6 +130,13 @@ SIGNAL_STOCK_SEARCH_MASTER_REFRESH_SECONDS = int(os.getenv("SIGNAL_STOCK_SEARCH_
 STOCK_SEARCH_MASTER_KV_KEY = "stock_search_master"
 KST = timezone(timedelta(hours=9))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+USER_SESSION_COOKIE_NAME = os.getenv("USER_SESSION_COOKIE_NAME", "msd_session").strip() or "msd_session"
+USER_SESSION_TTL_SECONDS = max(3600, int(os.getenv("USER_SESSION_TTL_SECONDS", str(60 * 60 * 24 * 14)) or str(60 * 60 * 24 * 14)))
+USER_SESSION_COOKIE_SECURE = os.getenv(
+    "USER_SESSION_COOKIE_SECURE",
+    "1" if os.getenv("RENDER") else "0",
+).lower() not in {"0", "false", "no", "off"}
+USER_PASSWORD_HASH_ITERATIONS = max(120000, int(os.getenv("USER_PASSWORD_HASH_ITERATIONS", "210000") or "210000"))
 TOSS_BASE_URL = os.getenv("TOSS_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
 TOSS_CLIENT_ID = os.getenv("TOSS_CLIENT_ID", "")
 TOSS_CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET", "")
@@ -1080,6 +1088,50 @@ def ensure_database_schema() -> bool:
                     )
                     cur.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS signal_users (
+                            id TEXT PRIMARY KEY,
+                            email TEXT UNIQUE NOT NULL,
+                            password_hash TEXT NOT NULL,
+                            password_salt TEXT NOT NULL,
+                            display_name TEXT NOT NULL DEFAULT '',
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS signal_user_sessions (
+                            token_hash TEXT PRIMARY KEY,
+                            user_id TEXT NOT NULL REFERENCES signal_users(id) ON DELETE CASCADE,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            expires_at TIMESTAMPTZ NOT NULL
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS signal_user_settings (
+                            user_id TEXT PRIMARY KEY REFERENCES signal_users(id) ON DELETE CASCADE,
+                            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS signal_user_watchlist (
+                            user_id TEXT NOT NULL REFERENCES signal_users(id) ON DELETE CASCADE,
+                            symbol TEXT NOT NULL,
+                            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            PRIMARY KEY (user_id, symbol)
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
                         CREATE INDEX IF NOT EXISTS signal_snapshots_mode_created_idx
                         ON signal_snapshots (mode, created_at DESC)
                         """
@@ -1124,6 +1176,24 @@ def ensure_database_schema() -> bool:
                         """
                         CREATE INDEX IF NOT EXISTS signal_news_events_published_idx
                         ON signal_news_events (published_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_user_sessions_user_idx
+                        ON signal_user_sessions (user_id)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_user_sessions_expires_idx
+                        ON signal_user_sessions (expires_at)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS signal_user_watchlist_symbol_idx
+                        ON signal_user_watchlist (symbol)
                         """
                     )
             DB_SCHEMA_READY = True
@@ -4397,6 +4467,409 @@ def watchlist() -> list[str]:
     return saved.get("symbols", [])
 
 
+DEFAULT_USER_SETTINGS = {
+    "markets": ["domestic"],
+    "preferredSectors": [],
+    "excludedSectors": [],
+    "excludedSymbols": [],
+    "riskProfile": "neutral",
+    "thresholds": {
+        "coreMinScore": 70,
+        "entryMinScore": 78,
+        "maxRiskScore": 60,
+    },
+    "alerts": {
+        "newSignals": True,
+        "entryPrice": True,
+        "stopLoss": True,
+    },
+    "memos": {},
+}
+
+
+def normalize_email(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_setting_list(value: object, *, uppercase: bool = False) -> list[str]:
+    if isinstance(value, str):
+        parts = re.split(r"[,;\n]+", value)
+    elif isinstance(value, list):
+        parts = value
+    else:
+        parts = []
+    normalized: list[str] = []
+    for item in parts:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        text = text.upper() if uppercase else text
+        if text not in normalized:
+            normalized.append(text)
+    return normalized[:200]
+
+
+def normalize_user_settings(payload: object) -> dict:
+    base = copy.deepcopy(DEFAULT_USER_SETTINGS)
+    if not isinstance(payload, dict):
+        return base
+    markets = normalize_setting_list(payload.get("markets"))
+    if markets:
+        base["markets"] = [item for item in markets if item in {"domestic", "overseas"}] or base["markets"]
+    base["preferredSectors"] = normalize_setting_list(payload.get("preferredSectors"))
+    base["excludedSectors"] = normalize_setting_list(payload.get("excludedSectors"))
+    base["excludedSymbols"] = normalize_setting_list(payload.get("excludedSymbols"), uppercase=True)
+    risk_profile = str(payload.get("riskProfile", base["riskProfile"])).strip().lower()
+    if risk_profile in {"conservative", "neutral", "aggressive"}:
+        base["riskProfile"] = risk_profile
+    thresholds = payload.get("thresholds")
+    if isinstance(thresholds, dict):
+        normalized_thresholds = dict(base["thresholds"])
+        for key in ["coreMinScore", "entryMinScore", "maxRiskScore"]:
+            try:
+                value = int(thresholds.get(key, normalized_thresholds[key]))
+                normalized_thresholds[key] = max(0, min(100, value))
+            except (TypeError, ValueError):
+                pass
+        base["thresholds"] = normalized_thresholds
+    alerts = payload.get("alerts")
+    if isinstance(alerts, dict):
+        normalized_alerts = dict(base["alerts"])
+        for key in ["newSignals", "entryPrice", "stopLoss"]:
+            if key in alerts:
+                normalized_alerts[key] = bool(alerts.get(key))
+        base["alerts"] = normalized_alerts
+    memos = payload.get("memos")
+    if isinstance(memos, dict):
+        base["memos"] = {
+            str(key).strip().upper(): str(value or "").strip()[:500]
+            for key, value in memos.items()
+            if str(key).strip()
+        }
+    return base
+
+
+def password_hash(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        USER_PASSWORD_HASH_ITERATIONS,
+    ).hex()
+
+
+def verify_password(password: str, salt: str, expected_hash: str) -> bool:
+    if not password or not salt or not expected_hash:
+        return False
+    return hmac.compare_digest(password_hash(password, salt), expected_hash)
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def public_user_from_row(row) -> dict:
+    if not row:
+        return {}
+    created_at = row[3] if len(row) > 3 else None
+    return {
+        "id": row[0],
+        "email": row[1],
+        "displayName": row[2] or "",
+        "createdAt": created_at.isoformat(timespec="seconds") if hasattr(created_at, "isoformat") else "",
+    }
+
+
+def user_auth_available() -> bool:
+    return database_storage_enabled() and ensure_database_schema()
+
+
+def find_user_by_email(email: str):
+    if not user_auth_available():
+        return None
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, email, display_name, created_at, password_hash, password_salt
+                FROM signal_users
+                WHERE email = %s
+                """,
+                (email,),
+            )
+            return cur.fetchone()
+
+
+def create_user(email: str, password: str, display_name: str = "") -> dict:
+    if not user_auth_available():
+        raise RuntimeError("database unavailable for user auth")
+    normalized_email = normalize_email(email)
+    if not normalized_email or "@" not in normalized_email:
+        raise ValueError("올바른 이메일을 입력해 주세요.")
+    if len(password or "") < 8:
+        raise ValueError("비밀번호는 8자 이상이어야 합니다.")
+    user_id = secrets.token_hex(16)
+    salt = secrets.token_hex(16)
+    hashed = password_hash(password, salt)
+    _, Jsonb = psycopg_modules()
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal_users (id, email, password_hash, password_salt, display_name, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                RETURNING id, email, display_name, created_at, password_hash, password_salt
+                """,
+                (user_id, normalized_email, hashed, salt, str(display_name or "").strip()[:80]),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO signal_user_settings (user_id, payload, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                (user_id, Jsonb(copy.deepcopy(DEFAULT_USER_SETTINGS))),
+            )
+    return public_user_from_row(row)
+
+
+def create_user_session(user_id: str) -> tuple[str, datetime]:
+    if not user_auth_available():
+        raise RuntimeError("database unavailable for user session")
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=USER_SESSION_TTL_SECONDS)
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal_user_sessions (token_hash, user_id, expires_at)
+                VALUES (%s, %s, %s)
+                """,
+                (session_token_hash(token), user_id, expires_at),
+            )
+    return token, expires_at
+
+
+def delete_user_session(token: str) -> None:
+    if not token or not database_storage_enabled():
+        return
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM signal_user_sessions WHERE token_hash = %s", (session_token_hash(token),))
+    except Exception:
+        return
+
+
+def user_from_session_token(token: str) -> dict | None:
+    if not token or not user_auth_available():
+        return None
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.id, u.email, u.display_name, u.created_at, u.password_hash, u.password_salt
+                    FROM signal_user_sessions s
+                    JOIN signal_users u ON u.id = s.user_id
+                    WHERE s.token_hash = %s AND s.expires_at > NOW()
+                    """,
+                    (session_token_hash(token),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return public_user_from_row(row)
+    except Exception:
+        return None
+
+
+def user_settings(user_id: str) -> dict:
+    if not user_auth_available():
+        return copy.deepcopy(DEFAULT_USER_SETTINGS)
+    try:
+        _, Jsonb = psycopg_modules()
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM signal_user_settings WHERE user_id = %s", (user_id,))
+                row = cur.fetchone()
+                if row:
+                    return normalize_user_settings(row[0])
+                payload = copy.deepcopy(DEFAULT_USER_SETTINGS)
+                cur.execute(
+                    """
+                    INSERT INTO signal_user_settings (user_id, payload, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id, Jsonb(payload)),
+                )
+                return payload
+    except Exception:
+        return copy.deepcopy(DEFAULT_USER_SETTINGS)
+
+
+def save_user_settings(user_id: str, payload: object) -> dict:
+    if not user_auth_available():
+        raise RuntimeError("database unavailable for user settings")
+    normalized = normalize_user_settings(payload)
+    _, Jsonb = psycopg_modules()
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal_user_settings (user_id, payload, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+                """,
+                (user_id, Jsonb(normalized)),
+            )
+    return normalized
+
+
+def user_watchlist(user_id: str) -> list[str]:
+    if not user_id or not user_auth_available():
+        return []
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT symbol FROM signal_user_watchlist WHERE user_id = %s ORDER BY created_at ASC",
+                    (user_id,),
+                )
+                return [str(row[0]) for row in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def set_user_watchlist(user_id: str, symbol: str, should_watch: bool, payload: object | None = None) -> list[str]:
+    if not user_auth_available():
+        raise RuntimeError("database unavailable for watchlist")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise ValueError("symbol 값이 필요합니다.")
+    _, Jsonb = psycopg_modules()
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            if should_watch:
+                cur.execute(
+                    """
+                    INSERT INTO signal_user_watchlist (user_id, symbol, payload, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (user_id, symbol)
+                    DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+                    """,
+                    (user_id, normalized_symbol, Jsonb(payload if isinstance(payload, dict) else {})),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM signal_user_watchlist WHERE user_id = %s AND symbol = %s",
+                    (user_id, normalized_symbol),
+                )
+    return user_watchlist(user_id)
+
+
+def parse_cookie_header(value: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in str(value or "").split(";"):
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        cookies[key.strip()] = raw_value.strip()
+    return cookies
+
+
+def session_cookie_header(token: str) -> str:
+    parts = [
+        f"{USER_SESSION_COOKIE_NAME}={token}",
+        f"Max-Age={USER_SESSION_TTL_SECONDS}",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+    ]
+    if USER_SESSION_COOKIE_SECURE:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def clear_session_cookie_header() -> str:
+    parts = [
+        f"{USER_SESSION_COOKIE_NAME}=",
+        "Max-Age=0",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+    ]
+    if USER_SESSION_COOKIE_SECURE:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def candidate_text_for_personalization(candidate: dict) -> str:
+    pieces = [
+        candidate.get("symbol", ""),
+        candidate.get("name", ""),
+        candidate.get("title", ""),
+        candidate.get("summary", ""),
+        candidate.get("sector", ""),
+        candidate.get("market", ""),
+    ]
+    for key in ["tags", "reasons", "themes", "riskFlags"]:
+        value = candidate.get(key)
+        if isinstance(value, list):
+            pieces.extend(str(item) for item in value)
+    return " ".join(str(piece or "") for piece in pieces).lower()
+
+
+def personalize_dashboard_payload(payload: object, user: dict | None) -> object:
+    if not user or not isinstance(payload, dict):
+        return payload
+    cloned = copy.deepcopy(payload)
+    settings = user_settings(str(user.get("id", "")))
+    watched = set(user_watchlist(str(user.get("id", ""))))
+    excluded_symbols = {str(item).upper() for item in settings.get("excludedSymbols", [])}
+    excluded_terms = [str(item).lower() for item in settings.get("excludedSectors", []) if str(item).strip()]
+
+    def is_excluded(candidate: dict) -> bool:
+        symbol = str(candidate.get("symbol", "")).upper()
+        if symbol and symbol in excluded_symbols:
+            return True
+        text = candidate_text_for_personalization(candidate)
+        return any(term and term in text for term in excluded_terms)
+
+    candidates = [item for item in cloned.get("candidates", []) if isinstance(item, dict) and not is_excluded(item)]
+    for item in candidates:
+        item["isWatched"] = str(item.get("symbol", "")).upper() in watched
+    cloned["candidates"] = candidates
+    selected = cloned.get("selected")
+    if isinstance(selected, dict):
+        if is_excluded(selected):
+            cloned["selected"] = candidates[0] if candidates else None
+        else:
+            selected["isWatched"] = str(selected.get("symbol", "")).upper() in watched
+    elif candidates:
+        cloned["selected"] = candidates[0]
+    summary = cloned.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        cloned["summary"] = summary
+    summary["candidateCount"] = len(candidates)
+    summary["watchedCount"] = sum(1 for item in candidates if item.get("isWatched"))
+    summary["personalized"] = True
+    summary["excludedByUser"] = len(payload.get("candidates", [])) - len(candidates)
+    cloned["personalization"] = {
+        "enabled": True,
+        "user": {"email": user.get("email"), "displayName": user.get("displayName", "")},
+        "markets": settings.get("markets", []),
+        "riskProfile": settings.get("riskProfile", "neutral"),
+        "excludedSymbols": settings.get("excludedSymbols", []),
+        "watchlistCount": len(watched),
+    }
+    return cloned
+
+
 def mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -4438,6 +4911,16 @@ def auth_config_status() -> dict:
         "readOnlyPublic": True,
         "protectedMethods": ["POST"],
         "message": "조회 화면은 공개하고 실행/변경 API만 관리자 토큰으로 보호합니다.",
+        "userAuth": {
+            "enabled": database_storage_enabled(),
+            "databaseReady": bool(DB_SCHEMA_READY),
+            "sessionCookie": USER_SESSION_COOKIE_NAME,
+            "message": (
+                "로그인 기반 개인 설정을 사용할 수 있습니다."
+                if database_storage_enabled()
+                else "개인 설정은 Postgres 연결 후 사용할 수 있습니다."
+            ),
+        },
     }
 
 
@@ -21228,11 +21711,29 @@ class AppHandler(BaseHTTPRequestHandler):
     def auth_required_for_path(self, path: str, method: str = "GET") -> bool:
         if not ADMIN_TOKEN:
             return False
-        if path in {"/api/health", "/api/auth/status"}:
+        public_or_user_paths = {
+            "/api/health",
+            "/api/auth/status",
+            "/api/auth/me",
+            "/api/auth/signup",
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/user/settings",
+            "/api/user/watchlist",
+        }
+        if path in public_or_user_paths:
             return False
         if method.upper() in {"GET", "HEAD"}:
             return False
         return path.startswith("/api/")
+
+    def current_user(self) -> dict | None:
+        if hasattr(self, "_current_user"):
+            return self._current_user
+        cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+        token = cookies.get(USER_SESSION_COOKIE_NAME, "")
+        self._current_user = user_from_session_token(token)
+        return self._current_user
 
     def is_authorized(self) -> bool:
         if not ADMIN_TOKEN:
@@ -21252,6 +21753,18 @@ class AppHandler(BaseHTTPRequestHandler):
             401,
         )
 
+    def reject_login_required(self) -> None:
+        self.send_json(
+            {
+                "error": "login-required",
+                "message": "로그인이 필요합니다.",
+            },
+            401,
+        )
+
+    def send_dashboard_json(self, payload, status: int = 200) -> None:
+        self.send_json(personalize_dashboard_payload(payload, self.current_user()), status)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -21260,6 +21773,42 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/auth/status":
             self.send_json(auth_config_status())
+            return
+
+        if parsed.path == "/api/auth/me":
+            user = self.current_user()
+            if not user:
+                self.send_json({"authenticated": False, "user": None, "settings": None, "watchlist": []})
+                return
+            self.send_json(
+                {
+                    "authenticated": True,
+                    "user": user,
+                    "settings": user_settings(str(user.get("id", ""))),
+                    "watchlist": user_watchlist(str(user.get("id", ""))),
+                }
+            )
+            return
+
+        if parsed.path == "/api/user/settings":
+            user = self.current_user()
+            if not user:
+                self.reject_login_required()
+                return
+            self.send_json({"settings": user_settings(str(user.get("id", "")))})
+            return
+
+        if parsed.path == "/api/user/watchlist":
+            user = self.current_user()
+            if not user:
+                self.reject_login_required()
+                return
+            self.send_json({"symbols": user_watchlist(str(user.get("id", "")))})
+            return
+
+        if parsed.path == "/api/watchlist":
+            user = self.current_user()
+            self.send_json({"symbols": user_watchlist(str(user.get("id", ""))) if user else watchlist()})
             return
 
         if self.auth_required_for_path(parsed.path, method="GET") and not self.is_authorized():
@@ -21529,43 +22078,43 @@ class AppHandler(BaseHTTPRequestHandler):
                         if isinstance(cached_payload.get("summary"), dict):
                             cached_payload["summary"]["refreshIgnored"] = True
                             cached_payload["summary"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
-                    self.send_json(cached_payload)
+                    self.send_dashboard_json(cached_payload)
                     return
                 if snapshot_only:
                     fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
                     stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=fallback_error)
                     if stored_candidate_data_payload is not None:
-                        self.send_json(stored_candidate_data_payload)
+                        self.send_dashboard_json(stored_candidate_data_payload)
                         return
                     stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=fallback_error)
                     if stored_pool_payload is not None:
-                        self.send_json(stored_pool_payload)
+                        self.send_dashboard_json(stored_pool_payload)
                         return
                     fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                     if fallback_payload is not None:
                         fallback_payload[0]["cache"]["fallbackError"] = fallback_error
-                        self.send_json(fallback_payload[0])
+                        self.send_dashboard_json(fallback_payload[0])
                         return
-                    self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
+                    self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
                 if stored_candidate_data_payload is not None:
-                    self.send_json(stored_candidate_data_payload)
+                    self.send_dashboard_json(stored_candidate_data_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
                 if stored_pool_payload is not None:
-                    self.send_json(stored_pool_payload)
+                    self.send_dashboard_json(stored_pool_payload)
                     return
                 fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                 if fallback_payload is not None:
-                    self.send_json(fallback_payload[0])
+                    self.send_dashboard_json(fallback_payload[0])
                     return
-                self.send_json(stored_snapshot_unavailable_dashboard_payload(mode))
+                self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode))
                 return
             try:
                 payload = dashboard(mode, force_discovery=force_refresh)
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
-                self.send_json(payload)
+                self.send_dashboard_json(payload)
             except Exception as error:
                 cached_payload = cached_dashboard_payload(
                     mode,
@@ -21573,36 +22122,36 @@ class AppHandler(BaseHTTPRequestHandler):
                     include_discovery=not snapshot_only,
                 )
                 if cached_payload is not None:
-                    self.send_json(cached_payload)
+                    self.send_dashboard_json(cached_payload)
                     return
                 if snapshot_only:
                     stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
                     if stored_candidate_data_payload is not None:
-                        self.send_json(stored_candidate_data_payload)
+                        self.send_dashboard_json(stored_candidate_data_payload)
                         return
                     stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                     if stored_pool_payload is not None:
-                        self.send_json(stored_pool_payload)
+                        self.send_dashboard_json(stored_pool_payload)
                         return
                     fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                     if fallback_payload is not None:
                         fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
-                        self.send_json(fallback_payload[0])
+                        self.send_dashboard_json(fallback_payload[0])
                         return
-                    self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=str(error)[:240]))
+                    self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=str(error)[:240]))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_candidate_data_payload is not None:
-                    self.send_json(stored_candidate_data_payload)
+                    self.send_dashboard_json(stored_candidate_data_payload)
                     return
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_pool_payload is not None:
-                    self.send_json(stored_pool_payload)
+                    self.send_dashboard_json(stored_pool_payload)
                     return
                 fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                 if fallback_payload is not None:
                     fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
-                    self.send_json(fallback_payload[0])
+                    self.send_dashboard_json(fallback_payload[0])
                     return
                 raise
             return
@@ -21634,6 +22183,103 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/auth/signup":
+            body = self.read_body()
+            email = normalize_email(body.get("email", ""))
+            password = str(body.get("password", ""))
+            display_name = str(body.get("displayName", body.get("display_name", ""))).strip()
+            if find_user_by_email(email):
+                self.send_json({"error": "duplicate-email", "message": "이미 가입된 이메일입니다."}, 409)
+                return
+            try:
+                user = create_user(email, password, display_name=display_name)
+                token, _ = create_user_session(str(user.get("id", "")))
+                settings = user_settings(str(user.get("id", "")))
+                self.send_json(
+                    {"authenticated": True, "user": user, "settings": settings, "watchlist": []},
+                    headers={"Set-Cookie": session_cookie_header(token)},
+                )
+            except ValueError as error:
+                self.send_json({"error": "invalid-request", "message": str(error)}, 400)
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/auth/login":
+            body = self.read_body()
+            email = normalize_email(body.get("email", ""))
+            password = str(body.get("password", ""))
+            row = find_user_by_email(email)
+            if not row or not verify_password(password, str(row[5]), str(row[4])):
+                self.send_json({"error": "invalid-login", "message": "이메일 또는 비밀번호가 올바르지 않습니다."}, 401)
+                return
+            user = public_user_from_row(row)
+            try:
+                token, _ = create_user_session(str(user.get("id", "")))
+                self.send_json(
+                    {
+                        "authenticated": True,
+                        "user": user,
+                        "settings": user_settings(str(user.get("id", ""))),
+                        "watchlist": user_watchlist(str(user.get("id", ""))),
+                    },
+                    headers={"Set-Cookie": session_cookie_header(token)},
+                )
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/auth/logout":
+            cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+            delete_user_session(cookies.get(USER_SESSION_COOKIE_NAME, ""))
+            self.send_json(
+                {"authenticated": False, "user": None, "settings": None, "watchlist": []},
+                headers={"Set-Cookie": clear_session_cookie_header()},
+            )
+            return
+
+        if parsed.path == "/api/user/settings":
+            user = self.current_user()
+            if not user:
+                self.reject_login_required()
+                return
+            body = self.read_body()
+            try:
+                payload = body.get("settings", body)
+                settings = save_user_settings(str(user.get("id", "")), payload)
+                self.send_json({"settings": settings})
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
+        if parsed.path == "/api/user/watchlist":
+            user = self.current_user()
+            if not user:
+                self.reject_login_required()
+                return
+            body = self.read_body()
+            symbol = str(body.get("symbol", "")).strip()
+            should_watch = bool(body.get("watch", True))
+            if not symbol:
+                self.send_json({"error": "invalid-request", "message": "symbol 값이 필요합니다."}, 400)
+                return
+            try:
+                symbols = set_user_watchlist(
+                    str(user.get("id", "")),
+                    symbol,
+                    should_watch,
+                    payload=body.get("payload", {}),
+                )
+                self.send_json({"symbols": symbols})
+            except Exception as error:
+                payload, status = integration_error_payload(error)
+                self.send_json(payload, status)
+            return
+
         if self.auth_required_for_path(parsed.path, method="POST") and not self.is_authorized():
             self.reject_unauthorized()
             return
@@ -21705,6 +22351,21 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "invalid-request", "message": "symbol 값이 필요합니다."}, 400)
                 return
 
+            user = self.current_user()
+            if user:
+                try:
+                    symbols = set_user_watchlist(
+                        str(user.get("id", "")),
+                        symbol,
+                        should_watch,
+                        payload=body.get("payload", {}),
+                    )
+                    self.send_json({"symbols": symbols})
+                except Exception as error:
+                    payload, status = integration_error_payload(error)
+                    self.send_json(payload, status)
+                return
+
             symbols = watchlist()
             if should_watch and symbol not in symbols:
                 symbols.append(symbol)
@@ -21716,6 +22377,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
         self.send_json({"error": "not-found"}, 404)
 
+    def do_PUT(self) -> None:
+        self.do_POST()
+
     def read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length == 0:
@@ -21726,10 +22390,12 @@ class AppHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
-    def send_json(self, payload, status: int = 200) -> None:
+    def send_json(self, payload, status: int = 200, headers: dict | None = None) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        for key, value in (headers or {}).items():
+            self.send_header(str(key), str(value))
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)

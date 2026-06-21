@@ -88,6 +88,15 @@ const state = {
   authReadOnlyPublic: false,
   authRequired: false,
   adminToken: readStoredValue("marketSignalAdminToken", ""),
+  settingsTab: readStoredValue("marketSignalSettingsTab", "personal"),
+  user: {
+    authenticated: false,
+    user: null,
+    settings: null,
+    watchlist: [],
+    loading: false,
+    message: ""
+  },
   schedulerStatus: null,
   discoveryBotStatus: null,
   storageStatus: null,
@@ -130,6 +139,10 @@ const els = {
   signalDetail: document.querySelector("#signalDetail"),
   workspaceView: document.querySelector("#workspaceView"),
   settingsView: document.querySelector("#settingsView"),
+  settingsTabs: document.querySelector("#settingsTabs"),
+  settingsTabPanels: document.querySelectorAll("[data-settings-panel]"),
+  userAccountStatus: document.querySelector("#userAccountStatus"),
+  userSettingsStatus: document.querySelector("#userSettingsStatus"),
   marketSessionLabel: document.querySelector("#marketSessionLabel"),
   analysisModeLabel: document.querySelector("#analysisModeLabel"),
   analysisModeDetail: document.querySelector("#analysisModeDetail"),
@@ -428,9 +441,19 @@ async function fetchJson(path, timeoutMs = 15000) {
   try {
     const response = await fetch(path, {
       signal: controller.signal,
+      credentials: "same-origin",
       headers: adminHeaders()
     });
     if (response.status === 401) {
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
+      if (payload?.error === "login-required") {
+        throw new Error("login-required");
+      }
       state.authRequired = true;
       throw new Error("auth-required");
     }
@@ -471,9 +494,19 @@ async function postJson(path, body = {}, timeoutMs = 45000) {
       method: "POST",
       headers: adminHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
+      credentials: "same-origin",
       signal: controller.signal
     });
     if (response.status === 401) {
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
+      if (payload?.error === "login-required" || payload?.error === "invalid-login") {
+        throw new Error(payload.error);
+      }
       state.authRequired = true;
       throw new Error("auth-required");
     }
@@ -490,7 +523,14 @@ async function postJson(path, body = {}, timeoutMs = 45000) {
 function statusFallbacks() {
   return {
     auth: {
-      enabled: false
+      enabled: false,
+      userAuth: { enabled: false, databaseReady: false }
+    },
+    user: {
+      authenticated: false,
+      user: null,
+      settings: null,
+      watchlist: []
     },
     scheduler: {
       config: { enabled: false, jobs: [], performanceAutoUpdate: false, performanceMinAgeMinutes: 60 },
@@ -609,6 +649,7 @@ async function loadDashboard(options = {}) {
   updateActivity("연결 상태 확인 중", "토스·뉴스·공시·OpenAI 연결 상태를 점검합니다");
   const statusPromise = Promise.all([
     safeFetchJson("/api/auth/status", fallbacks.auth),
+    safeFetchJson("/api/auth/me", fallbacks.user),
     safeFetchJson("/api/scheduler/status", fallbacks.scheduler),
     safeFetchJson("/api/discovery/status", fallbacks.discoveryBot),
     safeFetchJson("/api/storage/status", fallbacks.storage),
@@ -620,9 +661,17 @@ async function loadDashboard(options = {}) {
     safeFetchJson("/api/integrations/dart/status", fallbacks.dart),
     safeFetchJson("/api/integrations/news/status", fallbacks.news),
     safeFetchJson("/api/integrations/openai/status", fallbacks.openai)
-  ]).then(([authStatus, schedulerStatus, discoveryBotStatus, storageStatus, evidenceStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
+  ]).then(([authStatus, userStatus, schedulerStatus, discoveryBotStatus, storageStatus, evidenceStatus, stockMasterStatus, portfolioStatus, networkStatus, tossStatus, dartStatus, newsStatus, openaiStatus]) => {
     state.authEnabled = Boolean(authStatus?.enabled);
     state.authReadOnlyPublic = Boolean(authStatus?.readOnlyPublic);
+    state.user = {
+      authenticated: Boolean(userStatus?.authenticated),
+      user: userStatus?.user ?? null,
+      settings: userStatus?.settings ?? null,
+      watchlist: Array.isArray(userStatus?.watchlist) ? userStatus.watchlist : [],
+      loading: false,
+      message: state.user.message || ""
+    };
     state.schedulerStatus = schedulerStatus;
     state.discoveryBotStatus = discoveryBotStatus;
     state.storageStatus = storageStatus;
@@ -635,6 +684,8 @@ async function loadDashboard(options = {}) {
     state.newsStatus = newsStatus;
     state.openaiStatus = openaiStatus;
     maybeNotifySchedulerRun(schedulerStatus);
+    renderUserAccountStatus();
+    renderUserSettingsStatus();
     renderAuthStatus();
     renderSchedulerStatus();
     renderDiscoveryBotStatus();
@@ -3067,7 +3118,290 @@ function render() {
   }
 }
 
+function cardForElement(element) {
+  return element?.closest?.(".compact-section") ?? null;
+}
+
+function moveSettingsCard(targetPanel, element) {
+  const card = cardForElement(element);
+  if (targetPanel && card && card.parentElement !== targetPanel) {
+    targetPanel.appendChild(card);
+  }
+}
+
+function arrangeSettingsTabs() {
+  if (!els.settingsTabPanels?.length) return;
+  const panels = {
+    personal: document.querySelector('[data-settings-panel="personal"]'),
+    alerts: document.querySelector('[data-settings-panel="alerts"]'),
+    connections: document.querySelector('[data-settings-panel="connections"]'),
+    diagnostics: document.querySelector('[data-settings-panel="diagnostics"]')
+  };
+  moveSettingsCard(panels.personal, els.principles);
+  moveSettingsCard(panels.personal, els.metricCandidates);
+  moveSettingsCard(panels.alerts, els.notificationStatus);
+  moveSettingsCard(panels.connections, els.marketStatus);
+  moveSettingsCard(panels.connections, els.tossStatus);
+  moveSettingsCard(panels.connections, els.dartStatus);
+  moveSettingsCard(panels.connections, els.newsStatus);
+  moveSettingsCard(panels.connections, els.openaiStatus);
+  [
+    els.authStatus,
+    els.schedulerStatus,
+    els.discoveryBotStatus,
+    els.readinessStatus,
+    els.livePriceStatus,
+    els.candidatePoolStatus,
+    els.snapshotHistory,
+    els.storageStatus,
+    els.evidenceStatus,
+    els.stockMasterStatus,
+    els.networkStatus
+  ].forEach((element) => moveSettingsCard(panels.diagnostics, element));
+}
+
+function showSettingsTab(tab) {
+  const next = ["personal", "alerts", "connections", "diagnostics"].includes(tab) ? tab : "personal";
+  state.settingsTab = next;
+  writeStoredValue("marketSignalSettingsTab", next);
+  renderSettingsTabs();
+}
+
+function renderSettingsTabs() {
+  arrangeSettingsTabs();
+  els.settingsTabs?.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    const active = button.dataset.settingsTab === state.settingsTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    if (!button.dataset.bound) {
+      button.dataset.bound = "1";
+      button.addEventListener("click", () => showSettingsTab(button.dataset.settingsTab));
+    }
+  });
+  els.settingsTabPanels?.forEach((panel) => {
+    panel.hidden = panel.dataset.settingsPanel !== state.settingsTab;
+  });
+}
+
+function userLoginRequiredMarkup() {
+  return `
+    <div class="settings-note">
+      <strong>로그인 후 사용할 수 있습니다.</strong>
+      <span>관심종목, 제외 종목, 개인 알림과 후보 기준이 계정별로 저장됩니다.</span>
+    </div>
+  `;
+}
+
+function renderUserAccountStatus() {
+  if (!els.userAccountStatus) return;
+  const profile = state.user?.user;
+  if (state.user?.authenticated && profile) {
+    els.userAccountStatus.innerHTML = `
+      <div><span>로그인</span><strong class="ok">${escapeHtml(profile.email)}</strong></div>
+      <div><span>표시 이름</span><strong>${escapeHtml(profile.displayName || "미설정")}</strong></div>
+      <div><span>개인 관심</span><strong>${Number(state.user.watchlist?.length ?? 0)}종목</strong></div>
+      <div class="auth-actions">
+        <button type="button" data-user-auth-action="logout">로그아웃</button>
+      </div>
+    `;
+  } else {
+    els.userAccountStatus.innerHTML = `
+      <div class="settings-form">
+        <label>이메일<input type="email" data-user-field="email" autocomplete="email" placeholder="you@example.com" /></label>
+        <label>비밀번호<input type="password" data-user-field="password" autocomplete="current-password" placeholder="8자 이상" /></label>
+        <label>표시 이름<input type="text" data-user-field="displayName" autocomplete="name" placeholder="선택 사항" /></label>
+        <div class="auth-actions">
+          <button type="button" data-user-auth-action="login">로그인</button>
+          <button type="button" data-user-auth-action="signup">회원가입</button>
+        </div>
+        ${state.user?.message ? `<p class="form-message">${escapeHtml(state.user.message)}</p>` : ""}
+      </div>
+    `;
+  }
+  els.userAccountStatus.querySelectorAll("[data-user-auth-action]").forEach((button) => {
+    button.addEventListener("click", () => handleUserAuthAction(button.dataset.userAuthAction));
+  });
+}
+
+function commaList(value) {
+  return Array.isArray(value) ? value.join(", ") : "";
+}
+
+function parseCommaList(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function renderUserSettingsStatus() {
+  if (!els.userSettingsStatus) return;
+  if (!state.user?.authenticated) {
+    els.userSettingsStatus.innerHTML = userLoginRequiredMarkup();
+    return;
+  }
+  const settings = state.user.settings ?? {};
+  const thresholds = settings.thresholds ?? {};
+  const alerts = settings.alerts ?? {};
+  const markets = new Set(settings.markets ?? []);
+  els.userSettingsStatus.innerHTML = `
+    <div class="settings-form">
+      <label>위험 성향
+        <select data-setting-field="riskProfile">
+          <option value="conservative" ${settings.riskProfile === "conservative" ? "selected" : ""}>보수</option>
+          <option value="neutral" ${!settings.riskProfile || settings.riskProfile === "neutral" ? "selected" : ""}>중립</option>
+          <option value="aggressive" ${settings.riskProfile === "aggressive" ? "selected" : ""}>공격</option>
+        </select>
+      </label>
+      <div class="checkbox-row">
+        <label><input type="checkbox" data-market-field="domestic" ${markets.has("domestic") ? "checked" : ""}/> 국내</label>
+        <label><input type="checkbox" data-market-field="overseas" ${markets.has("overseas") ? "checked" : ""}/> 해외</label>
+      </div>
+      <label>선호 섹터<input type="text" data-setting-field="preferredSectors" value="${escapeHtml(commaList(settings.preferredSectors))}" placeholder="반도체, AI, 방산" /></label>
+      <label>제외 섹터<input type="text" data-setting-field="excludedSectors" value="${escapeHtml(commaList(settings.excludedSectors))}" placeholder="바이오, 금융" /></label>
+      <label>제외 종목<input type="text" data-setting-field="excludedSymbols" value="${escapeHtml(commaList(settings.excludedSymbols))}" placeholder="005930, AAPL" /></label>
+      <div class="settings-threshold-grid">
+        <label>핵심 최소<input type="number" data-threshold-field="coreMinScore" value="${Number(thresholds.coreMinScore ?? 70)}" min="0" max="100" /></label>
+        <label>진입 최소<input type="number" data-threshold-field="entryMinScore" value="${Number(thresholds.entryMinScore ?? 78)}" min="0" max="100" /></label>
+        <label>리스크 허용<input type="number" data-threshold-field="maxRiskScore" value="${Number(thresholds.maxRiskScore ?? 60)}" min="0" max="100" /></label>
+      </div>
+      <div class="checkbox-row">
+        <label><input type="checkbox" data-alert-field="newSignals" ${alerts.newSignals !== false ? "checked" : ""}/> 신규 시그널</label>
+        <label><input type="checkbox" data-alert-field="entryPrice" ${alerts.entryPrice !== false ? "checked" : ""}/> 진입가</label>
+        <label><input type="checkbox" data-alert-field="stopLoss" ${alerts.stopLoss !== false ? "checked" : ""}/> 손절</label>
+      </div>
+      <div class="auth-actions">
+        <button type="button" data-user-settings-action="save">저장</button>
+      </div>
+      ${state.user?.message ? `<p class="form-message">${escapeHtml(state.user.message)}</p>` : ""}
+    </div>
+  `;
+  els.userSettingsStatus.querySelector("[data-user-settings-action='save']")?.addEventListener("click", saveUserSettingsFromForm);
+}
+
+function collectUserAuthFields() {
+  const root = els.userAccountStatus;
+  return {
+    email: root?.querySelector("[data-user-field='email']")?.value?.trim() || "",
+    password: root?.querySelector("[data-user-field='password']")?.value || "",
+    displayName: root?.querySelector("[data-user-field='displayName']")?.value?.trim() || ""
+  };
+}
+
+async function handleUserAuthAction(action) {
+  if (state.user?.loading) return;
+  if (action === "logout") {
+    state.user = { ...state.user, loading: true, message: "로그아웃 중입니다." };
+    renderUserAccountStatus();
+    try {
+      await postJson("/api/auth/logout", {});
+      state.user = { authenticated: false, user: null, settings: null, watchlist: [], loading: false, message: "로그아웃되었습니다." };
+      await loadDashboard();
+    } catch (error) {
+      state.user = { ...state.user, loading: false, message: "로그아웃에 실패했습니다." };
+      renderUserAccountStatus();
+    }
+    return;
+  }
+
+  const fields = collectUserAuthFields();
+  if (!fields.email || !fields.password) {
+    state.user = { ...state.user, message: "이메일과 비밀번호를 입력하세요." };
+    renderUserAccountStatus();
+    return;
+  }
+  if (action === "signup" && fields.password.length < 8) {
+    state.user = { ...state.user, message: "비밀번호는 8자 이상이어야 합니다." };
+    renderUserAccountStatus();
+    return;
+  }
+
+  state.user = { ...state.user, loading: true, message: action === "signup" ? "회원가입 중입니다." : "로그인 중입니다." };
+  renderUserAccountStatus();
+  try {
+    const payload = await postJson(action === "signup" ? "/api/auth/signup" : "/api/auth/login", fields, 20000);
+    state.user = {
+      authenticated: Boolean(payload?.authenticated),
+      user: payload?.user ?? null,
+      settings: payload?.settings ?? null,
+      watchlist: Array.isArray(payload?.watchlist) ? payload.watchlist : [],
+      loading: false,
+      message: action === "signup" ? "계정이 생성되었습니다." : "로그인되었습니다."
+    };
+    await loadDashboard();
+  } catch (error) {
+    const message = error?.message === "invalid-login"
+      ? "이메일 또는 비밀번호가 올바르지 않습니다."
+      : error?.message || "계정 처리에 실패했습니다. DB 연결 상태를 확인하세요.";
+    state.user = { ...state.user, loading: false, message };
+    renderUserAccountStatus();
+  }
+}
+
+function checkedValues(root, selector, dataName) {
+  return [...(root?.querySelectorAll(`${selector}:checked`) ?? [])]
+    .map((input) => input.dataset[dataName])
+    .filter(Boolean);
+}
+
+function numberFieldValue(root, selector, fallback) {
+  const value = Number(root?.querySelector(selector)?.value);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function userSettingsPayloadFromForm() {
+  const root = els.userSettingsStatus;
+  const markets = checkedValues(root, "[data-market-field]", "marketField");
+  return {
+    riskProfile: root?.querySelector("[data-setting-field='riskProfile']")?.value || "neutral",
+    markets: markets.length ? markets : ["domestic"],
+    preferredSectors: parseCommaList(root?.querySelector("[data-setting-field='preferredSectors']")?.value),
+    excludedSectors: parseCommaList(root?.querySelector("[data-setting-field='excludedSectors']")?.value),
+    excludedSymbols: parseCommaList(root?.querySelector("[data-setting-field='excludedSymbols']")?.value).map((symbol) => symbol.toUpperCase()),
+    thresholds: {
+      coreMinScore: numberFieldValue(root, "[data-threshold-field='coreMinScore']", 70),
+      entryMinScore: numberFieldValue(root, "[data-threshold-field='entryMinScore']", 78),
+      maxRiskScore: numberFieldValue(root, "[data-threshold-field='maxRiskScore']", 60)
+    },
+    alerts: {
+      newSignals: Boolean(root?.querySelector("[data-alert-field='newSignals']")?.checked),
+      entryPrice: Boolean(root?.querySelector("[data-alert-field='entryPrice']")?.checked),
+      stopLoss: Boolean(root?.querySelector("[data-alert-field='stopLoss']")?.checked)
+    },
+    memos: state.user?.settings?.memos ?? {}
+  };
+}
+
+async function saveUserSettingsFromForm() {
+  if (!state.user?.authenticated) {
+    state.user = { ...state.user, message: "로그인 후 개인 설정을 저장할 수 있습니다." };
+    renderUserSettingsStatus();
+    return;
+  }
+  const settings = userSettingsPayloadFromForm();
+  state.user = { ...state.user, loading: true, message: "개인 설정을 저장 중입니다." };
+  renderUserSettingsStatus();
+  try {
+    const payload = await postJson("/api/user/settings", { settings }, 20000);
+    state.user = {
+      ...state.user,
+      settings: payload?.settings ?? settings,
+      loading: false,
+      message: "개인 설정이 저장되었습니다."
+    };
+    renderUserSettingsStatus();
+    await loadDashboard();
+  } catch (error) {
+    state.user = { ...state.user, loading: false, message: "개인 설정 저장에 실패했습니다." };
+    renderUserSettingsStatus();
+  }
+}
+
 function renderSettingsPanels() {
+  renderSettingsTabs();
+  renderUserAccountStatus();
+  renderUserSettingsStatus();
   renderLivePriceStatus();
   renderCandidatePoolStatus();
   renderAuthStatus();
@@ -7132,6 +7466,19 @@ function adjustWatchedSummary(symbol, previous, next) {
 async function toggleWatch(item) {
   const symbol = item?.symbol;
   if (!symbol) return;
+  if (!state.user?.authenticated) {
+    state.view = "settings";
+    state.settingsTab = "personal";
+    writeStoredValue("marketSignalSettingsTab", state.settingsTab);
+    state.user = {
+      ...state.user,
+      message: "관심 등록은 로그인 후 계정별로 저장됩니다."
+    };
+    updateViewButtons();
+    updateShellView();
+    renderSettingsPanels();
+    return;
+  }
   const previous = Boolean(item.isWatched);
   const next = !previous;
 
@@ -7142,10 +7489,13 @@ async function toggleWatch(item) {
   renderTradeDecisionStatus();
 
   try {
-    const payload = await postJson("/api/watchlist", { symbol, watch: next });
+    const payload = await postJson("/api/user/watchlist", { symbol, watch: next });
     const symbols = Array.isArray(payload?.symbols)
       ? new Set(payload.symbols.map((value) => String(value)))
       : null;
+    if (symbols) {
+      state.user = { ...state.user, watchlist: [...symbols] };
+    }
     const confirmed = symbols ? symbols.has(String(symbol)) : next;
     if (confirmed !== next) {
       setCandidateWatchState(symbol, confirmed);
