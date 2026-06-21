@@ -2423,6 +2423,21 @@ function candidateVisibilitySummary(candidates = state.dashboard?.candidates ?? 
   };
 }
 
+function currentCandidateScopeSummary() {
+  const totalItems = Array.isArray(state.dashboard?.candidates) ? state.dashboard.candidates : [];
+  const scopedVisible = baseFilteredCandidates();
+  const scopedAll = baseFilteredCandidates({ includeExcluded: true });
+  const excluded = scopedAll.filter(isExcludeCandidate).length;
+  return {
+    totalCount: scopedAll.length,
+    visibleCount: scopedVisible.length,
+    excludedCount: excluded,
+    storedCount: totalItems.length,
+    visible: scopedVisible,
+    counts: candidateStrategyCounts(scopedVisible, { alreadyVisible: true })
+  };
+}
+
 function actionPriority(item) {
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
@@ -2968,7 +2983,7 @@ function candidateSourceDetailRows(summary = {}) {
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
   const compressionCounts = summary.candidateCompressionCounts ?? {};
-  const visibility = candidateVisibilitySummary();
+  const visibility = currentCandidateScopeSummary();
   const visibleCounts = visibility.counts ?? {};
   const coreCount = visibility.totalCount ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
   const actionCount = visibility.totalCount ? Number(visibleCounts.action ?? 0) : Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
@@ -3517,7 +3532,7 @@ function candidateBriefForMain(summary = {}) {
   const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
   const sourceLabel = candidateSourceLabel(summary);
   const compressionCounts = summary.candidateCompressionCounts ?? {};
-  const visibility = candidateVisibilitySummary();
+  const visibility = currentCandidateScopeSummary();
   const visibleCounts = visibility.counts ?? {};
   const hasVisibleBasis = visibility.totalCount > 0;
   const coreCount = hasVisibleBasis ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
@@ -3525,6 +3540,7 @@ function candidateBriefForMain(summary = {}) {
   const waitCount = hasVisibleBasis ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
   const candidateCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
   const excludedCount = hasVisibleBasis ? visibility.excludedCount : Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
+  const storedCount = Number(visibility.storedCount ?? summary.candidateCount ?? 0);
   const liveCount = Number(priceBasis.live ?? 0);
   const closedCount = Number(priceBasis.closed_baseline ?? 0);
   const lastGoodCount = Number(priceBasis.last_good ?? 0);
@@ -3552,7 +3568,7 @@ function candidateBriefForMain(summary = {}) {
     : sourceLabel;
   const line = [
     sourceText,
-    candidateCount ? `후보 ${candidateCount}` : "",
+    candidateCount ? (storedCount && storedCount !== candidateCount ? `표시 ${candidateCount}/${storedCount}` : `후보 ${candidateCount}`) : "",
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
@@ -3568,7 +3584,7 @@ function candidateBriefForMain(summary = {}) {
 
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
-  const visibility = candidateVisibilitySummary();
+  const visibility = currentCandidateScopeSummary();
   const hasVisibleBasis = visibility.totalCount > 0;
   const visibleCandidates = visibility.visible ?? [];
   const visibleCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
