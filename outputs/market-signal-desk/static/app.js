@@ -5294,6 +5294,13 @@ function candidateSignalMeta(item) {
   return parts.join(" · ");
 }
 
+function feedReasonText(item, plan) {
+  const signalMeta = candidateSignalMeta(item);
+  const headline = item?.headline || "";
+  const priceGuide = primaryPriceGuide(plan);
+  return shortText(signalMeta || headline || priceGuide, 58);
+}
+
 function renderFeed() {
   const candidates = filteredCandidates();
   const feedView = visibleFeedCandidates(candidates);
@@ -5324,27 +5331,25 @@ function renderFeed() {
       const retained = item.displayRetained ? "retained" : "";
       const plan = tradePlan(item);
       const actionLabel = feedActionLabel(item, plan);
-      const priceGuide = primaryPriceGuide(plan);
       const primaryDecision = primaryDecisionForDisplay(item, plan);
       const liveText = livePriceLabel(item);
-      const signalMeta = candidateSignalMeta(item);
+      const reasonText = feedReasonText(item, plan);
+      const headlineText = shortText(item.headline, 64);
       return `
         <button class="feed-item ${active} ${retained}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
-          <span>
+          <span class="feed-main">
             <span class="feed-title">
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}" data-feed-decision>${escapeHtml(primaryDecision.label)}</span>
             </span>
-            <span class="feed-subtitle">${escapeHtml(item.headline)}</span>
+            <span class="feed-subtitle">${escapeHtml(headlineText)}</span>
             <span class="feed-signal-line ${escapeHtml(plan.tone)}">
-              <strong>뉴스 시그널</strong>
-              <em>${escapeHtml(shortText(signalMeta || priceGuide, 40))}</em>
+              <strong>근거</strong>
+              <em>${escapeHtml(reasonText)}</em>
             </span>
-            <span class="live-data-strip feed-live-data-strip" data-feed-live>
-              ${liveDataCoverageChips(item, true)}
-            </span>
+            ${active ? `<span class="live-data-strip feed-live-data-strip" data-feed-live>${liveDataCoverageChips(item, true)}</span>` : ""}
           </span>
           <span class="feed-meta">
             <span class="feed-price-line">
