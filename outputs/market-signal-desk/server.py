@@ -12628,8 +12628,8 @@ def candidate_core_expansion_eligible(candidate: dict) -> tuple[bool, str]:
         return False, ""
 
     if trade_gate.get("closedBaseline"):
-        return True, "핵심/진입 조건 충족 후보가 없어 장마감 기준가와 검증 근거가 있는 후보를 우선 관찰로 확장했습니다."
-    return True, "핵심/진입 조건 충족 후보가 없어 가격 표시와 검증 근거가 있는 후보를 우선 관찰로 확장했습니다."
+        return True, "제외 후보를 숨기고 장마감 기준가와 검증 근거가 있는 종목을 핵심 관찰 후보로 보강했습니다."
+    return True, "제외 후보를 숨기고 가격 표시와 검증 근거가 있는 종목을 핵심 관찰 후보로 보강했습니다."
 
 
 def promote_candidate_to_core_expansion(candidate: dict, reason: str) -> None:
@@ -12798,12 +12798,13 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
             })
 
     expansion_candidates: list[tuple[dict, str]] = []
-    if counts.get("core", 0) + counts.get("entry", 0) <= 0:
+    core_shortfall = max(0, max_core - counts.get("core", 0))
+    if core_shortfall > 0:
         for item in ranked:
             eligible, reason = candidate_core_expansion_eligible(item)
             if eligible:
                 expansion_candidates.append((item, reason))
-            if len(expansion_candidates) >= max_core:
+            if len(expansion_candidates) >= core_shortfall:
                 break
         for item, reason in expansion_candidates:
             compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
@@ -12839,8 +12840,8 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         "coreCandidateLimit": max_core,
         "selectionExpansionActive": bool(expansion_candidates),
         "selectionExpansionCount": len(expansion_candidates),
-        "selectionExpansionMode": "core_fallback" if expansion_candidates else "none",
-        "selectionExpansionReason": "핵심/진입 후보가 없어 조건을 만족한 대기 후보를 핵심 관찰로 확장했습니다." if expansion_candidates else "",
+        "selectionExpansionMode": "core_top_up" if expansion_candidates else "none",
+        "selectionExpansionReason": "제외 후보는 숨기고 조건을 만족한 대기 후보를 핵심 관찰로 보강했습니다." if expansion_candidates else "",
         "signalValidationCounts": validation_counts,
         "confirmedSignalCount": validation_counts.get("confirmed", 0),
         "evidenceWaitSignalCount": validation_counts.get("evidence_wait", 0),
@@ -12980,8 +12981,10 @@ def candidate_pool_state(candidate: dict, stage: str = "selected", existing: dic
         if action_key == "pullback":
             return "pullback_wait", "재료는 있으나 실시간 거래 반응 확인 전이라 눌림 구간만 관찰"
         return "validating", f"{trade_gate['reason']} · 실시간 반응 확인 전까지 진입 후보 승격 차단"
-    if compression_tier == "core" or (action_key in {"buy", "add"} and validation_key == "confirmed"):
+    if compression_tier == "entry" or (action_key in {"buy", "add"} and validation_key == "confirmed" and trade_gate["tradeReady"]):
         return "entry_candidate", "근거와 가격 반응이 확인되어 오늘 판단 후보로 승격"
+    if compression_tier == "core":
+        return "validating", "강한 근거가 확인된 핵심 관찰 후보이며 실시간 가격 반응 확인 전까지 진입 후보와 분리"
     if action_key == "pullback":
         return "pullback_wait", "재료는 있으나 가격이 이미 반응해 눌림 구간 대기"
     if validation_key in {"evidence_wait", "reaction_only"}:
@@ -18484,7 +18487,8 @@ def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> di
 
 def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_core: int = 3) -> dict:
     snapshot = candidate_compression_snapshot_from_candidates(candidates)
-    if snapshot.get("coreCandidateCount", 0) + snapshot.get("entryCandidateCount", 0) > 0:
+    core_shortfall = max(0, max_core - bounded_int(snapshot.get("coreCandidateCount", 0), 0, max_core))
+    if core_shortfall <= 0:
         return {
             "applied": False,
             "count": 0,
@@ -18508,7 +18512,7 @@ def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_cor
         if symbol:
             expanded.append(symbol)
         reason_text = reason_text or reason
-        if len(expanded) >= max_core:
+        if len(expanded) >= core_shortfall:
             break
 
     return {
