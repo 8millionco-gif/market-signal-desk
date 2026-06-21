@@ -2070,6 +2070,48 @@ h3 {
   margin-top: 16px;
 }
 
+.signal-proof-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.signal-proof-block {
+  display: grid;
+  gap: 10px;
+}
+
+.signal-proof-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.signal-proof-title strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.signal-proof-title span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.signal-source-list,
+.signal-related-list {
+  gap: 8px;
+}
+
+.signal-source-list li,
+.signal-related-list li {
+  padding: 10px 11px;
+  background: rgba(15, 19, 27, 0.82);
+}
+
 .decision-check-grid {
   display: grid;
   gap: 16px;

@@ -7108,6 +7108,8 @@ function newsSignalSection(item) {
   const reasons = uniqueTexts([...(evidence.reasons ?? []), item.thesis, ...(item.why ?? [])], 4);
   const sourceCount = Array.isArray(item.sources) ? item.sources.length : 0;
   const latestSource = item.sources?.[0];
+  const sources = Array.isArray(item.sources) ? item.sources.slice(0, 3) : [];
+  const related = Array.isArray(item.related) ? item.related.slice(0, 4) : [];
   const reliability = scoreTextFromValue(evidence.reliabilityScore);
   const impact = scoreTextFromValue(evidence.impactScore);
   const reaction = scoreTextFromValue(evidence.priceReactionComponent);
@@ -7137,6 +7139,54 @@ function newsSignalSection(item) {
               ${statCard("공시/IR", item.officialSignal?.count ? `${item.officialSignal.count}건` : "-")}
               ${statCard("최근 출처", latestSource ? `${latestSource.publisher} · ${latestSource.time}` : "-")}
             `
+        }
+      </div>
+      <div class="signal-proof-grid">
+        <div class="signal-proof-block">
+          <div class="signal-proof-title">
+            <strong>확인 출처</strong>
+            <span>${sourceCount ? `${sourceCount}개 출처` : "출처 확인 중"}</span>
+          </div>
+          <ul class="source-list signal-source-list">
+            ${
+              sources.length
+                ? sources
+                    .map(
+                      (source) => `
+                        <li>
+                          <strong>${escapeHtml(source.title)}</strong>
+                          <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
+                        </li>
+                      `
+                    )
+                    .join("")
+                : `<li><strong>출처 확인 중</strong><span>뉴스 또는 공시 출처가 아직 연결되지 않았습니다.</span></li>`
+            }
+          </ul>
+        </div>
+        ${
+          related.length
+            ? `
+              <div class="signal-proof-block">
+                <div class="signal-proof-title">
+                  <strong>연관 종목</strong>
+                  <span>같이 볼 대상</span>
+                </div>
+                <ul class="related-list signal-related-list">
+                  ${related
+                    .map(
+                      (entry) => `
+                        <li>
+                          <strong>${escapeHtml(entry.name)} <span class="${changeClass(entry.change)}">${escapeHtml(entry.change)}</span></strong>
+                          <span>${escapeHtml(entry.symbol)} · ${escapeHtml(entry.relation)}</span>
+                        </li>
+                      `
+                    )
+                    .join("")}
+                </ul>
+              </div>
+            `
+            : ""
         }
       </div>
     </section>
@@ -7226,8 +7276,6 @@ function riskDecisionSection(item) {
 function supportingDetailSection(item) {
   const signal = item.officialSignal ?? item.finalDecision?.officialSignal ?? {};
   const officialItems = Array.isArray(signal.items) ? signal.items.slice(0, 4) : [];
-  const sources = Array.isArray(item.sources) ? item.sources.slice(0, 6) : [];
-  const related = Array.isArray(item.related) ? item.related : [];
   const entry = uniqueTexts(item.entryConditions, 3);
   const noEntry = uniqueTexts(item.noEntry, 3);
   const stopRules = uniqueTexts(item.stopRules, 3);
@@ -7236,7 +7284,7 @@ function supportingDetailSection(item) {
       <summary>
         <span>
           <em>보조 정보</em>
-          <strong>공시·출처·연관 종목</strong>
+          <strong>공시·진입 체크</strong>
         </span>
         <b>보기</b>
       </summary>
@@ -7287,52 +7335,6 @@ function supportingDetailSection(item) {
               <ul class="bullet-list risk-list">${stopRules.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul>
             </div>
           </div>
-        </div>
-
-        <div class="support-block">
-          <div class="section-title">
-            <p class="eyebrow">근거</p>
-            <h2>확인한 출처</h2>
-          </div>
-          <ul class="source-list">
-            ${
-              sources.length
-                ? sources
-                    .map(
-                      (source) => `
-                        <li>
-                          <strong>${escapeHtml(source.title)}</strong>
-                          <span>${escapeHtml(source.publisher)} · ${escapeHtml(source.time)}${source.url ? " · 뉴스" : ""}</span>
-                        </li>
-                      `
-                    )
-                    .join("")
-                : `<li><strong>출처 확인 중</strong><span>뉴스 또는 공시 출처가 아직 연결되지 않았습니다.</span></li>`
-            }
-          </ul>
-        </div>
-
-        <div class="support-block">
-          <div class="section-title">
-            <p class="eyebrow">연관 종목</p>
-            <h2>같이 볼 대상</h2>
-          </div>
-          <ul class="related-list">
-            ${
-              related.length
-                ? related
-                    .map(
-                      (entry) => `
-                        <li>
-                          <strong>${escapeHtml(entry.name)} <span class="${changeClass(entry.change)}">${escapeHtml(entry.change)}</span></strong>
-                          <span>${escapeHtml(entry.symbol)} · ${escapeHtml(entry.relation)}</span>
-                        </li>
-                      `
-                    )
-                    .join("")
-                : `<li><strong>연관 종목 없음</strong><span>현재 후보와 연결된 비교 대상이 없습니다.</span></li>`
-            }
-          </ul>
         </div>
       </div>
     </details>
