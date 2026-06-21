@@ -16490,7 +16490,7 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         reasons.append("후보 풀 활성 종목 부족")
     if total_pool_count and excluded_ratio >= SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER:
         triggers.append("high_exclusion_ratio")
-        reasons.append("제외 후보 비율이 높음")
+        reasons.append("제외 기록 비율이 높음")
 
     expansion_active = bool(triggers)
     scan_limit = SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS if expansion_active else SIGNAL_DISCOVERY_MAX_SYMBOLS
@@ -16522,9 +16522,11 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
         "poolTotalCount": total_pool_count,
         "visibleCandidateCount": visible_candidate_count,
+        "activeVisibleCandidateCount": visible_candidate_count,
         "visibleDomesticCount": visible_domestic_count,
         "newCandidateCount": new_candidate_count,
         "excludedHiddenCount": excluded_count,
+        "excludedRecordCount": excluded_count,
         "dataWaitCount": data_wait_count,
         "coreCount": core_count,
         "entryCount": entry_count,

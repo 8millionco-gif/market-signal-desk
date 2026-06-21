@@ -1737,10 +1737,10 @@ function candidatePoolDisplaySummary(totalCount = 0) {
     summary.excludeCandidateCount,
     summary.excludeCandidateCompressionCount
   );
-  const parts = [`표시 ${visible || totalCount}`];
+  const parts = [`후보 ${visible || totalCount}`];
   if (domesticDb) parts.push(`국내 DB ${domesticDb}`);
   if (poolActive) parts.push(`후보 풀 ${poolActive}`);
-  if (excluded) parts.push(`제외 ${excluded} 숨김`);
+  if (excluded) parts.push(`제외 기록 ${excluded}`);
   return parts.join(" / ");
 }
 
@@ -1750,7 +1750,7 @@ function discoveryTriggerLabel(trigger) {
     entry_empty: "진입 조건 미충족",
     domestic_visible_shortfall: "국내 후보 보강 중",
     pool_active_shortfall: "감시 후보 확장 중",
-    high_exclusion_ratio: "제외 후보 대체 중"
+    high_exclusion_ratio: "제외 기록 대체 중"
   };
   return labels[String(trigger || "")] || "";
 }
@@ -1787,7 +1787,7 @@ function candidateDiscoveryNoticeMarkup() {
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "조건 충족 진입 후보 없음";
   const message = core + entry > 0
     ? (notice.message || `서버가 후보 풀 ${poolActive || "-"}개를 유지하며 추가 후보를 보강합니다.`)
-    : `무리한 진입 후보는 제외하고 조건 충족 후보를 계속 찾고 있습니다. 표시 ${visible || 0}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 ${excluded || 0}개 숨김`;
+    : `조건 미달 종목은 후보에서 제외하고 기록으로 보관합니다. 후보 ${visible || 0}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 기록 ${excluded || 0}개`;
   const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
@@ -3249,7 +3249,7 @@ function candidateSourceDetailRows(summary = {}) {
   const basisText = live.updatedAt && !live.error ? liveText : priceText;
   return [
     ["후보 기준", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}${cachedAt ? ` · ${timeLabel(cachedAt)}` : ""}`],
-    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}${excludedCount ? ` · 제외 ${excludedCount} 숨김` : ""}`],
+    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}${excludedCount ? ` · 제외 기록 ${excludedCount}` : ""}`],
     ["가격 기준", liveCount + closedCount + lastGoodCount > 0 || Boolean(live.updatedAt), basisText],
     ["재료 근거", scanned > 0 || materialNews > 0, scanned > 0 ? `${scanned}종목 점검 · 재료뉴스 ${materialNews}건` : "수집 대기"]
   ];
@@ -4328,11 +4328,12 @@ function candidateBriefForMain(summary = {}) {
     : sourceLabel;
   const line = [
     sourceText,
-    candidateCount ? (storedCount && storedCount !== candidateCount ? `표시 ${candidateCount}/${storedCount}` : `후보 ${candidateCount}`) : "",
+    candidateCount ? `후보 ${candidateCount}` : "",
+    storedCount && storedCount !== candidateCount ? `저장 기록 ${storedCount}` : "",
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
-    excludedCount ? `제외 ${excludedCount} 숨김` : "",
+    excludedCount ? `제외 기록 ${excludedCount}` : "",
     materialNews ? `재료 ${materialNews}` : "",
     priceText
   ].filter(Boolean).join(" · ");
@@ -6412,16 +6413,16 @@ function strategyLabel(value) {
 }
 
 function strategyEmptyMessage(value) {
-  if (value === "core") return "강한 뉴스·공시·트렌드 근거를 통과한 핵심 관찰 후보가 없습니다. 제외 후보는 메인에서 숨기고 서버가 새 후보를 계속 수집합니다.";
+  if (value === "core") return "강한 뉴스·공시·트렌드 근거를 통과한 핵심 관찰 후보가 없습니다. 제외 기록은 메인 후보에서 분리하고 서버가 새 후보를 계속 수집합니다.";
   if (value === "review") return "핵심은 아니지만 추가 확인할 후보가 없습니다. 지금은 대기 또는 전체 후보만 참고하세요.";
   if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 서버가 후보 풀을 보강할 때까지 무리한 진입은 보류합니다.";
-  if (value === "wait") return "추가 확인 후보가 없습니다. 제외 후보는 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
+  if (value === "wait") return "추가 확인 후보가 없습니다. 제외 기록은 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
   if (value === "pullback") return "눌림이나 반등 확인 구간에 있는 후보가 없습니다. 추격보다 다음 갱신을 기다리는 편이 낫습니다.";
   if (value === "hidden") return "뉴스 대비 가격 반영이 덜 된 숨은 후보가 없습니다. 전체 후보에서 테마 변화를 확인할 수 있습니다.";
   if (value === "momentum") return "뉴스, 가격, 수급 모멘텀이 동시에 살아 있는 후보가 없습니다.";
   if (value === "holding") return "현재 불러온 포트폴리오와 연결되는 후보가 없습니다.";
-  if (value === "exclude") return "제외 후보는 메인 후보가 아니므로 설정과 성과 검증에서만 참고합니다.";
-  return "현재 필터 조건에 맞는 표시 후보가 없습니다. 제외 후보는 숨겨 두고 서버가 새 후보를 계속 수집합니다.";
+  if (value === "exclude") return "제외 기록은 메인 후보가 아니므로 설정과 성과 검증에서만 참고합니다.";
+  return "현재 필터 조건에 맞는 표시 후보가 없습니다. 제외 기록은 분리하고 서버가 새 후보를 계속 수집합니다.";
 }
 
 function renderStrategyCounts() {
