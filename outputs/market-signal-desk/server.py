@@ -11852,6 +11852,7 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
 CANDIDATE_POOL_STATES = {
     "collected": {"label": "수집됨", "rank": 10},
     "watching": {"label": "관찰중", "rank": 20},
+    "data_wait": {"label": "데이터 보강", "rank": 15},
     "validating": {"label": "검증중", "rank": 30},
     "entry_candidate": {"label": "진입 후보", "rank": 40},
     "pullback_wait": {"label": "눌림 대기", "rank": 35},
@@ -19278,6 +19279,241 @@ def dashboard_payload_from_dashboard_file(mode: str) -> tuple[dict, str] | None:
     return None
 
 
+MARKET_DATA_CANDIDATE_NAME_KEYS = (
+    "name",
+    "stockName",
+    "shortName",
+    "korName",
+    "koreanName",
+    "itemName",
+    "securityName",
+    "englishName",
+    "displayName",
+)
+
+
+def market_data_latest_symbol_lookup() -> dict[str, dict]:
+    lookup: dict[str, dict] = {}
+    for entry in stock_search_universe_entries():
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if symbol and symbol not in lookup:
+            lookup[symbol] = entry
+    for candidate in seed_data().get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        symbol = str(candidate.get("symbol", "")).strip().upper()
+        if symbol and symbol not in lookup:
+            lookup[symbol] = candidate
+    return lookup
+
+
+def market_data_record_text_value(record: dict, row: dict, keys: tuple[str, ...]) -> str:
+    payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
+    metadata = record.get("metadata", {}) if isinstance(record.get("metadata"), dict) else {}
+    payload_metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    sources = (row, record, metadata, payload_metadata)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = str(source.get(key, "")).strip()
+            if value:
+                return value
+    return ""
+
+
+def market_data_record_candidate_name(symbol: str, record: dict, row: dict, lookup: dict[str, dict]) -> str:
+    name = market_data_record_text_value(record, row, MARKET_DATA_CANDIDATE_NAME_KEYS)
+    if name:
+        return name
+    entry = lookup.get(symbol, {}) if isinstance(lookup, dict) else {}
+    if isinstance(entry, dict):
+        for key in ("name", "englishName", "displayName"):
+            value = str(entry.get(key, "")).strip()
+            if value:
+                return value
+    return symbol
+
+
+def candidate_from_market_data_latest_record(symbol: str, record: dict, lookup: dict[str, dict]) -> dict | None:
+    if not isinstance(record, dict):
+        return None
+    symbol = str(symbol or record.get("symbol", "")).strip().upper()
+    if not symbol:
+        return None
+    row = market_data_record_payload_row(record)
+    market = market_data_latest_record_market(record, row)
+    live_price = live_price_from_market_data_record(record, market_data_record_timestamp(record), market)
+    if not live_price:
+        return None
+
+    name = market_data_record_candidate_name(symbol, record, row, lookup)
+    currency = str(live_price.get("currency") or row.get("currency") or "").strip()
+    price_text = display_price(str(live_price.get("lastPrice", "")), currency) if currency else str(live_price.get("lastPrice", ""))
+    change_text = str(live_price.get("changeDisplay") or change_from_toss_price_row(row) or "")
+    freshness = live_price.get("freshness", {}) if isinstance(live_price.get("freshness"), dict) else {}
+    basis = normalize_price_basis(live_price.get("basis"), market, bool(live_price.get("retainedOnFailure")))
+    basis_label = {
+        "live": "실시간 가격",
+        "closed_baseline": "장마감 기준가",
+        "last_good": "마지막 정상값",
+    }.get(basis, "저장 가격")
+    updated_at = str(live_price.get("updatedAt") or live_price.get("timestamp") or record.get("updatedAt") or "")
+    volume = row.get("volume") or row.get("accumulatedTradingVolume") or row.get("tradeVolume") or ""
+    score = 52 if basis == "live" else (50 if basis == "closed_baseline" else 45)
+    readiness = 45 if basis == "live" else (38 if basis == "closed_baseline" else 30)
+
+    return {
+        "symbol": symbol,
+        "name": name,
+        "englishName": str((lookup.get(symbol, {}) if isinstance(lookup, dict) else {}).get("englishName", "")),
+        "market": market,
+        "category": "overseas" if market == "US" else "domestic",
+        "price": price_text,
+        "change": change_text,
+        "updated": updated_at or "DB 가격 저장값",
+        "headline": f"{name} DB 저장 가격 기준 보수 복원",
+        "verdict": "데이터 보강",
+        "stage": "market-data-fallback",
+        "totalScore": score,
+        "triggerReadiness": readiness,
+        "candidateSource": "market_data_latest",
+        "candidatePool": {
+            "stateKey": "data_wait",
+            "stateLabel": "데이터 보강",
+            "stateReason": "후보 스냅샷이 비어 DB 가격 저장값으로 보수 복원했습니다.",
+            "updatedAt": updated_at,
+        },
+        "candidateCompression": {
+            "tier": "wait",
+            "label": "데이터 보강",
+            "reason": "뉴스/공시/판단 스냅샷이 없어 가격 저장값만 표시합니다.",
+        },
+        "signalValidation": {
+            "key": "insufficient",
+            "label": "근거 보강",
+            "reason": "가격은 DB에 있으나 후보 판단 근거 스냅샷이 부족합니다.",
+        },
+        "finalDecision": {
+            "actionKey": "data_wait",
+            "action": "다음 장 관찰" if basis == "closed_baseline" else "데이터 보강 대기",
+            "reason": f"{basis_label}은 표시 가능하지만 진입 판단은 서버 판단 스냅샷 이후 확정합니다.",
+        },
+        "priceReaction": {
+            "statusKey": "baseline" if basis == "closed_baseline" else "data_wait",
+            "label": basis_label,
+            "message": freshness.get("message") or live_price.get("message") or "DB 가격 저장값을 유지합니다.",
+        },
+        "livePrice": live_price,
+        "priceBasisKey": basis,
+        "priceBasisLabel": basis_label,
+        "trend": {
+            "newsCount": 0,
+            "globalNewsCount": None,
+            "newsSpike": "-",
+            "volumeSpike": "-",
+            "dailyVolume": str(volume) if volume not in {None, ""} else "-",
+            "tradePressure": "-",
+            "orderbookPressure": "-",
+            "spread": "-",
+            "sentiment": "-",
+        },
+        "tags": unique_texts([basis_label, "DB 저장값", "데이터 보강"], limit=5),
+        "thesis": "서버 판단 스냅샷이 비어 있을 때 DB에 저장된 가격 기준으로만 보수 표시합니다.",
+        "why": [
+            f"{basis_label}가 DB에 저장되어 있습니다.",
+            "뉴스/공시/수급 판단 스냅샷이 확인되기 전까지 진입 후보로 올리지 않습니다.",
+        ],
+        "entryConditions": [
+            "서버 판단 스냅샷 복구",
+            "가격·등락률·거래량 필수값 확인",
+            "뉴스/공시 근거와 가격 반응 일치 확인",
+        ],
+        "noEntry": [
+            "후보 판단 스냅샷이 비어 있는 경우",
+            "가격 외 근거가 DB에 부족한 경우",
+            "장중 가격 반응이 검증되지 않은 경우",
+        ],
+        "stopRules": [
+            "저장 가격 기준 재이탈",
+            "새 판단 스냅샷에서 제외 전환",
+            "DB 가격이 last_good으로만 장시간 유지",
+        ],
+        "sources": [
+            {
+                "title": f"{basis_label} 저장값",
+                "publisher": "market_data_latest",
+                "time": updated_at or market_data_record_timestamp(record),
+            }
+        ],
+        "disclosures": [
+            "이 후보는 스냅샷 복구용 보수 표시이며 자동 진입 판단이 아닙니다.",
+            "실전 판단은 후보 발굴/가격/뉴스/공시 스냅샷이 모두 갱신된 뒤 확정합니다.",
+        ],
+        "related": [],
+        "chart": [50, 50, 50, 50, 50, 50],
+    }
+
+
+def market_data_latest_candidates_from_data(data: dict, limit: int = 40) -> list[dict]:
+    records = market_data_latest_records_from_data(data, "toss", "prices")
+    if not records:
+        return []
+    lookup = market_data_latest_symbol_lookup()
+    candidates = []
+    for symbol, record in records.items():
+        candidate = candidate_from_market_data_latest_record(symbol, record, lookup)
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.sort(key=lambda item: str((item.get("livePrice") or {}).get("updatedAt") or item.get("updated") or ""), reverse=True)
+    return candidates[:limit]
+
+
+def dashboard_payload_from_market_data_latest_store(mode: str, data: dict | None = None) -> tuple[dict, str] | None:
+    data = data if isinstance(data, dict) else market_data_latest_data(fast=True)
+    candidates = market_data_latest_candidates_from_data(data)
+    if not candidates:
+        return None
+    payload = minimal_live_price_dashboard_payload(
+        mode,
+        candidates,
+        "market_data_latest_store",
+        str(data.get("updatedAt", "")),
+    )
+    payload["selected"] = payload["candidates"][0] if payload.get("candidates") else None
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    summary.update({
+        "candidateSource": "market_data_latest",
+        "dashboardCacheSource": "market_data_latest_store",
+        "marketDataFallback": True,
+        "marketDataFallbackCount": len(candidates),
+        "storedCandidateCount": 0,
+    })
+    payload["summary"] = summary
+    integrations = payload.get("integrations") if isinstance(payload.get("integrations"), dict) else {}
+    integrations["selection"] = {
+        "enabled": True,
+        "source": "market_data_latest_store",
+        "state": "fallback",
+        "message": "후보 스냅샷이 비어 DB 가격 저장값으로 보수 후보를 복원했습니다.",
+    }
+    toss = integrations.get("toss") if isinstance(integrations.get("toss"), dict) else {}
+    toss["prices"] = {
+        "source": "market_data_latest",
+        "priceRecordCount": len(candidates),
+        "message": "화면 조회에서는 토스를 직접 호출하지 않고 DB 가격 저장값만 사용합니다.",
+    }
+    integrations["toss"] = toss
+    payload["integrations"] = integrations
+    payload["pipeline"] = [
+        pipeline_step("storage", "DB 가격 저장값 조회", "fallback", "후보 스냅샷 대신 가격 저장값을 읽었습니다.", len(candidates)),
+        pipeline_step("selector", "보수 후보 복원", "wait", "진입 후보가 아니라 데이터 보강 후보로만 표시합니다.", len(candidates)),
+    ]
+    return ensure_dashboard_market_snapshot(payload, mode), "market_data_latest_store"
+
+
 def seed_dashboard_payload_for_live_prices_fast(mode: str) -> dict:
     data = seed_data()
     candidates = [
@@ -19311,17 +19547,24 @@ def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None =
         if cached_payload is not None:
             cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
             return cached_payload, str(cache.get("source") or "dashboard_cache")
+        store_payloads = store_payloads if isinstance(store_payloads, dict) else {}
+        market_data_payload = store_payloads.get("marketData") if isinstance(store_payloads.get("marketData"), dict) else None
+        fallback_payload = dashboard_payload_from_market_data_latest_store(mode, market_data_payload)
+        if fallback_payload is not None:
+            return fallback_payload
         return stored_snapshot_unavailable_dashboard_payload(mode), "snapshot_unavailable"
 
     store_payloads = store_payloads if isinstance(store_payloads, dict) else {}
     candidate_data_payload = store_payloads.get("candidateData") if isinstance(store_payloads.get("candidateData"), dict) else None
     candidate_pool_payload = store_payloads.get("candidatePool") if isinstance(store_payloads.get("candidatePool"), dict) else None
+    market_data_payload = store_payloads.get("marketData") if isinstance(store_payloads.get("marketData"), dict) else None
     for payload in (
         dashboard_payload_from_candidate_data_store(mode, candidate_data_payload),
         dashboard_payload_from_candidate_pool_store(mode, candidate_pool_payload),
         dashboard_payload_from_dashboard_file(mode),
         dashboard_payload_from_candidate_data_file(mode),
         dashboard_payload_from_candidate_pool_file(mode),
+        dashboard_payload_from_market_data_latest_store(mode, market_data_payload),
     ):
         if payload is not None:
             return payload
@@ -19334,6 +19577,9 @@ def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
         if cached_payload is not None:
             cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
             return cached_payload, str(cache.get("source") or "dashboard_cache")
+        fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+        if fallback_payload is not None:
+            return fallback_payload
         return stored_snapshot_unavailable_dashboard_payload(mode), "snapshot_unavailable"
 
     stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
@@ -19348,6 +19594,10 @@ def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
     stored_payload = stored_candidate_pool_dashboard_payload(mode)
     if stored_payload is not None:
         return stored_payload, "candidate_pool"
+
+    fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+    if fallback_payload is not None:
+        return fallback_payload
 
     return seed_dashboard_payload_for_live_prices(mode), "seed"
 
@@ -20999,6 +21249,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 if snapshot_only:
                     fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
+                    fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+                    if fallback_payload is not None:
+                        fallback_payload[0]["cache"]["fallbackError"] = fallback_error
+                        self.send_json(fallback_payload[0])
+                        return
                     self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
@@ -21008,6 +21263,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
                 if stored_pool_payload is not None:
                     self.send_json(stored_pool_payload)
+                    return
+                fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+                if fallback_payload is not None:
+                    self.send_json(fallback_payload[0])
                     return
                 self.send_json(stored_snapshot_unavailable_dashboard_payload(mode))
                 return
@@ -21025,6 +21284,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json(cached_payload)
                     return
                 if snapshot_only:
+                    fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+                    if fallback_payload is not None:
+                        fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
+                        self.send_json(fallback_payload[0])
+                        return
                     self.send_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=str(error)[:240]))
                     return
                 stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
@@ -21034,6 +21298,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
                 if stored_pool_payload is not None:
                     self.send_json(stored_pool_payload)
+                    return
+                fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
+                if fallback_payload is not None:
+                    fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
+                    self.send_json(fallback_payload[0])
                     return
                 raise
             return
