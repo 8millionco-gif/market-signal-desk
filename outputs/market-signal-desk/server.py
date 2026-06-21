@@ -17886,6 +17886,80 @@ def dashboard_discovery_notice(expansion_summary: dict | None) -> dict:
     }
 
 
+def candidate_compression_tier_priority(tier: str) -> int:
+    return {
+        "entry": 5,
+        "core": 4,
+        "portfolio": 3,
+        "wait": 2,
+        "exclude": 1,
+    }.get(str(tier or "").strip().lower(), 0)
+
+
+def synchronize_selected_candidate_compression(candidates: list[dict], selected: dict | None) -> list[dict]:
+    if not candidates or not isinstance(selected, dict):
+        return candidates
+    selected_symbol = str(selected.get("symbol", "")).strip().upper()
+    if not selected_symbol:
+        return candidates
+    selected_compression = selected.get("candidateCompression", {}) if isinstance(selected.get("candidateCompression"), dict) else {}
+    selected_tier = str(selected_compression.get("tier", "")).strip().lower()
+    selected_priority = candidate_compression_tier_priority(selected_tier)
+    if selected_priority <= 0:
+        return candidates
+    synced: list[dict] = []
+    replaced = False
+    for item in candidates:
+        if not isinstance(item, dict):
+            synced.append(item)
+            continue
+        symbol = str(item.get("symbol", "")).strip().upper()
+        if symbol == selected_symbol:
+            item_compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
+            item_priority = candidate_compression_tier_priority(str(item_compression.get("tier", "")).strip().lower())
+            if selected_priority > item_priority:
+                synced.append(copy.deepcopy(selected))
+                replaced = True
+                continue
+        synced.append(item)
+    return synced if replaced else candidates
+
+
+def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> dict:
+    counts = {"core": 0, "entry": 0, "wait": 0, "portfolio": 0, "exclude": 0}
+    top_candidates: list[dict] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
+        tier = str(compression.get("tier", "wait")).strip().lower()
+        if tier not in counts:
+            tier = "wait"
+        counts[tier] = counts.get(tier, 0) + 1
+        if tier in {"core", "entry"}:
+            final_decision = item.get("finalDecision", {}) if isinstance(item.get("finalDecision"), dict) else {}
+            top_candidates.append({
+                "symbol": item.get("symbol", ""),
+                "name": item.get("name", ""),
+                "tier": tier,
+                "score": item.get("totalScore", 0),
+                "compressionScore": compression.get("score", 0),
+                "decision": final_decision.get("action", ""),
+                "reason": compression.get("reason", ""),
+                "validation": compression.get("validationLabel", ""),
+                "expanded": bool(compression.get("expanded")),
+            })
+    return {
+        "candidateCompressionCounts": counts,
+        "coreCandidateCount": counts.get("core", 0),
+        "entryCandidateCount": counts.get("entry", 0),
+        "waitCandidateCompressionCount": counts.get("wait", 0),
+        "portfolioCandidateCompressionCount": counts.get("portfolio", 0),
+        "excludeCandidateCompressionCount": counts.get("exclude", 0),
+        "compressedTopCandidates": top_candidates,
+    }
+
+
 def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return payload
@@ -17894,21 +17968,31 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     candidates = enriched.get("candidates", [])
     if not isinstance(candidates, list):
         candidates = []
+    candidates = synchronize_selected_candidate_compression(
+        candidates,
+        enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
+    )
+    enriched["candidates"] = candidates
 
     summary = enriched.get("summary", {}) if isinstance(enriched.get("summary"), dict) else {}
     integrations = enriched.get("integrations", {}) if isinstance(enriched.get("integrations"), dict) else {}
     selection_status = integrations.get("selection", {}) if isinstance(integrations.get("selection"), dict) else {}
+    actual_selection = candidate_compression_snapshot_from_candidates(candidates)
 
     fallback_selection = price_only_selection_status(candidates, summary, integrations) if candidates else {}
-    compression_counts = (
-        selection_status.get("candidateCompressionCounts")
-        if isinstance(selection_status.get("candidateCompressionCounts"), dict)
-        else summary.get("candidateCompressionCounts")
-    )
+    compression_counts = actual_selection.get("candidateCompressionCounts")
+    if not isinstance(compression_counts, dict):
+        compression_counts = (
+            selection_status.get("candidateCompressionCounts")
+            if isinstance(selection_status.get("candidateCompressionCounts"), dict)
+            else summary.get("candidateCompressionCounts")
+        )
     if not isinstance(compression_counts, dict):
         compression_counts = fallback_selection.get("candidateCompressionCounts", {})
     if not isinstance(compression_counts, dict):
         compression_counts = {}
+
+    summary.update(actual_selection)
 
     pool_status = integrations.get("candidatePool", {}) if isinstance(integrations.get("candidatePool"), dict) else {}
     if not pool_status:
@@ -17920,6 +18004,7 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     expansion_input = {
         "candidateCompressionCounts": compression_counts,
         "coreCandidateCount": summary_count_value(
+            actual_selection.get("coreCandidateCount"),
             selection_status.get("coreCandidateCount"),
             summary.get("coreCandidateCount"),
             fallback_selection.get("candidateCompressionCounts", {}).get("core")
@@ -17927,6 +18012,7 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
             else None,
         ),
         "entryCandidateCount": summary_count_value(
+            actual_selection.get("entryCandidateCount"),
             selection_status.get("entryCandidateCount"),
             selection_status.get("actionCandidateCount"),
             summary.get("entryCandidateCount"),
@@ -17936,6 +18022,7 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
             else None,
         ),
         "waitCandidateCount": summary_count_value(
+            actual_selection.get("waitCandidateCompressionCount"),
             selection_status.get("waitCandidateCount"),
             summary.get("waitCandidateCount"),
             fallback_selection.get("candidateCompressionCounts", {}).get("wait")
@@ -17943,12 +18030,14 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
             else None,
         ),
         "portfolioLinkedCandidateCount": summary_count_value(
+            actual_selection.get("portfolioCandidateCompressionCount"),
             summary.get("portfolioLinkedCandidateCount"),
             fallback_selection.get("candidateCompressionCounts", {}).get("portfolio")
             if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
             else None,
         ),
         "excludeCandidateCount": summary_count_value(
+            actual_selection.get("excludeCandidateCompressionCount"),
             selection_status.get("excludeCandidateCount"),
             summary.get("hiddenExcludedCount"),
             summary.get("excludeCandidateCount"),
