@@ -1951,7 +1951,14 @@ function isClosedBaselineCandidate(item) {
 function closedBaselineDecisionLabel(label, fallback = "다음 장 관찰") {
   const text = String(label ?? "").trim();
   if (!text) return fallback;
-  if (text.includes("가격 확인") || text.includes("미수신") || text.includes("반응 대기") || text.includes("확인 대기")) {
+  if (
+    text.includes("가격 확인") ||
+    text.includes("미수신") ||
+    text.includes("반응 대기") ||
+    text.includes("확인 대기") ||
+    text.includes("서버 수집") ||
+    text.includes("수집 중")
+  ) {
     return fallback;
   }
   return text;
@@ -1988,7 +1995,14 @@ function basisAwareDecisionLabel(item, label = "", fallback = "데이터 보강 
       ? "마지막 정상값 확인"
       : fallback;
   if (!text) return replacement;
-  if (text.includes("가격 확인") || text.includes("미수신") || text.includes("반응 대기") || text.includes("확인 대기")) {
+  if (
+    text.includes("가격 확인") ||
+    text.includes("미수신") ||
+    text.includes("반응 대기") ||
+    text.includes("확인 대기") ||
+    text.includes("서버 수집") ||
+    text.includes("수집 중")
+  ) {
     return replacement;
   }
   return text;
@@ -2005,7 +2019,13 @@ function basisAwareDecisionSummary(item, summary = "") {
       ? "마지막 정상 가격을 유지해 후보를 보존합니다. 다음 수집에서 가격·등락률을 다시 검증합니다."
       : "서버가 DB에 가격·등락률·거래량을 보강한 뒤 판단합니다.";
   if (!text) return fallback;
-  if (text.includes("가격 확인 필요") || text.includes("가격확인 필요") || text.includes("미수신") || text.includes("반응대기")) {
+  if (
+    text.includes("가격 확인 필요") ||
+    text.includes("가격확인 필요") ||
+    text.includes("미수신") ||
+    text.includes("반응대기") ||
+    text.includes("서버 수집 중")
+  ) {
     return fallback;
   }
   return text;
@@ -2253,7 +2273,10 @@ function primaryDecisionForDisplay(item, plan = tradePlan(item)) {
     return {
       key: "wait",
       label,
-      detail: decision.summary || reactionDecision.summary || evaluation.message || freshness.message || "장마감 기준가 분석입니다. 다음 장 시작 후 가격·거래량 반응을 확인하세요."
+      detail: basisAwareDecisionSummary(
+        item,
+        decision.summary || reactionDecision.summary || evaluation.message || freshness.message || "장마감 기준가 분석입니다. 다음 장 시작 후 가격·거래량 반응을 확인하세요."
+      )
     };
   }
   if (evaluation.status === "analysis" && decision.actionKey === "verify") {
@@ -3410,9 +3433,10 @@ function renderNotificationStatus() {
 
 function marketIndexDisplay(market, key) {
   const detail = market?.indexDetails?.[key] ?? {};
+  const change = displayChangeText(detail.change || market?.[key] || "-");
   return {
-    value: detail.value || "-",
-    change: displayChangeText(detail.change || market?.[key] || "-")
+    value: detail.value || (change && change !== "-" ? "값 대기" : "-"),
+    change
   };
 }
 
