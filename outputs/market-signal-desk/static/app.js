@@ -67,7 +67,7 @@ const state = {
   autoMode: detectedAnalysisMode(),
   modeAutoFollow: true,
   filter: "all",
-  strategy: "core",
+  strategy: "all",
   query: "",
   dashboard: null,
   feedExpanded: false,
@@ -256,9 +256,9 @@ const SETTINGS_TAB_COPY = {
   }
 };
 const CANDIDATE_DISPLAY_STICKY_MS = 120000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 16;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 28;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 60;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 20;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 40;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 80;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1631,12 +1631,12 @@ function candidateFeedBaseLimit() {
   const target = candidatePoolVisibleTarget(0);
   let limit = state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
   if (expansionActive) {
-    const expansionLimit = state.strategy === "all" ? 32 : 24;
-    const expansionCap = state.strategy === "all" ? 44 : 32;
+    const expansionLimit = state.strategy === "all" ? 48 : 32;
+    const expansionCap = state.strategy === "all" ? 80 : 48;
     limit = Math.max(limit, Math.min(Math.max(target, expansionLimit), expansionCap));
   }
   if (state.strategy === "wait" && expansionActive) {
-    limit = Math.max(limit, 24);
+    limit = Math.max(limit, 36);
   }
   return limit;
 }
@@ -1741,7 +1741,7 @@ function candidatePoolDisplaySummary(totalCount = 0) {
   const parts = [`후보 ${visible || totalCount}${visibleTarget ? `/${visibleTarget}` : ""}`];
   if (domesticDb) parts.push(`국내 DB ${domesticDb}`);
   if (poolActive) parts.push(`후보 풀 ${poolActive}`);
-  if (excluded) parts.push(`제외 기록 ${excluded}`);
+  if (excluded) parts.push(`숨김 기록 ${excluded}`);
   return parts.join(" / ");
 }
 
@@ -1752,7 +1752,7 @@ function discoveryTriggerLabel(trigger) {
     visible_candidate_shortfall: "실전 후보 보강 중",
     domestic_visible_shortfall: "국내 후보 보강 중",
     pool_active_shortfall: "감시 후보 확장 중",
-    high_exclusion_ratio: "제외 기록 대체 중"
+    high_exclusion_ratio: "숨김 기록 대체 중"
   };
   return labels[String(trigger || "")] || "";
 }
@@ -1790,7 +1790,7 @@ function candidateDiscoveryNoticeMarkup() {
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "조건 충족 진입 후보 없음";
   const message = core + entry > 0
     ? (notice.message || `서버가 후보 풀 ${poolActive || "-"}개를 유지하며 추가 후보를 보강합니다.`)
-    : `조건 미달 종목은 후보가 아니라 제외 기록으로 분리합니다. 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 기록 ${excluded || 0}개`;
+    : `조건 미달 종목은 후보가 아니라 기록으로 분리합니다. 표시 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 숨김 기록 ${excluded || 0}개`;
   const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
@@ -1910,7 +1910,7 @@ function syncSelectedToVisibleCandidates(candidates = filteredCandidates()) {
 
 function baseFilteredCandidates(options = {}) {
   const candidates = state.dashboard?.candidates ?? [];
-  const includeExcluded = Boolean(options.includeExcluded) || state.strategy === "exclude";
+  const includeExcluded = Boolean(options.includeExcluded);
   return candidates.filter((item) => {
     const matchesFilter =
       state.filter === "all" ||
@@ -1938,7 +1938,7 @@ function candidatesForStrategy(candidates = [], strategy = "all") {
   if (strategy === "hidden") return candidates.filter(isHiddenOpportunity);
   if (strategy === "momentum") return candidates.filter(hasMomentumSignal);
   if (strategy === "holding") return candidates.filter(isHoldingCandidate);
-  if (strategy === "exclude") return candidates.filter(isExcludeCandidate);
+  if (strategy === "exclude") return [];
   if (strategy === "action") return candidates.filter(isActionCandidate);
   return candidates;
 }
@@ -2700,7 +2700,6 @@ function strategyPriority(item, strategy) {
   if (strategy === "action" && isActionCandidate(item)) return 0;
   if (strategy === "pullback" && isPullbackCandidate(item)) return 0;
   if (strategy === "holding" && isHoldingCandidate(item)) return 0;
-  if (strategy === "exclude" && isExcludeCandidate(item)) return 0;
   return 1;
 }
 
@@ -3252,7 +3251,7 @@ function candidateSourceDetailRows(summary = {}) {
   const basisText = live.updatedAt && !live.error ? liveText : priceText;
   return [
     ["후보 기준", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}${cachedAt ? ` · ${timeLabel(cachedAt)}` : ""}`],
-    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}${excludedCount ? ` · 제외 기록 ${excludedCount}` : ""}`],
+    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}${excludedCount ? ` · 숨김 기록 ${excludedCount}` : ""}`],
     ["가격 기준", liveCount + closedCount + lastGoodCount > 0 || Boolean(live.updatedAt), basisText],
     ["재료 근거", scanned > 0 || materialNews > 0, scanned > 0 ? `${scanned}종목 점검 · 재료뉴스 ${materialNews}건` : "수집 대기"]
   ];
@@ -4305,7 +4304,6 @@ function candidateBriefForMain(summary = {}) {
   const candidateCount = hasVisibleBasis
     ? visibility.visibleCount
     : numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, 0);
-  const excludedCount = hasVisibleBasis ? visibility.excludedCount : Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
   const storedCount = Number(visibility.storedCount ?? summary.candidateCount ?? 0);
   const liveCount = Number(priceBasis.live ?? 0);
   const closedCount = Number(priceBasis.closed_baseline ?? 0);
@@ -4339,7 +4337,6 @@ function candidateBriefForMain(summary = {}) {
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
-    excludedCount ? `제외 기록 ${excludedCount}` : "",
     materialNews ? `재료 ${materialNews}` : "",
     priceText
   ].filter(Boolean).join(" · ");
@@ -6422,16 +6419,16 @@ function strategyLabel(value) {
 }
 
 function strategyEmptyMessage(value) {
-  if (value === "core") return "강한 뉴스·공시·트렌드 근거를 통과한 핵심 관찰 후보가 없습니다. 제외 기록은 메인 후보에서 분리하고 서버가 새 후보를 계속 수집합니다.";
+  if (value === "core") return "강한 뉴스·공시·트렌드 근거를 통과한 핵심 관찰 후보가 없습니다. 숨김 기록은 메인 후보에서 분리하고 서버가 새 후보를 계속 수집합니다.";
   if (value === "review") return "핵심은 아니지만 추가 확인할 후보가 없습니다. 지금은 대기 또는 전체 후보만 참고하세요.";
   if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 서버가 후보 풀을 보강할 때까지 무리한 진입은 보류합니다.";
-  if (value === "wait") return "추가 확인 후보가 없습니다. 제외 기록은 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
+  if (value === "wait") return "추가 확인 후보가 없습니다. 조건 미달 기록은 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
   if (value === "pullback") return "눌림이나 반등 확인 구간에 있는 후보가 없습니다. 추격보다 다음 갱신을 기다리는 편이 낫습니다.";
   if (value === "hidden") return "뉴스 대비 가격 반영이 덜 된 숨은 후보가 없습니다. 전체 후보에서 테마 변화를 확인할 수 있습니다.";
   if (value === "momentum") return "뉴스, 가격, 수급 모멘텀이 동시에 살아 있는 후보가 없습니다.";
   if (value === "holding") return "현재 불러온 포트폴리오와 연결되는 후보가 없습니다.";
-  if (value === "exclude") return "제외 기록은 메인 후보가 아니므로 설정과 성과 검증에서만 참고합니다.";
-  return "현재 필터 조건에 맞는 표시 후보가 없습니다. 제외 기록은 분리하고 서버가 새 후보를 계속 수집합니다.";
+  if (value === "exclude") return "숨김 기록은 메인 후보가 아니므로 설정과 성과 검증에서만 참고합니다.";
+  return "현재 필터 조건에 맞는 표시 후보가 없습니다. 조건 미달 기록은 분리하고 서버가 새 후보를 계속 수집합니다.";
 }
 
 function renderStrategyCounts() {
