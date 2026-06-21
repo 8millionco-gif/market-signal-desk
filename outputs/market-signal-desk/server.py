@@ -22246,6 +22246,59 @@ def attach_dashboard_revision(payload: dict, source: str = "") -> dict:
     return payload
 
 
+def dashboard_cached_snapshot_payload_fast(
+    mode: str,
+    fallback_error: str = "",
+    include_discovery: bool = False,
+) -> dict | None:
+    selected_mode = normalize_signal_mode(mode)
+    record = dashboard_cache_record(selected_mode)
+    if not isinstance(record, dict):
+        return None
+    dashboard_payload = record.get("dashboard", {})
+    if not isinstance(dashboard_payload, dict) or not dashboard_payload:
+        return None
+    candidates = dashboard_payload.get("candidates", [])
+    if not isinstance(candidates, list) or not candidates:
+        return None
+
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    payload = copy.deepcopy(dashboard_payload)
+    payload["mode"] = selected_mode
+    payload["servedAt"] = now_text
+    payload["source"] = payload.get("source") or "dashboard-cache"
+
+    cache = payload.get("cache", {}) if isinstance(payload.get("cache"), dict) else {}
+    cache.update({
+        "cached": True,
+        "fastRead": True,
+        "source": "dashboard_cache_fast",
+        "recordSource": record.get("source", ""),
+        "mode": selected_mode,
+        "requestedMode": mode,
+        "createdAt": record.get("createdAt", payload.get("generatedAt", "")),
+        "updatedAt": record.get("updatedAt", ""),
+        "servedAt": now_text,
+        "fallbackError": fallback_error,
+        "includeDiscovery": include_discovery,
+        "message": "DB 대시보드 캐시 스냅샷을 즉시 반환했습니다.",
+    })
+    payload["cache"] = cache
+
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    summary.update({
+        "dashboardCacheSource": "dashboard_cache_fast",
+        "dashboardReadMode": "db-cache-fast",
+        "dashboardCacheFastRead": True,
+        "dashboardCacheCreatedAt": cache.get("createdAt", ""),
+        "dashboardCacheUpdatedAt": cache.get("updatedAt", ""),
+        "dashboardCacheFallbackError": fallback_error,
+        "candidateCount": len(candidates),
+    })
+    payload["summary"] = summary
+    return attach_dashboard_revision(payload, source="dashboard_cache_fast")
+
+
 def mark_dashboard_cache_bypassed(
     payload: dict,
     cached_payload: dict,
@@ -23730,7 +23783,174 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
     return status
 
 
+def dashboard_live_price_payload_from_db_lite(symbols: list[str], mode: str, detail: str = "price") -> dict:
+    mode = normalize_signal_mode(mode)
+    session = market_session_context("KR")
+    poll_seconds = SIGNAL_LIVE_PRICE_POLL_SECONDS if mode == "intraday" else max(60, SIGNAL_LIVE_PRICE_POLL_SECONDS * 6)
+    requested = unique_symbols(symbols)[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    cache_key = (mode, f"lite:{str(detail or 'price').strip().lower()}", tuple(requested))
+    now_utc = datetime.now(timezone.utc)
+    if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
+        with LIVE_PRICE_RESPONSE_CACHE_LOCK:
+            cached = LIVE_PRICE_RESPONSE_CACHE.get(cache_key)
+            expires_at = cached.get("expires_at") if isinstance(cached, dict) else None
+            cached_payload = cached.get("payload") if isinstance(cached, dict) else None
+        if isinstance(expires_at, datetime) and expires_at > now_utc and isinstance(cached_payload, dict):
+            payload = copy.deepcopy(cached_payload)
+            created_at = cached.get("created_at") if isinstance(cached, dict) else None
+            age_seconds = (
+                max(0, int((now_utc - created_at).total_seconds()))
+                if isinstance(created_at, datetime)
+                else 0
+            )
+            payload["cache"] = {
+                "hit": True,
+                "ttlSeconds": SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS,
+                "ageSeconds": age_seconds,
+                "expiresAt": expires_at.astimezone(KST).isoformat(timespec="seconds"),
+                "message": "DB 가격 필드 응답 캐시를 사용했습니다.",
+            }
+            return payload
+
+    now_text = datetime.now(KST).isoformat(timespec="seconds")
+    market_data = market_data_latest_data(fast=False)
+    records = market_data_latest_records_from_data(market_data, "toss", "prices")
+    records_by_upper = {
+        str(symbol).strip().upper(): record
+        for symbol, record in records.items()
+        if str(symbol).strip() and isinstance(record, dict)
+    }
+    if not requested:
+        requested = list(records_by_upper.keys())[:SIGNAL_LIVE_PRICE_SYMBOL_LIMIT]
+    requested_set = {symbol.upper() for symbol in requested}
+
+    candidates: list[dict] = []
+    for symbol in requested:
+        symbol_key = str(symbol).strip().upper()
+        record = records_by_upper.get(symbol_key)
+        if not isinstance(record, dict):
+            continue
+        row = market_data_record_payload_row(record)
+        market = market_data_latest_record_market(record, row)
+        live_price = live_price_from_market_data_record(
+            record,
+            market_data_record_timestamp(record),
+            market,
+        )
+        if not isinstance(live_price, dict):
+            continue
+        currency = str(live_price.get("currency", "") or row.get("currency", "") or "").strip()
+        price_text = display_price(str(live_price.get("lastPrice", "") or ""), currency)
+        change_text = str(live_price.get("changeDisplay", "") or change_from_toss_price_row(row) or "").strip()
+        name = (
+            market_data_record_text_value(record, row, MARKET_DATA_CANDIDATE_NAME_KEYS)
+            or symbol_key
+        )
+        candidates.append({
+            "symbol": symbol_key,
+            "name": name,
+            "market": market,
+            "price": price_text,
+            "change": change_text,
+            "updated": live_price.get("updatedAt") or live_price.get("timestamp") or record.get("updatedAt", ""),
+            "livePrice": live_price,
+        })
+
+    returned_symbols = {str(item.get("symbol", "")).strip().upper() for item in candidates}
+    missing_requested = [symbol for symbol in requested if symbol.upper() not in returned_symbols]
+    freshness_counts = live_price_freshness_counts(candidates)
+    market_data_updated_at = str(market_data.get("updatedAt", "") or market_data.get("collectedAt", "") or "")
+    summary = {
+        "livePriceUpdatedAt": now_text,
+        "marketSession": session,
+        "livePriceFreshnessCounts": freshness_counts,
+        "livePriceRequestedCount": len(requested),
+        "livePriceTossRequestedCount": 0,
+        "livePriceTossReceivedCount": 0,
+        "livePriceBatchCount": 0,
+        "livePriceBatchErrorCount": 0,
+        "livePriceRefreshedCount": len(candidates),
+        "livePriceCandidateCount": len(candidates),
+        "livePriceStoredCandidateCount": len(candidates),
+        "livePriceStoredFallbackCount": 0,
+        "livePriceRetainedCount": len(candidates),
+        "livePriceMissingCount": len(missing_requested),
+        "livePriceMissingSymbols": missing_requested,
+        "marketDataLatestCount": len(records),
+        "marketDataLatestAt": market_data_updated_at,
+        "stableDecisionCount": 0,
+        "finalDecisionStabilitySeconds": SIGNAL_FINAL_DECISION_STABILITY_SECONDS if SIGNAL_FINAL_DECISION_STABILITY_ENABLED else 0,
+    }
+    payload = {
+        "mode": mode,
+        "source": "db-live-price-lite",
+        "selectionCycle": "price-only",
+        "detail": str(detail or "price").strip().lower() or "price",
+        "updatedAt": now_text,
+        "pollSeconds": poll_seconds,
+        "symbols": requested,
+        "requestedCount": len(requested),
+        "refreshedCount": len(candidates),
+        "candidateCount": len(candidates),
+        "summary": summary,
+        "integrations": {
+            "livePrice": {
+                "source": "db-market-data-latest-lite",
+                "dbOnly": True,
+                "pollSeconds": poll_seconds,
+                "marketSession": session,
+                "symbolLimit": SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
+                "requestedCount": len(requested),
+                "refreshedCount": len(candidates),
+                "candidateCount": len(candidates),
+                "missingCount": len(missing_requested),
+                "missingSymbols": missing_requested,
+                "freshnessCounts": freshness_counts,
+                "message": "DB 최신 가격 필드만 읽었습니다.",
+            },
+            "toss": {
+                "config": toss_config_status(),
+                "prices": {
+                    "source": "db-market-data-latest-lite",
+                    "dbOnly": True,
+                    "requestedCount": 0,
+                    "receivedCount": len(candidates),
+                    "missingCount": len(missing_requested),
+                    "missingSymbols": missing_requested,
+                    "message": "웹 가격 갱신에서는 Toss를 호출하지 않습니다.",
+                },
+            },
+            "marketDataLatest": {
+                "source": "market_data_latest",
+                "readSource": "postgres-lite",
+                "priceCount": len(records),
+                "updatedAt": market_data_updated_at,
+            },
+        },
+        "candidates": candidates,
+        "selected": None,
+        "message": "DB 최신 가격 필드만 읽었습니다.",
+        "cache": {
+            "hit": False,
+            "ttlSeconds": SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS,
+            "message": "DB 가격 필드 직접 조회 결과입니다.",
+        },
+    }
+    if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
+        with LIVE_PRICE_RESPONSE_CACHE_LOCK:
+            LIVE_PRICE_RESPONSE_CACHE[cache_key] = {
+                "payload": copy.deepcopy(payload),
+                "created_at": now_utc,
+                "expires_at": now_utc + timedelta(seconds=SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS),
+            }
+    return payload
+
+
 def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: str = "price") -> dict:
+    detail_key = str(detail or "price").strip().lower()
+    if detail_key in {"", "price", "prices"}:
+        return dashboard_live_price_payload_from_db_lite(symbols, mode, detail=detail)
+
     mode = normalize_signal_mode(mode)
     session = market_session_context("KR")
     poll_seconds = SIGNAL_LIVE_PRICE_POLL_SECONDS if mode == "intraday" else max(60, SIGNAL_LIVE_PRICE_POLL_SECONDS * 6)
@@ -25283,11 +25503,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 force_refresh = False
             if not force_refresh:
                 fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
-                snapshot_payload = dashboard_snapshot_payload(
+                snapshot_payload = dashboard_cached_snapshot_payload_fast(
                     mode,
                     fallback_error=fallback_error,
                     include_discovery=not snapshot_only,
                 )
+                if snapshot_payload is None:
+                    snapshot_payload = dashboard_snapshot_payload(
+                        mode,
+                        fallback_error=fallback_error,
+                        include_discovery=not snapshot_only,
+                    )
                 if snapshot_payload is not None:
                     if refresh_blocked:
                         snapshot_cache = snapshot_payload.setdefault("cache", {})
