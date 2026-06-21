@@ -52,7 +52,7 @@ SNAPSHOT_STORAGE_MODE = os.getenv("SNAPSHOT_STORAGE_MODE", "filesystem").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SIGNAL_STORAGE_BACKEND = os.getenv("SIGNAL_STORAGE_BACKEND", "auto").strip().lower() or "auto"
 SIGNAL_DB_AUTO_MIGRATE = os.getenv("SIGNAL_DB_AUTO_MIGRATE", "1").lower() not in {"0", "false", "no", "off"}
-SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "1") or "1"))
+SIGNAL_DB_CONNECT_RETRIES = max(1, int(os.getenv("SIGNAL_DB_CONNECT_RETRIES", "2") or "2"))
 SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIMEOUT_SECONDS", "3") or "3"))
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "30") or "30"))
@@ -73,6 +73,10 @@ SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS = max(
 SIGNAL_DB_TRANSIENT_GRACE_SECONDS = max(30, int(os.getenv("SIGNAL_DB_TRANSIENT_GRACE_SECONDS", "900") or "900"))
 SIGNAL_DB_REUSE_CONNECTION = os.getenv("SIGNAL_DB_REUSE_CONNECTION", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_CONNECTION_TTL_SECONDS = max(30, int(os.getenv("SIGNAL_DB_CONNECTION_TTL_SECONDS", "180") or "180"))
+SIGNAL_DB_CONNECTION_VALIDATE_SECONDS = max(
+    0,
+    int(os.getenv("SIGNAL_DB_CONNECTION_VALIDATE_SECONDS", "25") or "25"),
+)
 SIGNAL_DB_APPLICATION_NAME = os.getenv("SIGNAL_DB_APPLICATION_NAME", "market_signal_desk").strip() or "market_signal_desk"
 SIGNAL_DB_KEEPALIVES = os.getenv("SIGNAL_DB_KEEPALIVES", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_DB_KEEPALIVES_IDLE_SECONDS = max(10, int(os.getenv("SIGNAL_DB_KEEPALIVES_IDLE_SECONDS", "30") or "30"))
@@ -533,6 +537,7 @@ DB_MIGRATION_BACKOFF_RESET_AT = 0.0
 DB_PAYLOAD_UNSET = object()
 DB_SHARED_CONNECTION = None
 DB_SHARED_CONNECTION_CREATED_AT = 0.0
+DB_SHARED_CONNECTION_VALIDATED_AT = 0.0
 DB_MIGRATION_STATUS: dict[str, object] = {
     "enabled": SIGNAL_DB_AUTO_MIGRATE,
     "done": False,
@@ -681,6 +686,9 @@ def db_error_classification(error: Exception | str) -> dict:
         "could not send data",
         "connection already closed",
         "connection is closed",
+        "server closed the connection",
+        "closed the connection unexpectedly",
+        "terminating connection",
     )
     stale_connection = any(pattern in lower_message for pattern in stale_patterns)
     connection_refused = "connection refused" in lower_message
@@ -933,12 +941,12 @@ def psycopg_modules():
     return psycopg, json_module.Jsonb
 
 
-def db_connect_with_retry():
+def db_connect_with_retry(ignore_backoff: bool = False):
     global DB_FAILURE_BACKOFF_UNTIL, DB_LAST_CONNECT_ATTEMPT_AT, DB_LAST_SUCCESS_AT
     global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
     DB_LAST_CONNECT_ATTEMPT_AT = db_diag_now()
     backoff_remaining = DB_FAILURE_BACKOFF_UNTIL - time.time()
-    if backoff_remaining > 0:
+    if backoff_remaining > 0 and not ignore_backoff:
         raise RuntimeError(f"database temporarily unavailable; retry in {int(backoff_remaining) + 1}s")
     last_error: Exception | None = None
     for attempt in range(SIGNAL_DB_CONNECT_RETRIES):
@@ -971,10 +979,6 @@ def db_connect_with_retry():
             if attempt + 1 < SIGNAL_DB_CONNECT_RETRIES:
                 time.sleep(SIGNAL_DB_RETRY_DELAY_SECONDS * (attempt + 1))
     if last_error is not None:
-        DB_FAILURE_BACKOFF_UNTIL = max(
-            DB_FAILURE_BACKOFF_UNTIL,
-            time.time() + SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
-        )
         raise last_error
     raise RuntimeError("database connection failed")
 
@@ -988,8 +992,17 @@ def db_connection_closed(conn) -> bool:
         return True
 
 
+def db_ping_connection(conn) -> bool:
+    if db_connection_closed(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        cur.fetchone()
+    return True
+
+
 def close_db_shared_connection(conn=None) -> None:
-    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT
+    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT, DB_SHARED_CONNECTION_VALIDATED_AT
     target = conn if conn is not None else DB_SHARED_CONNECTION
     if target is not None:
         try:
@@ -999,28 +1012,52 @@ def close_db_shared_connection(conn=None) -> None:
     if conn is None or conn is DB_SHARED_CONNECTION:
         DB_SHARED_CONNECTION = None
         DB_SHARED_CONNECTION_CREATED_AT = 0.0
+        DB_SHARED_CONNECTION_VALIDATED_AT = 0.0
 
 
 def db_reusable_connection():
-    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT
+    global DB_SHARED_CONNECTION, DB_SHARED_CONNECTION_CREATED_AT, DB_SHARED_CONNECTION_VALIDATED_AT
+    now = time.time()
     if (
         DB_SHARED_CONNECTION is not None
         and not db_connection_closed(DB_SHARED_CONNECTION)
-        and (time.time() - DB_SHARED_CONNECTION_CREATED_AT) <= SIGNAL_DB_CONNECTION_TTL_SECONDS
+        and (now - DB_SHARED_CONNECTION_CREATED_AT) <= SIGNAL_DB_CONNECTION_TTL_SECONDS
     ):
-        return DB_SHARED_CONNECTION
+        if (
+            SIGNAL_DB_CONNECTION_VALIDATE_SECONDS <= 0
+            or (now - DB_SHARED_CONNECTION_VALIDATED_AT) <= SIGNAL_DB_CONNECTION_VALIDATE_SECONDS
+        ):
+            return DB_SHARED_CONNECTION
+        try:
+            db_ping_connection(DB_SHARED_CONNECTION)
+            DB_SHARED_CONNECTION_VALIDATED_AT = now
+            return DB_SHARED_CONNECTION
+        except Exception:
+            close_db_shared_connection(DB_SHARED_CONNECTION)
+            _psycopg, _jsonb, conn = db_connect_with_retry(ignore_backoff=True)
+            DB_SHARED_CONNECTION = conn
+            DB_SHARED_CONNECTION_CREATED_AT = time.time()
+            DB_SHARED_CONNECTION_VALIDATED_AT = DB_SHARED_CONNECTION_CREATED_AT
+            return conn
     close_db_shared_connection()
     _psycopg, _jsonb, conn = db_connect_with_retry()
     DB_SHARED_CONNECTION = conn
     DB_SHARED_CONNECTION_CREATED_AT = time.time()
+    DB_SHARED_CONNECTION_VALIDATED_AT = DB_SHARED_CONNECTION_CREATED_AT
     return conn
 
 
 def db_connection_reuse_status() -> dict:
     age_seconds = int(time.time() - DB_SHARED_CONNECTION_CREATED_AT) if DB_SHARED_CONNECTION_CREATED_AT else 0
+    validated_age_seconds = (
+        int(time.time() - DB_SHARED_CONNECTION_VALIDATED_AT)
+        if DB_SHARED_CONNECTION_VALIDATED_AT
+        else 0
+    )
     return {
         "enabled": SIGNAL_DB_REUSE_CONNECTION,
         "ttlSeconds": SIGNAL_DB_CONNECTION_TTL_SECONDS,
+        "validateSeconds": SIGNAL_DB_CONNECTION_VALIDATE_SECONDS,
         "applicationName": SIGNAL_DB_APPLICATION_NAME,
         "keepalives": SIGNAL_DB_KEEPALIVES,
         "keepaliveIdleSeconds": SIGNAL_DB_KEEPALIVES_IDLE_SECONDS if SIGNAL_DB_KEEPALIVES else 0,
@@ -1029,6 +1066,7 @@ def db_connection_reuse_status() -> dict:
         "staleBackoffSeconds": SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS,
         "hasConnection": DB_SHARED_CONNECTION is not None and not db_connection_closed(DB_SHARED_CONNECTION),
         "ageSeconds": age_seconds,
+        "validatedAgeSeconds": validated_age_seconds,
         "message": "짧은 DB 작업은 재사용 커넥션으로 직렬화해 Render Postgres 연결 폭주를 줄입니다.",
     }
 
