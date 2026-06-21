@@ -143,6 +143,9 @@ TOSS_PORTFOLIO_CACHE_SECONDS = int(os.getenv("TOSS_PORTFOLIO_CACHE_SECONDS", "30
 TOSS_STOCK_CACHE_SECONDS = int(os.getenv("TOSS_STOCK_CACHE_SECONDS", "86400"))
 TOSS_REQUEST_TIMEOUT_SECONDS = int(os.getenv("TOSS_REQUEST_TIMEOUT_SECONDS", "5"))
 TOSS_PRICE_BATCH_SIZE = max(1, int(os.getenv("TOSS_PRICE_BATCH_SIZE", "20")))
+TOSS_PRICE_BATCH_BY_SYMBOL_GROUP = os.getenv("TOSS_PRICE_BATCH_BY_SYMBOL_GROUP", "1").lower() not in {"0", "false", "no", "off"}
+TOSS_PRICE_RETRY_SINGLE_ON_BATCH_ERROR = os.getenv("TOSS_PRICE_RETRY_SINGLE_ON_BATCH_ERROR", "1").lower() not in {"0", "false", "no", "off"}
+TOSS_PRICE_SINGLE_RETRY_LIMIT = max(0, int(os.getenv("TOSS_PRICE_SINGLE_RETRY_LIMIT", "40") or "40"))
 TOSS_CANDLE_MAX_CANDIDATES = int(os.getenv("TOSS_CANDLE_MAX_CANDIDATES", "20"))
 TOSS_ORDERBOOK_MAX_CANDIDATES = max(
     0,
@@ -4387,6 +4390,9 @@ def toss_config_status() -> dict:
         "readyForMarketData": bool(TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET)),
         "readyForAccountData": bool(TOSS_LIVE_PORTFOLIO and (TOSS_ACCESS_TOKEN or (TOSS_CLIENT_ID and TOSS_CLIENT_SECRET))),
         "priceBatchSize": TOSS_PRICE_BATCH_SIZE,
+        "priceBatchBySymbolGroup": TOSS_PRICE_BATCH_BY_SYMBOL_GROUP,
+        "priceRetrySingleOnBatchError": TOSS_PRICE_RETRY_SINGLE_ON_BATCH_ERROR,
+        "priceSingleRetryLimit": TOSS_PRICE_SINGLE_RETRY_LIMIT,
         "candleMaxCandidates": TOSS_CANDLE_MAX_CANDIDATES,
         "orderbookMaxCandidates": TOSS_ORDERBOOK_MAX_CANDIDATES,
         "tradesMaxCandidates": TOSS_TRADES_MAX_CANDIDATES,
@@ -4571,6 +4577,45 @@ def symbol_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
     return [symbols[index:index + batch_size] for index in range(0, len(symbols), batch_size)]
 
 
+def toss_price_symbol_group(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if re.fullmatch(r"\d{6}", normalized):
+        return "KR"
+    if re.fullmatch(r"[A-Z.\-]{1,10}", normalized):
+        return "US"
+    return "OTHER"
+
+
+def toss_price_batch_plan(symbols: list[str], batch_size: int) -> tuple[list[dict], dict]:
+    if not TOSS_PRICE_BATCH_BY_SYMBOL_GROUP:
+        batches = symbol_batches(symbols, batch_size)
+        return (
+            [{"symbols": batch, "group": "ALL"} for batch in batches],
+            {"ALL": len(symbols)},
+        )
+
+    grouped: dict[str, list[str]] = {"KR": [], "US": [], "OTHER": []}
+    for symbol in symbols:
+        grouped.setdefault(toss_price_symbol_group(symbol), []).append(symbol)
+
+    plan: list[dict] = []
+    counts: dict[str, int] = {}
+    for group in ("KR", "US", "OTHER"):
+        group_symbols = grouped.get(group, [])
+        if not group_symbols:
+            continue
+        counts[group] = len(group_symbols)
+        for batch in symbol_batches(group_symbols, batch_size):
+            plan.append({"symbols": batch, "group": group})
+    return plan, counts
+
+
+def toss_price_error_message(error: Exception) -> str:
+    if isinstance(error, HTTPError):
+        return f"HTTP {error.code}: {error.reason}"
+    return str(error)[:180]
+
+
 def fetch_toss_price_batch(symbols: list[str], token: str) -> dict:
     query = urlencode({"symbols": ",".join(symbols)})
     request = Request(
@@ -4602,14 +4647,60 @@ def fetch_toss_prices(symbols: list[str]) -> dict:
     token = toss_access_token()
     merged_rows: list[dict] = []
     errors: list[dict] = []
-    batches = symbol_batches(symbols, TOSS_PRICE_BATCH_SIZE)
-    for batch in batches:
+    single_retry_count = 0
+    single_retry_success_count = 0
+    single_retry_error_count = 0
+    failed_symbols: list[str] = []
+    partial_failure_count = 0
+    batch_plan, batch_groups = toss_price_batch_plan(symbols, TOSS_PRICE_BATCH_SIZE)
+    for batch_info in batch_plan:
+        batch = list(batch_info.get("symbols", []))
+        group = str(batch_info.get("group", "ALL"))
         try:
             payload = fetch_toss_price_batch(batch, token)
         except Exception as error:
+            error_message = toss_price_error_message(error)
+            attempted_single_errors: list[dict] = []
+            attempted_single_count = 0
+            attempted_single_success_count = 0
+            if (
+                TOSS_PRICE_RETRY_SINGLE_ON_BATCH_ERROR
+                and len(batch) > 1
+                and single_retry_count < TOSS_PRICE_SINGLE_RETRY_LIMIT
+            ):
+                for symbol in batch:
+                    if single_retry_count >= TOSS_PRICE_SINGLE_RETRY_LIMIT:
+                        break
+                    attempted_single_count += 1
+                    single_retry_count += 1
+                    try:
+                        single_payload = fetch_toss_price_batch([symbol], token)
+                    except Exception as single_error:
+                        single_retry_error_count += 1
+                        failed_symbols.append(symbol)
+                        attempted_single_errors.append({
+                            "symbol": symbol,
+                            "error": toss_price_error_message(single_error),
+                        })
+                        continue
+                    rows = price_rows(single_payload)
+                    if rows:
+                        merged_rows.extend(rows)
+                        attempted_single_success_count += len(rows)
+                        single_retry_success_count += len(rows)
+                    else:
+                        failed_symbols.append(symbol)
+                if attempted_single_success_count > 0:
+                    partial_failure_count += 1
             errors.append({
                 "symbols": batch,
-                "error": str(error)[:180],
+                "group": group,
+                "error": error_message,
+                "fallback": "single-symbol" if attempted_single_count else "",
+                "singleRetryCount": attempted_single_count,
+                "singleSuccessCount": attempted_single_success_count,
+                "singleErrorCount": len(attempted_single_errors),
+                "singleErrors": attempted_single_errors[:5],
             })
             continue
         merged_rows.extend(price_rows(payload))
@@ -4623,9 +4714,17 @@ def fetch_toss_prices(symbols: list[str]) -> dict:
             "requestedCount": len(symbols),
             "receivedCount": len(merged_rows),
             "batchSize": TOSS_PRICE_BATCH_SIZE,
-            "batchCount": len(batches),
+            "batchCount": len(batch_plan),
+            "batchMode": "grouped" if TOSS_PRICE_BATCH_BY_SYMBOL_GROUP else "plain",
+            "batchGroups": batch_groups,
             "errorCount": len(errors),
             "errors": errors[:5],
+            "partialFailureCount": partial_failure_count,
+            "singleRetryEnabled": TOSS_PRICE_RETRY_SINGLE_ON_BATCH_ERROR,
+            "singleRetryCount": single_retry_count,
+            "singleRetrySuccessCount": single_retry_success_count,
+            "singleRetryErrorCount": single_retry_error_count,
+            "failedSymbols": unique_texts(failed_symbols, limit=20),
         },
     }
     PRICE_CACHE["symbols"] = cache_key
@@ -6579,8 +6678,16 @@ def enrich_candidates_with_toss_prices(candidates: list[dict]) -> tuple[list[dic
         "receivedCount": price_metadata.get("receivedCount", len(price_rows(payload))),
         "batchSize": price_metadata.get("batchSize", TOSS_PRICE_BATCH_SIZE),
         "batchCount": price_metadata.get("batchCount", 1),
+        "batchMode": price_metadata.get("batchMode", ""),
+        "batchGroups": price_metadata.get("batchGroups", {}),
         "batchErrorCount": price_metadata.get("errorCount", 0),
         "batchErrors": price_metadata.get("errors", []),
+        "partialFailureCount": price_metadata.get("partialFailureCount", 0),
+        "singleRetryEnabled": price_metadata.get("singleRetryEnabled", False),
+        "singleRetryCount": price_metadata.get("singleRetryCount", 0),
+        "singleRetrySuccessCount": price_metadata.get("singleRetrySuccessCount", 0),
+        "singleRetryErrorCount": price_metadata.get("singleRetryErrorCount", 0),
+        "failedSymbols": price_metadata.get("failedSymbols", []),
         "priceCount": len(prices),
         "retainedCount": retained_count,
         "storedFallbackCount": stored_fallback_count,
@@ -17050,6 +17157,12 @@ def run_price_collection_cycle(
                 "storedFallbackCount": price_status.get("storedFallbackCount", 0),
                 "missingCount": price_status.get("missingCount", 0),
                 "missingSymbols": price_status.get("missingSymbols", []),
+                "batchErrorCount": price_status.get("batchErrorCount", 0),
+                "partialFailureCount": price_status.get("partialFailureCount", 0),
+                "singleRetryCount": price_status.get("singleRetryCount", 0),
+                "singleRetrySuccessCount": price_status.get("singleRetrySuccessCount", 0),
+                "singleRetryErrorCount": price_status.get("singleRetryErrorCount", 0),
+                "failedSymbols": price_status.get("failedSymbols", []),
                 "queue": queue_status,
                 "statuses": statuses,
                 "marketDataLatest": latest_status,
