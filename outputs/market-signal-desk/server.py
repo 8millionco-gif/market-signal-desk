@@ -17191,7 +17191,10 @@ def run_price_collection_cycle(
                 "usablePriceCount": latest_read_status.get("usablePriceCount", 0),
                 "closedBaselinePriceCount": latest_read_status.get("closedBaselinePriceCount", 0),
                 "livePriceCount": storage_summary.get("livePriceCount", 0),
-                "dataWaitPriceCount": latest_read_status.get("dataWaitPriceCount", 0),
+                "dataWaitPriceCount": storage_summary.get("dataWaitPriceCount", 0),
+                "activeCandidatePriceGapCount": storage_summary.get("activeCandidatePriceGapCount", 0),
+                "rawDataWaitPriceCount": storage_summary.get("rawDataWaitPriceCount", 0),
+                "diagnosticDataWaitPriceCount": storage_summary.get("diagnosticDataWaitPriceCount", 0),
                 "missingPriceValueCount": latest_read_status.get("missingPriceValueCount", 0),
                 "priceCoverage": storage_summary.get("priceCoverage", 0),
                 "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
@@ -17258,6 +17261,52 @@ def price_collector_next_run_at(state_key: str, interval_seconds: int) -> str:
     if parsed is None:
         return ""
     return (parsed.astimezone(KST) + timedelta(seconds=interval_seconds)).isoformat(timespec="seconds")
+
+
+def summarize_price_collector_run_health(run: dict, storage_summary: dict) -> dict:
+    run = run if isinstance(run, dict) else {}
+    run_storage = run.get("storageSummary", {}) if isinstance(run.get("storageSummary"), dict) else {}
+    run_market = run.get("marketDataLatestStatus", {}) if isinstance(run.get("marketDataLatestStatus"), dict) else {}
+    run_ready = bool(
+        run_storage.get("decisionReady")
+        or run.get("usablePriceCount", 0)
+        or run_market.get("decisionReady")
+        or run_market.get("usablePriceCount", 0)
+    )
+    current_ready = bool(storage_summary.get("decisionReady"))
+    current_persistent = bool(storage_summary.get("persistent"))
+    run_persistent = bool(run_storage.get("persistent") or run_market.get("persistent"))
+    run_error_text = str(run.get("error") or run_market.get("databaseError") or "")
+    superseded = bool(current_ready and (not run_ready or (current_persistent and not run_persistent)))
+    if superseded:
+        state = "current_storage_ready"
+        message = "마지막 실행 기록은 과거 상태이며 현재 DB 저장 기준으로 판단 가능합니다."
+    elif run_error_text:
+        state = "last_run_error"
+        message = "최근 가격 수집 실행 오류를 확인해야 합니다."
+    elif run_ready:
+        state = "last_run_ready"
+        message = "최근 가격 수집 실행 결과가 판단 가능한 상태입니다."
+    elif current_ready:
+        state = "storage_ready"
+        message = "최근 실행 기록은 부족하지만 현재 DB 저장 기준은 판단 가능합니다."
+    else:
+        state = "waiting"
+        message = "가격 수집 실행 또는 DB 저장값 보강이 필요합니다."
+    return {
+        "state": state,
+        "currentDecisionReady": current_ready,
+        "lastRunDecisionReady": run_ready,
+        "lastRunSupersededByCurrentStorage": superseded,
+        "currentStorageState": storage_summary.get("state", ""),
+        "currentStorageReadSource": storage_summary.get("readSource", ""),
+        "currentStoragePersistent": current_persistent,
+        "lastRunPersistent": run_persistent,
+        "lastRunError": run_error_text[:240],
+        "lastRunUpdatedAt": run.get("updatedAt") or run.get("checkedAt") or "",
+        "lastSuccessfulPriceAt": storage_summary.get("latestPriceAt") or "",
+        "message": message,
+    }
 
 
 def price_collector_storage_summary(mode: str | None = None, market_status: dict | None = None) -> dict:
@@ -17338,6 +17387,8 @@ def price_collector_status() -> dict:
         state = copy.deepcopy(PRICE_COLLECTOR_STATE)
     mode = auto_signal_mode()
     storage_summary = price_collector_storage_summary(mode)
+    last_run = state.get("lastRun", {}) if isinstance(state.get("lastRun"), dict) else {}
+    run_health = summarize_price_collector_run_health(last_run, storage_summary)
     priority_next = price_collector_next_run_at("lastPriorityRun", SIGNAL_PRICE_COLLECTOR_PRIORITY_SECONDS)
     full_next = price_collector_next_run_at("lastFullRun", SIGNAL_PRICE_COLLECTOR_FULL_SECONDS)
     close_next = price_collector_next_run_at("lastCloseRun", SIGNAL_PRICE_COLLECTOR_CLOSE_SECONDS)
@@ -17359,7 +17410,11 @@ def price_collector_status() -> dict:
         },
         "lastError": state.get("lastError", ""),
         "lastCheckedAt": state.get("lastCheckedAt", ""),
-        "lastRun": state.get("lastRun", {}),
+        "lastRun": last_run,
+        "lastRunHealth": run_health,
+        "effectiveState": run_health.get("state", ""),
+        "lastRunSupersededByCurrentStorage": run_health.get("lastRunSupersededByCurrentStorage", False),
+        "lastSuccessfulPriceAt": run_health.get("lastSuccessfulPriceAt", ""),
         "lastPriorityRun": state.get("lastPriorityRun", {}),
         "lastFullRun": state.get("lastFullRun", {}),
         "lastCloseRun": state.get("lastCloseRun", {}),
@@ -17382,7 +17437,7 @@ def price_collector_status() -> dict:
         "nextCloseRunAt": close_next,
         "nextDepthRunAt": depth_next,
         "nextRunAt": close_next if mode == "close" else (priority_next or full_next),
-        "message": storage_summary.get("message", ""),
+        "message": run_health.get("message") if run_health.get("lastRunSupersededByCurrentStorage") else storage_summary.get("message", ""),
         "nextAction": storage_summary.get("nextAction", ""),
     }
 
@@ -18159,7 +18214,11 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "priceReadiness": price_readiness,
             "missingPriceTimestampCount": missing_price_count,
             "latestPriceAt": market_data.get("latestPriceAt", ""),
-            "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
+            "lastPriceCollectorAt": collector_status.get("lastSuccessfulPriceAt") or (
+                collector_status.get("lastRun", {}).get("updatedAt", "")
+                if isinstance(collector_status.get("lastRun"), dict)
+                else ""
+            ),
             "nextPriceCollectorAt": collector_status.get("nextRunAt", ""),
             "priceCollector": collector_status,
             "collectorRoles": collector_roles,
@@ -18244,7 +18303,11 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "priceReadiness": price_readiness,
         "missingPriceTimestampCount": missing_price_count,
         "latestPriceAt": market_data.get("latestPriceAt", ""),
-        "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
+        "lastPriceCollectorAt": collector_status.get("lastSuccessfulPriceAt") or (
+            collector_status.get("lastRun", {}).get("updatedAt", "")
+            if isinstance(collector_status.get("lastRun"), dict)
+            else ""
+        ),
         "nextPriceCollectorAt": collector_status.get("nextRunAt", ""),
         "priceCollector": collector_status,
         "collectorRoles": collector_roles,
