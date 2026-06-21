@@ -20224,7 +20224,12 @@ def discovery_bot_status() -> dict:
     )
     wait_count = summary_count(summary.get("waitCandidateCount"), compression_counts.get("wait"))
     portfolio_count = summary_count(summary.get("portfolioLinkedCandidateCount"), compression_counts.get("portfolio"))
-    exclude_count = summary_count(summary.get("excludeCandidateCount"), compression_counts.get("exclude"))
+    hidden_excluded_count = summary_count(
+        summary.get("hiddenExcludedCount"),
+        summary.get("excludedRecordCount"),
+        summary.get("excludeCandidateCount"),
+        compression_counts.get("exclude"),
+    )
     data_wait_count = sum(
         summary_count(summary.get(key))
         for key in (
@@ -20236,6 +20241,11 @@ def discovery_bot_status() -> dict:
     )
     pool_snapshot = candidate_pool_summary(fast=True)
     expansion_profile = discovery_expansion_profile(summary, pool_snapshot)
+    hidden_excluded_count = max(
+        hidden_excluded_count,
+        summary_count(expansion_profile.get("excludedHiddenCount")),
+        summary_count(expansion_profile.get("excludedRecordCount")),
+    )
     pool_total = summary_count(summary.get("candidatePoolCount"), summary.get("candidatePoolActiveCount"), summary.get("candidateCount"))
     visible_total = core_count + entry_count + wait_count + portfolio_count
     expanding = bool(expansion_profile.get("expansionActive"))
@@ -20246,7 +20256,14 @@ def discovery_bot_status() -> dict:
         "entryCount": entry_count,
         "waitCount": wait_count,
         "portfolioCount": portfolio_count,
-        "excludeCount": exclude_count,
+        # Excluded records are no longer investable candidates. Keep them only
+        # as hidden history/performance records so status consumers do not add
+        # them back into visible candidate counts.
+        "excludeCount": 0,
+        "visibleExcludeCount": 0,
+        "hiddenExcludedCount": hidden_excluded_count,
+        "excludedHiddenCount": hidden_excluded_count,
+        "excludedRecordCount": hidden_excluded_count,
         "dataWaitCount": data_wait_count,
         "statusCounts": pool_counts,
         "searchExpansionActive": expanding,
@@ -20266,7 +20283,6 @@ def discovery_bot_status() -> dict:
         "visibleRefillShortfall": expansion_profile.get("visibleRefillShortfall"),
         "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
         "newCandidateCount": expansion_profile.get("newCandidateCount"),
-        "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
         "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
         "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
         "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
