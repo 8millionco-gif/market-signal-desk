@@ -342,9 +342,21 @@ SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT = max(
     int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT", "80")),
 )
 SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET = max(160, int(os.getenv("SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET", "160")))
+SIGNAL_DISCOVERY_POOL_REFILL_TARGET = max(
+    SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
+    int(os.getenv("SIGNAL_DISCOVERY_POOL_REFILL_TARGET", "240")),
+)
 SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET = max(20, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET", "20")))
 SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET = max(24, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET", "24")))
+SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET = max(
+    SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
+    int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET", "40")),
+)
 SIGNAL_DISCOVERY_CORE_ENTRY_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_CORE_ENTRY_TARGET", "3")))
+SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED = max(
+    1,
+    int(os.getenv("SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED", "1")),
+)
 try:
     SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal(os.getenv("SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER", "0.35"))
 except (InvalidOperation, ValueError):
@@ -16615,6 +16627,14 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         excluded_ratio = Decimal(excluded_count) / Decimal(total_pool_count) if total_pool_count else Decimal("0")
     except (InvalidOperation, ZeroDivisionError):
         excluded_ratio = Decimal("0")
+    visible_refill_shortfall = max(0, SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET - visible_candidate_count)
+    pool_refill_shortfall = max(0, SIGNAL_DISCOVERY_POOL_REFILL_TARGET - active_pool_count)
+    excluded_replacement_needed = (
+        min(excluded_count, max(visible_refill_shortfall, SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED))
+        if excluded_count
+        else 0
+    )
+    replacement_needed_count = max(visible_refill_shortfall, excluded_replacement_needed)
 
     triggers: list[str] = []
     reasons: list[str] = []
@@ -16627,6 +16647,9 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
     if visible_candidate_count < SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET:
         triggers.append("visible_candidate_shortfall")
         reasons.append("실전 표시 후보가 목표보다 적음")
+    if visible_refill_shortfall > 0:
+        triggers.append("candidate_refill_shortfall")
+        reasons.append("제외 후보를 뺀 실전 관찰 후보 보강 필요")
     visible_basis = visible_domestic_count or visible_candidate_count
     if visible_basis and visible_basis < SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET:
         triggers.append("domestic_visible_shortfall")
@@ -16634,6 +16657,14 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
     if active_pool_count < SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET:
         triggers.append("pool_active_shortfall")
         reasons.append("후보 풀 활성 종목 부족")
+    if pool_refill_shortfall > 0:
+        triggers.append("pool_refill_shortfall")
+        reasons.append("제외 대체를 위한 후보 풀 보충 필요")
+    if excluded_count >= SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED and (
+        visible_refill_shortfall > 0 or new_candidate_count < excluded_replacement_needed
+    ):
+        triggers.append("excluded_replacement_needed")
+        reasons.append("제외된 종목은 후보에서 빼고 새 후보로 대체 필요")
     if total_pool_count and excluded_ratio >= SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER:
         triggers.append("high_exclusion_ratio")
         reasons.append("제외 기록 비율이 높음")
@@ -16666,14 +16697,21 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "expandedSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
         "poolActiveCount": active_pool_count,
         "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
+        "poolRefillTarget": SIGNAL_DISCOVERY_POOL_REFILL_TARGET,
+        "poolRefillShortfall": pool_refill_shortfall,
         "poolTotalCount": total_pool_count,
         "visibleCandidateCount": visible_candidate_count,
         "activeVisibleCandidateCount": visible_candidate_count,
         "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
+        "visibleRefillTarget": SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET,
+        "visibleRefillShortfall": visible_refill_shortfall,
         "visibleDomesticCount": visible_domestic_count,
         "newCandidateCount": new_candidate_count,
         "excludedHiddenCount": excluded_count,
         "excludedRecordCount": excluded_count,
+        "excludedReplacementNeeded": excluded_replacement_needed,
+        "replacementNeededCount": replacement_needed_count,
+        "candidateRefillActive": bool(visible_refill_shortfall or excluded_replacement_needed or pool_refill_shortfall),
         "dataWaitCount": data_wait_count,
         "coreCount": core_count,
         "entryCount": entry_count,
@@ -16701,7 +16739,10 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
             "expandedMaxSymbols": expansion_profile.get("expandedScanLimit"),
             "poolActiveTarget": expansion_profile.get("poolActiveTarget"),
+            "poolRefillTarget": expansion_profile.get("poolRefillTarget"),
             "visibleCandidateTarget": expansion_profile.get("visibleCandidateTarget"),
+            "visibleRefillTarget": expansion_profile.get("visibleRefillTarget"),
+            "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
             "discoveryExpansionActive": expansion_profile.get("expansionActive"),
             "discoveryScanLimit": expansion_profile.get("scanLimit"),
             "poolActiveCount": expansion_profile.get("poolActiveCount"),
@@ -17101,10 +17142,18 @@ DISCOVERY_STATUS_SUMMARY_KEYS = [
     "discoveryScanLimit",
     "discoveryExpandedScanLimit",
     "candidatePoolActiveTarget",
+    "candidatePoolRefillTarget",
     "visibleCandidateCount",
+    "visibleCandidateTarget",
+    "visibleRefillTarget",
+    "visibleRefillShortfall",
     "visibleDomesticCount",
     "newCandidateCount",
     "excludedHiddenCount",
+    "excludedReplacementNeeded",
+    "replacementNeededCount",
+    "candidateRefillActive",
+    "poolRefillShortfall",
     "dataWaitCount",
 ]
 
@@ -17239,10 +17288,18 @@ def candidate_pool_initial_candidates(seed_candidates: list[dict], watched: set[
         "discoveryScanLimit": expansion_profile.get("scanLimit"),
         "discoveryExpandedScanLimit": expansion_profile.get("expandedScanLimit"),
         "candidatePoolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "candidatePoolRefillTarget": expansion_profile.get("poolRefillTarget"),
         "visibleCandidateCount": expansion_profile.get("visibleCandidateCount"),
+        "visibleCandidateTarget": expansion_profile.get("visibleCandidateTarget"),
+        "visibleRefillTarget": expansion_profile.get("visibleRefillTarget"),
+        "visibleRefillShortfall": expansion_profile.get("visibleRefillShortfall"),
         "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
         "newCandidateCount": expansion_profile.get("newCandidateCount"),
         "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
+        "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
+        "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
+        "poolRefillShortfall": expansion_profile.get("poolRefillShortfall"),
         "dataWaitCount": expansion_profile.get("dataWaitCount"),
         "requestedMode": mode,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -17389,12 +17446,20 @@ def stored_candidate_data_initial_candidates(mode: str, watched: set[str]) -> tu
         "discoveryScanLimit": expansion_profile.get("scanLimit"),
         "discoveryExpandedScanLimit": expansion_profile.get("expandedScanLimit"),
         "candidatePoolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "candidatePoolRefillTarget": expansion_profile.get("poolRefillTarget"),
         "candidatePoolActiveCount": expansion_profile.get("poolActiveCount"),
         "candidatePoolTotalCount": expansion_profile.get("poolTotalCount"),
         "visibleCandidateCount": expansion_profile.get("visibleCandidateCount"),
+        "visibleCandidateTarget": expansion_profile.get("visibleCandidateTarget"),
+        "visibleRefillTarget": expansion_profile.get("visibleRefillTarget"),
+        "visibleRefillShortfall": expansion_profile.get("visibleRefillShortfall"),
         "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
         "newCandidateCount": expansion_profile.get("newCandidateCount"),
         "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
+        "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
+        "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
+        "poolRefillShortfall": expansion_profile.get("poolRefillShortfall"),
         "dataWaitCount": expansion_profile.get("dataWaitCount"),
         "requestedMode": mode,
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -18640,9 +18705,17 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         "discoveryScanLimit": expansion_summary.get("scanLimit"),
         "discoveryExpandedScanLimit": expansion_summary.get("expandedScanLimit"),
         "candidatePoolActiveTarget": expansion_summary.get("poolActiveTarget"),
+        "candidatePoolRefillTarget": expansion_summary.get("poolRefillTarget"),
         "visibleCandidateCount": expansion_summary.get("visibleCandidateCount"),
+        "visibleCandidateTarget": expansion_summary.get("visibleCandidateTarget"),
+        "visibleRefillTarget": expansion_summary.get("visibleRefillTarget"),
+        "visibleRefillShortfall": expansion_summary.get("visibleRefillShortfall"),
         "visibleDomesticCandidateCount": expansion_summary.get("visibleDomesticCount"),
         "newCandidateCount": expansion_summary.get("newCandidateCount"),
+        "excludedReplacementNeeded": expansion_summary.get("excludedReplacementNeeded"),
+        "replacementNeededCount": expansion_summary.get("replacementNeededCount"),
+        "candidateRefillActive": expansion_summary.get("candidateRefillActive"),
+        "poolRefillShortfall": expansion_summary.get("poolRefillShortfall"),
     })
 
     if pool_status and not integrations.get("candidatePool"):
@@ -18780,9 +18853,17 @@ def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: st
         "discoveryScanLimit": refreshed_expansion_summary.get("scanLimit"),
         "discoveryExpandedScanLimit": refreshed_expansion_summary.get("expandedScanLimit"),
         "candidatePoolActiveTarget": refreshed_expansion_summary.get("poolActiveTarget"),
+        "candidatePoolRefillTarget": refreshed_expansion_summary.get("poolRefillTarget"),
         "visibleCandidateCount": refreshed_expansion_summary.get("visibleCandidateCount"),
+        "visibleCandidateTarget": refreshed_expansion_summary.get("visibleCandidateTarget"),
+        "visibleRefillTarget": refreshed_expansion_summary.get("visibleRefillTarget"),
+        "visibleRefillShortfall": refreshed_expansion_summary.get("visibleRefillShortfall"),
         "visibleDomesticCandidateCount": refreshed_expansion_summary.get("visibleDomesticCount"),
         "newCandidateCount": refreshed_expansion_summary.get("newCandidateCount"),
+        "excludedReplacementNeeded": refreshed_expansion_summary.get("excludedReplacementNeeded"),
+        "replacementNeededCount": refreshed_expansion_summary.get("replacementNeededCount"),
+        "candidateRefillActive": refreshed_expansion_summary.get("candidateRefillActive"),
+        "poolRefillShortfall": refreshed_expansion_summary.get("poolRefillShortfall"),
     })
     refreshed["summary"] = summary
 
@@ -19872,9 +19953,17 @@ def dashboard_summary(payload: dict) -> dict:
         "discoveryScanLimit": summary.get("discoveryScanLimit"),
         "discoveryExpandedScanLimit": summary.get("discoveryExpandedScanLimit"),
         "candidatePoolActiveTarget": summary.get("candidatePoolActiveTarget"),
+        "candidatePoolRefillTarget": summary.get("candidatePoolRefillTarget"),
         "visibleCandidateCount": summary.get("visibleCandidateCount"),
+        "visibleCandidateTarget": summary.get("visibleCandidateTarget"),
+        "visibleRefillTarget": summary.get("visibleRefillTarget"),
+        "visibleRefillShortfall": summary.get("visibleRefillShortfall"),
         "visibleDomesticCandidateCount": summary.get("visibleDomesticCandidateCount"),
         "newCandidateCount": summary.get("newCandidateCount"),
+        "excludedReplacementNeeded": summary.get("excludedReplacementNeeded"),
+        "replacementNeededCount": summary.get("replacementNeededCount"),
+        "candidateRefillActive": summary.get("candidateRefillActive"),
+        "poolRefillShortfall": summary.get("poolRefillShortfall"),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
@@ -19945,9 +20034,12 @@ def discovery_bot_config_status() -> dict:
         "fallbackSelectionLimit": SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT,
         "expandedFallbackSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT,
         "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
+        "poolRefillTarget": SIGNAL_DISCOVERY_POOL_REFILL_TARGET,
         "visibleDomesticTarget": SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET,
         "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
+        "visibleRefillTarget": SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET,
         "coreEntryTarget": SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
+        "replacementMinExcluded": SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED,
         "excludedRatioTrigger": float(SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER),
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
@@ -20122,11 +20214,19 @@ def discovery_bot_status() -> dict:
         "scanLimit": expansion_profile.get("scanLimit"),
         "expandedScanLimit": expansion_profile.get("expandedScanLimit"),
         "poolActiveTarget": expansion_profile.get("poolActiveTarget"),
+        "poolRefillTarget": expansion_profile.get("poolRefillTarget"),
         "poolActiveCount": expansion_profile.get("poolActiveCount"),
         "poolTotalCount": expansion_profile.get("poolTotalCount"),
+        "poolRefillShortfall": expansion_profile.get("poolRefillShortfall"),
+        "visibleCandidateTarget": expansion_profile.get("visibleCandidateTarget"),
+        "visibleRefillTarget": expansion_profile.get("visibleRefillTarget"),
+        "visibleRefillShortfall": expansion_profile.get("visibleRefillShortfall"),
         "visibleDomesticCount": expansion_profile.get("visibleDomesticCount"),
         "newCandidateCount": expansion_profile.get("newCandidateCount"),
         "excludedHiddenCount": expansion_profile.get("excludedHiddenCount"),
+        "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
+        "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
+        "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
         "message": (
             "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
             if expanding
