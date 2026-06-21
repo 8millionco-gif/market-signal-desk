@@ -3160,8 +3160,10 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
         return candidates, {"enabled": True, "mergedCount": 0, "message": "DB에 저장된 토스 최신 수집값이 아직 없습니다."}
 
     merged: list[dict] = []
-    merged_count = 0
+    updated_candidate_count = 0
+    applied_count = 0
     price_merged_count = 0
+    price_applied_count = 0
     change_merged_count = 0
     candle_merged_count = 0
     orderbook_merged_count = 0
@@ -3176,9 +3178,12 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
         record = records.get(symbol)
         record_timestamp = ""
         merged_any = False
+        applied_any = False
         if record:
             record_live_price = live_price_from_market_data_record(record, item.get("updated", ""), str(item.get("market", "")))
             if record_live_price is not None:
+                price_applied_count += 1
+                applied_any = True
                 current_live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
                 current_timestamp = str(current_live_price.get("timestamp") or current_live_price.get("updatedAt") or "")
                 record_timestamp = market_data_record_timestamp(record)
@@ -3240,6 +3245,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                         merged_any = True
                 candle_merged_count += 1
                 merged_any = True
+                applied_any = True
 
         orderbook_record = orderbook_records.get(symbol)
         if orderbook_record and not candidate_data_source_ok(item.get("liveOrderbook", {})):
@@ -3253,6 +3259,7 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                 item["trend"] = trend
                 orderbook_merged_count += 1
                 merged_any = True
+                applied_any = True
 
         trade_record = trade_records.get(symbol)
         if trade_record and not candidate_data_source_ok(item.get("liveTrades", {})):
@@ -3266,36 +3273,62 @@ def merge_market_data_latest_into_candidates(candidates: list[dict], fast: bool 
                 item["trend"] = trend
                 trade_merged_count += 1
                 merged_any = True
+                applied_any = True
 
-        if merged_any:
+        if applied_any:
             item["marketDataLatest"] = {
                 "source": "market_data_latest",
                 "eventType": "prices/depth",
                 "collectedAt": record.get("collectedAt", "") if record else "",
                 "updatedAt": record.get("updatedAt", "") if record else "",
                 "ageSeconds": seconds_since_timestamp(record_timestamp),
-                "message": "서버가 수집해 저장한 최신 원천 데이터를 우선 반영했습니다.",
+                "updated": bool(merged_any),
+                "retained": bool(applied_any and not merged_any),
+                "message": (
+                    "서버가 수집해 저장한 최신 원천 데이터를 우선 반영했습니다."
+                    if merged_any
+                    else "후보가 이미 DB 최신 가격 기준을 유지하고 있습니다."
+                ),
             }
-            merged_count += 1
+            applied_count += 1
+        if merged_any:
+            updated_candidate_count += 1
         merged.append(item)
+
+    depth_merged_count = candle_merged_count + orderbook_merged_count + trade_merged_count
+    if price_applied_count > 0:
+        message = (
+            f"DB 가격 기준 {price_applied_count}개 확보"
+            f"(신규 반영 {price_merged_count}개, 기존 유지 {retained_count}개)"
+            f", 심화 데이터 {depth_merged_count}개 보강."
+        )
+    elif applied_count > 0:
+        message = f"DB 최신 원천 데이터 {applied_count}개를 후보 판단에 사용할 수 있습니다."
+    elif records:
+        message = f"DB 가격 레코드 {len(records)}개가 있으나 후보 매칭 또는 가격값 보강이 필요합니다."
+    else:
+        message = "DB에 저장된 Toss 가격 기준이 아직 없습니다."
 
     return merged, {
         "enabled": True,
         "source": "market_data_latest",
-        "mergedCount": merged_count,
+        "mergedCount": applied_count,
+        "appliedCount": applied_count,
+        "updatedCandidateCount": updated_candidate_count,
+        "priceAppliedCount": price_applied_count,
         "priceMergedCount": price_merged_count,
         "changeMergedCount": change_merged_count,
         "candleMergedCount": candle_merged_count,
         "orderbookMergedCount": orderbook_merged_count,
         "tradeMergedCount": trade_merged_count,
-        "depthMergedCount": candle_merged_count + orderbook_merged_count + trade_merged_count,
+        "depthMergedCount": depth_merged_count,
         "retainedCount": retained_count,
         "availablePriceCount": len(records),
         "availableCandleCount": len(candle_records),
         "availableOrderbookCount": len(orderbook_records),
         "availableTradeCount": len(trade_records),
         "availableCount": len(records) + len(candle_records) + len(orderbook_records) + len(trade_records),
-        "message": f"DB 최신 토스 수집값 {merged_count}개를 후보 판단에 반영했습니다.",
+        "message": message,
     }
 
 
