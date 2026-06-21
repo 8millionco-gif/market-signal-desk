@@ -368,6 +368,12 @@ SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES = max(
     min(5, int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES", "2"))),
 )
 SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT = max(0, int(os.getenv("SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT", "120")))
+SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED = os.getenv("SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_DISCOVERY_RELATED_SEED_LIMIT = max(1, int(os.getenv("SIGNAL_DISCOVERY_RELATED_SEED_LIMIT", "16")))
+SIGNAL_DISCOVERY_RELATED_PER_SEED = max(1, int(os.getenv("SIGNAL_DISCOVERY_RELATED_PER_SEED", "6")))
+SIGNAL_DISCOVERY_RELATED_MAX_ADDED = max(0, int(os.getenv("SIGNAL_DISCOVERY_RELATED_MAX_ADDED", "80")))
+SIGNAL_DISCOVERY_RELATED_MIN_SCORE = max(1, int(os.getenv("SIGNAL_DISCOVERY_RELATED_MIN_SCORE", "8")))
+SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT = max(2000, int(os.getenv("SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT", "16000")))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
 SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED = os.getenv("SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
@@ -16558,7 +16564,240 @@ def candidate_from_universe_entry(
         base["discovery"]["poolRetained"] = True
         base["discovery"]["poolMemory"] = pool_memory
         base["discovery"]["poolScore"] = bounded_int(pool_memory.get("score", 0), 0, 100)
+    if entry.get("relatedSignalExpansion"):
+        related_reason = str(entry.get("relatedReason", "")).strip()
+        related_from_name = str(entry.get("relatedFromName") or entry.get("relatedFromSymbol") or "").strip()
+        base["discovery"]["relatedSignalExpansion"] = True
+        base["discovery"]["relatedFromSymbol"] = str(entry.get("relatedFromSymbol", "")).strip().upper()
+        base["discovery"]["relatedFromName"] = related_from_name
+        base["discovery"]["relatedReason"] = related_reason
+        base["discovery"]["relatedScore"] = bounded_int(entry.get("relatedScore", 0), 0, 100)
+        if not news_items:
+            base["discovery"]["quality"] = "related-signal"
+        related_note = "관련 신호 확장"
+        if related_from_name:
+            related_note = f"{related_from_name} 관련 신호 확장"
+        if related_reason:
+            related_note = f"{related_note}: {related_reason}"
+        base["why"] = unique_texts([related_note, *text_list(base.get("why", []), limit=6)], limit=6)
+        base["tags"] = unique_texts([*text_list(base.get("tags", []), limit=8), "관련 확장"], limit=8)
     return base
+
+
+def candidate_signal_seed_terms(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return {"terms": [], "themes": [], "impactTypes": []}
+    discovery = candidate.get("discovery") if isinstance(candidate.get("discovery"), dict) else {}
+    trend = candidate.get("trend") if isinstance(candidate.get("trend"), dict) else {}
+    live_news = candidate.get("liveNews") if isinstance(candidate.get("liveNews"), dict) else {}
+    evidence = discovery.get("evidenceProfile") if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    values: list[str] = []
+    theme_values: list[str] = []
+    impact_values: list[str] = []
+    for key in ("name", "headline", "category"):
+        value = candidate.get(key)
+        if value:
+            values.append(str(value))
+    for key in ("tags", "aliases", "why"):
+        values.extend(text_list(candidate.get(key, []), limit=12))
+    for key in ("newsImpactTypes",):
+        impact_values.extend(text_list(discovery.get(key, []), limit=12))
+    impact_values.extend(text_list(evidence.get("impactTypes", []), limit=12))
+    impact_values.extend(text_list(trend.get("impactTypes", []), limit=12))
+    for item in live_news.get("items", []) if isinstance(live_news.get("items", []), list) else []:
+        if not isinstance(item, dict):
+            continue
+        values.extend([str(item.get("title", "")), str(item.get("summary", ""))])
+        relevance = item.get("relevance") if isinstance(item.get("relevance"), dict) else {}
+        impact_values.extend(text_list(relevance.get("impactTypes", []), limit=8))
+    combined_text = " ".join(clean_news_text(value) for value in values if value)
+    lower_text = combined_text.lower()
+    for config in NEWS_MATERIAL_KEYWORDS.values():
+        for keyword in config.get("keywords", []):
+            keyword_text = clean_news_text(str(keyword))
+            if len(keyword_text) < 2:
+                continue
+            if keyword_text.lower() in lower_text:
+                theme_values.append(keyword_text)
+        label = clean_news_text(str(config.get("label", "")))
+        if label and label in combined_text:
+            impact_values.append(label)
+    theme_values.extend(text_list(candidate.get("tags", []), limit=12))
+    theme_values.extend(text_list(candidate.get("themes", []), limit=12))
+    terms = unique_texts([*values, *theme_values, *impact_values], limit=36)
+    themes = unique_texts(theme_values, limit=18)
+    impacts = unique_texts(impact_values, limit=14)
+    return {"terms": terms, "themes": themes, "impactTypes": impacts}
+
+
+def related_signal_entry_score(seed: dict, seed_terms: dict, entry: dict) -> tuple[int, list[str]]:
+    if not isinstance(seed, dict) or not isinstance(entry, dict):
+        return 0, []
+    seed_symbol = str(seed.get("symbol", "")).strip().upper()
+    entry_symbol = str(entry.get("symbol", "")).strip().upper()
+    if not entry_symbol or seed_symbol == entry_symbol:
+        return 0, []
+    entry_values = [
+        str(entry.get("symbol", "")),
+        str(entry.get("name", "")),
+        str(entry.get("englishName", "")),
+        str(entry.get("category", "")),
+        str(entry.get("query", "")),
+        *text_list(entry.get("aliases", []), limit=24),
+        *text_list(entry.get("themes", []), limit=16),
+        *text_list(entry.get("tags", []), limit=16),
+    ]
+    entry_compact = compact_match_text(" ".join(entry_values))
+    if not entry_compact:
+        return 0, []
+
+    score = 0
+    reasons: list[str] = []
+    seed_theme_compacts = {
+        compact_match_text(value): value
+        for value in text_list(seed_terms.get("themes", []), limit=18)
+        if len(compact_match_text(value)) >= 2
+    }
+    entry_theme_compacts = {
+        compact_match_text(value): value
+        for value in [*text_list(entry.get("themes", []), limit=16), *text_list(entry.get("tags", []), limit=16)]
+        if len(compact_match_text(value)) >= 2
+    }
+    for key, label in seed_theme_compacts.items():
+        if key and key in entry_theme_compacts:
+            score += 7
+            reasons.append(f"테마 {label}")
+    for term in text_list(seed_terms.get("terms", []), limit=36):
+        compact = compact_match_text(term)
+        if len(compact) < 2 or compact == compact_match_text(seed_symbol):
+            continue
+        if compact in entry_compact:
+            weight = 5 if len(compact) >= 4 else 3
+            score += weight
+            reasons.append(term)
+    for impact in text_list(seed_terms.get("impactTypes", []), limit=14):
+        compact = compact_match_text(impact)
+        if len(compact) >= 2 and compact in entry_compact:
+            score += 4
+            reasons.append(impact)
+    if str(seed.get("market", "")).strip().upper() == str(entry.get("market", "")).strip().upper():
+        score += 1
+    if str(seed.get("category", "")).strip().lower() == str(entry.get("category", "")).strip().lower():
+        score += 1
+    return bounded_int(score, 0, 100), unique_texts(reasons, limit=5)
+
+
+def related_signal_expansion_entries(
+    discovered: list[dict],
+    existing_entries: list[dict],
+    expansion_profile: dict,
+) -> tuple[list[dict], dict]:
+    if not SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED or SIGNAL_DISCOVERY_RELATED_MAX_ADDED <= 0:
+        return [], {"enabled": False, "active": False, "addedCount": 0}
+    seeds = [
+        item
+        for item in discovered
+        if isinstance(item, dict)
+        and (
+            bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1000) > 0
+            or bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1000) > 0
+            or bounded_int(item.get("discovery", {}).get("evidenceScore", 0), 0, 100) >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
+        )
+    ]
+    seeds.sort(
+        key=lambda item: (
+            bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1000),
+            bounded_int(item.get("discovery", {}).get("evidenceScore", 0), 0, 100),
+            bounded_int(item.get("discovery", {}).get("score", 0), 0, 100),
+            score_candidate(item),
+        ),
+        reverse=True,
+    )
+    seeds = seeds[:SIGNAL_DISCOVERY_RELATED_SEED_LIMIT]
+    if not seeds:
+        return [], {
+            "enabled": True,
+            "active": False,
+            "trigger": "no_seed",
+            "seedCount": 0,
+            "addedCount": 0,
+        }
+
+    seen_symbols = {
+        str(entry.get("symbol", "")).strip().upper()
+        for entry in existing_entries
+        if isinstance(entry, dict) and entry.get("symbol")
+    }
+    seen_symbols.update(
+        str(item.get("symbol", "")).strip().upper()
+        for item in discovered
+        if isinstance(item, dict) and item.get("symbol")
+    )
+    universe = stock_search_universe_entries()[:SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT]
+    added: list[dict] = []
+    added_by_seed: dict[str, int] = {}
+    sampled_symbols: list[str] = []
+    active = bool(expansion_profile.get("expansionActive")) or bool(seeds)
+    for seed in seeds:
+        if len(added) >= SIGNAL_DISCOVERY_RELATED_MAX_ADDED:
+            break
+        seed_terms = candidate_signal_seed_terms(seed)
+        seed_symbol = str(seed.get("symbol", "")).strip().upper()
+        seed_name = str(seed.get("name") or seed_symbol).strip()
+        scored: list[tuple[int, list[str], dict]] = []
+        for entry in universe:
+            symbol = str(entry.get("symbol", "")).strip().upper()
+            if not symbol or symbol in seen_symbols:
+                continue
+            score, reasons = related_signal_entry_score(seed, seed_terms, entry)
+            if score >= SIGNAL_DISCOVERY_RELATED_MIN_SCORE and reasons:
+                scored.append((score, reasons, entry))
+        scored.sort(key=lambda value: value[0], reverse=True)
+        for score, reasons, entry in scored[:SIGNAL_DISCOVERY_RELATED_PER_SEED]:
+            if len(added) >= SIGNAL_DISCOVERY_RELATED_MAX_ADDED:
+                break
+            item = normalize_stock_search_entry(entry, "related-signal", "관련 신호 확장")
+            if not item:
+                continue
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if not symbol or symbol in seen_symbols:
+                continue
+            reason_text = ", ".join(reasons[:3])
+            query_parts = [str(item.get("name") or symbol)]
+            query_parts.extend(reasons[:2])
+            item.update(
+                {
+                    "sourceExpansion": True,
+                    "relatedSignalExpansion": True,
+                    "relatedFromSymbol": seed_symbol,
+                    "relatedFromName": seed_name,
+                    "relatedReason": reason_text,
+                    "relatedScore": bounded_int(score, 0, 100),
+                    "discoveryTier": "related-signal",
+                    "opportunityType": "related-signal",
+                    "source": "related-signal",
+                    "sourceLabel": "관련 신호 확장",
+                    "query": " ".join(unique_texts(query_parts, limit=3)),
+                    "focusWeight": max(bounded_int(item.get("focusWeight", 3), 0, 15), min(15, 4 + bounded_int(score, 0, 100) // 12)),
+                }
+            )
+            added.append(item)
+            seen_symbols.add(symbol)
+            added_by_seed[seed_symbol] = added_by_seed.get(seed_symbol, 0) + 1
+            sampled_symbols.append(symbol)
+    return added, {
+        "enabled": True,
+        "active": active,
+        "trigger": "related_signal",
+        "seedCount": len(seeds),
+        "addedCount": len(added),
+        "maxAdded": SIGNAL_DISCOVERY_RELATED_MAX_ADDED,
+        "perSeed": SIGNAL_DISCOVERY_RELATED_PER_SEED,
+        "minScore": SIGNAL_DISCOVERY_RELATED_MIN_SCORE,
+        "scanLimit": SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT,
+        "addedBySeed": added_by_seed,
+        "sampleSymbols": sampled_symbols[:12],
+    }
 
 
 def summary_count_value(*values, maximum: int = 1_000_000) -> int:
@@ -16908,6 +17147,12 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "newsPages": SIGNAL_DISCOVERY_NEWS_PAGES,
             "expandedNewsPages": SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES,
             "deepNewsScanLimit": SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT,
+            "relatedExpansionEnabled": SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED,
+            "relatedSeedLimit": SIGNAL_DISCOVERY_RELATED_SEED_LIMIT,
+            "relatedPerSeed": SIGNAL_DISCOVERY_RELATED_PER_SEED,
+            "relatedMaxAdded": SIGNAL_DISCOVERY_RELATED_MAX_ADDED,
+            "relatedMinScore": SIGNAL_DISCOVERY_RELATED_MIN_SCORE,
+            "relatedScanLimit": SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT,
             "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
             "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
             "strongEvidenceScore": SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE,
@@ -17695,6 +17940,23 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         except Exception as error:
             errors.append(str(error)[:160])
 
+    related_entries, related_expansion_status = related_signal_expansion_entries(discovered, entries, expansion_profile)
+    for index, entry in enumerate(related_entries):
+        try:
+            deep_news_scan = index < SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT
+            news_pages = SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES if deep_news_scan else SIGNAL_DISCOVERY_NEWS_PAGES
+            discovered.append(
+                candidate_from_universe_entry(
+                    entry,
+                    seed_lookup,
+                    watched,
+                    news_pages=news_pages,
+                    news_expansion_active=True,
+                )
+            )
+        except Exception as error:
+            errors.append(str(error)[:160])
+
     pool_memory_status = apply_candidate_pool_memory(discovered, pool_records) if discovered else {"appliedCount": 0}
     discovered.sort(
         key=lambda item: (
@@ -17759,6 +18021,11 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         "sourceExpansionAddedCount": source_expansion_status.get("addedCount", 0),
         "sourceExpansionAddedBySource": source_expansion_status.get("addedBySource", {}),
         "sourceExpansionSourceCounts": source_expansion_status.get("sourceCounts", {}),
+        "relatedSignalExpansion": related_expansion_status,
+        "relatedSignalExpansionActive": bool(related_expansion_status.get("active")),
+        "relatedSignalExpansionAddedCount": related_expansion_status.get("addedCount", 0),
+        "relatedSignalExpansionSeedCount": related_expansion_status.get("seedCount", 0),
+        "relatedSignalExpansionSampleSymbols": related_expansion_status.get("sampleSymbols", []),
         "scanTargetCount": len(entries),
         "scanRotation": scan_rotation_status,
         "scannedCount": len(discovered),
@@ -20239,6 +20506,12 @@ def discovery_bot_config_status() -> dict:
         "newsPages": SIGNAL_DISCOVERY_NEWS_PAGES,
         "expandedNewsPages": SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES,
         "deepNewsScanLimit": SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT,
+        "relatedExpansionEnabled": SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED,
+        "relatedSeedLimit": SIGNAL_DISCOVERY_RELATED_SEED_LIMIT,
+        "relatedPerSeed": SIGNAL_DISCOVERY_RELATED_PER_SEED,
+        "relatedMaxAdded": SIGNAL_DISCOVERY_RELATED_MAX_ADDED,
+        "relatedMinScore": SIGNAL_DISCOVERY_RELATED_MIN_SCORE,
+        "relatedScanLimit": SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT,
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }

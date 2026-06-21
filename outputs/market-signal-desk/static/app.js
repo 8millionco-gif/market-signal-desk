@@ -3250,6 +3250,7 @@ function candidateSourceDetailRows(summary = {}) {
   const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
   const expandedNewsCandidates = Number(summary.expandedNewsPageCandidateCount ?? discovery.expandedNewsPageCandidateCount ?? 0);
+  const relatedExpansionAdded = Number(summary.relatedSignalExpansionAddedCount ?? discovery.relatedSignalExpansionAddedCount ?? discovery.relatedSignalExpansion?.addedCount ?? 0);
   const expandedNewsPages = Number(summary.expandedNewsPagesPerSymbol ?? discovery.expandedNewsPagesPerSymbol ?? discovery.expandedNewsPages ?? 0);
   const newsPageFetchCount = Number(summary.newsPageFetchCount ?? discovery.newsPageFetchCount ?? 0);
   const materialPolicy = summary.materialCollectionPolicy && typeof summary.materialCollectionPolicy === "object" ? summary.materialCollectionPolicy : {};
@@ -3285,10 +3286,11 @@ function candidateSourceDetailRows(summary = {}) {
     : newsPageFetchCount > 0
       ? ` · 뉴스 ${newsPageFetchCount}p`
       : "";
+  const relatedText = relatedExpansionAdded > 0 ? ` · 관련 확장 ${relatedExpansionAdded}종목` : "";
   const materialText = scanned > 0
-    ? `${scanned}종목 점검 · 재료 누적 ${materialNews}건${expansionText} · 후보 제한 아님`
+    ? `${scanned}종목 점검 · 재료 누적 ${materialNews}건${expansionText}${relatedText} · 후보 제한 아님`
     : materialNews > 0
-      ? `재료 누적 ${materialNews}건${expansionText} · 후보 제한 아님`
+      ? `재료 누적 ${materialNews}건${expansionText}${relatedText} · 후보 제한 아님`
       : "서버 수집 대기";
   const policyText = materialPolicy.label || "서버가 후보 풀을 계속 넓히는 중";
   return [
@@ -4359,6 +4361,7 @@ function candidateBriefForMain(summary = {}) {
       0
   );
   const expandedNewsCandidates = Number(summary.expandedNewsPageCandidateCount ?? discovery.expandedNewsPageCandidateCount ?? 0);
+  const relatedExpansionAdded = Number(summary.relatedSignalExpansionAddedCount ?? discovery.relatedSignalExpansionAddedCount ?? discovery.relatedSignalExpansion?.addedCount ?? 0);
   const priceText =
     liveCount > 0
       ? `실시간 ${liveCount}`
@@ -4381,7 +4384,7 @@ function candidateBriefForMain(summary = {}) {
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
-    materialNews ? `재료 누적 ${materialNews}${expandedNewsCandidates ? ` · 확장 ${expandedNewsCandidates}` : ""}` : "",
+    materialNews ? `재료 누적 ${materialNews}${expandedNewsCandidates ? ` · 확장 ${expandedNewsCandidates}` : ""}${relatedExpansionAdded ? ` · 관련 ${relatedExpansionAdded}` : ""}` : "",
     priceText
   ].filter(Boolean).join(" · ");
   return {
