@@ -15972,6 +15972,180 @@ NEWS_MATERIAL_KEYWORDS = {
 }
 
 
+RELATED_SIGNAL_THEME_RULES = {
+    "semiconductor": {
+        "label": "반도체 공급망",
+        "terms": [
+            "반도체",
+            "HBM",
+            "DRAM",
+            "NAND",
+            "메모리",
+            "파운드리",
+            "후공정",
+            "패키징",
+            "테스트",
+            "소켓",
+            "프로브",
+            "EUV",
+            "AI 반도체",
+            "chip",
+            "semiconductor",
+            "foundry",
+            "memory",
+            "Micron",
+            "TSMC",
+            "ASML",
+            "NVIDIA",
+        ],
+    },
+    "ai_datacenter": {
+        "label": "AI 데이터센터",
+        "terms": [
+            "AI",
+            "인공지능",
+            "데이터센터",
+            "클라우드",
+            "GPU",
+            "서버",
+            "AI 서버",
+            "네트워크",
+            "스위치",
+            "광통신",
+            "ASIC",
+            "data center",
+            "cloud",
+            "server",
+            "networking",
+            "AWS",
+            "Azure",
+        ],
+    },
+    "power_grid": {
+        "label": "전력 인프라",
+        "terms": [
+            "전력",
+            "전력기기",
+            "전력망",
+            "변압기",
+            "초고압",
+            "송배전",
+            "전선",
+            "ESS",
+            "원전",
+            "데이터센터 전력",
+            "power",
+            "grid",
+            "transformer",
+            "electric",
+            "cooling",
+        ],
+    },
+    "defense_aerospace": {
+        "label": "방산/항공우주",
+        "terms": [
+            "방산",
+            "국방",
+            "무기",
+            "미사일",
+            "항공우주",
+            "위성",
+            "드론",
+            "수주",
+            "defense",
+            "aerospace",
+            "missile",
+            "space",
+        ],
+    },
+    "bio_healthcare": {
+        "label": "바이오/헬스케어",
+        "terms": [
+            "바이오",
+            "제약",
+            "신약",
+            "임상",
+            "FDA",
+            "CDMO",
+            "CMO",
+            "기술수출",
+            "의료기기",
+            "헬스케어",
+            "bio",
+            "pharma",
+            "clinical",
+            "approval",
+        ],
+    },
+    "beauty_consumer": {
+        "label": "K뷰티/소비재",
+        "terms": [
+            "화장품",
+            "미용",
+            "미용의료",
+            "리쥬란",
+            "K뷰티",
+            "수출",
+            "소비재",
+            "beauty",
+            "cosmetic",
+            "consumer",
+        ],
+    },
+    "finance_rate": {
+        "label": "금융/금리",
+        "terms": [
+            "금리",
+            "은행",
+            "보험",
+            "증권",
+            "배당",
+            "자사주",
+            "주주환원",
+            "환율",
+            "rate",
+            "bank",
+            "insurance",
+            "dividend",
+            "buyback",
+        ],
+    },
+    "battery_ev": {
+        "label": "2차전지/전기차",
+        "terms": [
+            "2차전지",
+            "배터리",
+            "전기차",
+            "양극재",
+            "음극재",
+            "리튬",
+            "ESS",
+            "EV",
+            "battery",
+            "lithium",
+        ],
+    },
+    "platform_software": {
+        "label": "플랫폼/소프트웨어",
+        "terms": [
+            "플랫폼",
+            "소프트웨어",
+            "검색",
+            "커머스",
+            "광고",
+            "보안",
+            "사이버보안",
+            "데이터분석",
+            "platform",
+            "software",
+            "commerce",
+            "cybersecurity",
+            "analytics",
+        ],
+    },
+}
+
+
 NEWS_NOISE_KEYWORDS = [
     "채용",
     "인사",
@@ -16567,11 +16741,13 @@ def candidate_from_universe_entry(
     if entry.get("relatedSignalExpansion"):
         related_reason = str(entry.get("relatedReason", "")).strip()
         related_from_name = str(entry.get("relatedFromName") or entry.get("relatedFromSymbol") or "").strip()
+        related_theme_labels = text_list(entry.get("relatedThemeLabels", []), limit=6)
         base["discovery"]["relatedSignalExpansion"] = True
         base["discovery"]["relatedFromSymbol"] = str(entry.get("relatedFromSymbol", "")).strip().upper()
         base["discovery"]["relatedFromName"] = related_from_name
         base["discovery"]["relatedReason"] = related_reason
         base["discovery"]["relatedScore"] = bounded_int(entry.get("relatedScore", 0), 0, 100)
+        base["discovery"]["relatedThemeLabels"] = related_theme_labels
         if not news_items:
             base["discovery"]["quality"] = "related-signal"
         related_note = "관련 신호 확장"
@@ -16580,13 +16756,13 @@ def candidate_from_universe_entry(
         if related_reason:
             related_note = f"{related_note}: {related_reason}"
         base["why"] = unique_texts([related_note, *text_list(base.get("why", []), limit=6)], limit=6)
-        base["tags"] = unique_texts([*text_list(base.get("tags", []), limit=8), "관련 확장"], limit=8)
+        base["tags"] = unique_texts([*text_list(base.get("tags", []), limit=8), *related_theme_labels, "관련 확장"], limit=8)
     return base
 
 
 def candidate_signal_seed_terms(candidate: dict) -> dict:
     if not isinstance(candidate, dict):
-        return {"terms": [], "themes": [], "impactTypes": []}
+        return {"terms": [], "themes": [], "impactTypes": [], "themeKeys": [], "themeLabels": [], "expandedTerms": []}
     discovery = candidate.get("discovery") if isinstance(candidate.get("discovery"), dict) else {}
     trend = candidate.get("trend") if isinstance(candidate.get("trend"), dict) else {}
     live_news = candidate.get("liveNews") if isinstance(candidate.get("liveNews"), dict) else {}
@@ -16624,10 +16800,50 @@ def candidate_signal_seed_terms(candidate: dict) -> dict:
             impact_values.append(label)
     theme_values.extend(text_list(candidate.get("tags", []), limit=12))
     theme_values.extend(text_list(candidate.get("themes", []), limit=12))
-    terms = unique_texts([*values, *theme_values, *impact_values], limit=36)
-    themes = unique_texts(theme_values, limit=18)
+    theme_profile = related_signal_theme_profile([*values, *theme_values, *impact_values])
+    expanded_terms = text_list(theme_profile.get("terms", []), limit=36)
+    theme_values.extend(text_list(theme_profile.get("labels", []), limit=12))
+    terms = unique_texts([*values, *theme_values, *impact_values, *expanded_terms], limit=54)
+    themes = unique_texts(theme_values, limit=24)
     impacts = unique_texts(impact_values, limit=14)
-    return {"terms": terms, "themes": themes, "impactTypes": impacts}
+    return {
+        "terms": terms,
+        "themes": themes,
+        "impactTypes": impacts,
+        "themeKeys": text_list(theme_profile.get("keys", []), limit=12),
+        "themeLabels": text_list(theme_profile.get("labels", []), limit=12),
+        "expandedTerms": expanded_terms,
+    }
+
+
+def related_signal_theme_profile(values: list[str]) -> dict:
+    combined = " ".join(clean_news_text(str(value)) for value in values if str(value or "").strip())
+    compact = compact_match_text(combined)
+    if not compact:
+        return {"keys": [], "labels": [], "terms": []}
+    keys: list[str] = []
+    labels: list[str] = []
+    terms: list[str] = []
+    for key, config in RELATED_SIGNAL_THEME_RULES.items():
+        matched_terms: list[str] = []
+        for term in text_list(config.get("terms", []), limit=100):
+            term_compact = compact_match_text(term)
+            if len(term_compact) < 2:
+                continue
+            if term_compact in compact:
+                matched_terms.append(term)
+        if not matched_terms:
+            continue
+        label = str(config.get("label") or key).strip()
+        keys.append(key)
+        labels.append(label)
+        terms.extend(matched_terms)
+        terms.extend(text_list(config.get("terms", []), limit=24))
+    return {
+        "keys": unique_texts(keys, limit=16),
+        "labels": unique_texts(labels, limit=16),
+        "terms": unique_texts(terms, limit=80),
+    }
 
 
 def related_signal_entry_score(seed: dict, seed_terms: dict, entry: dict) -> tuple[int, list[str]]:
@@ -16653,6 +16869,18 @@ def related_signal_entry_score(seed: dict, seed_terms: dict, entry: dict) -> tup
 
     score = 0
     reasons: list[str] = []
+    seed_theme_keys = set(text_list(seed_terms.get("themeKeys", []), limit=16))
+    seed_theme_labels = {
+        key: str(RELATED_SIGNAL_THEME_RULES.get(key, {}).get("label") or key)
+        for key in seed_theme_keys
+    }
+    entry_theme_profile = related_signal_theme_profile(entry_values)
+    entry_theme_keys = set(text_list(entry_theme_profile.get("keys", []), limit=16))
+    for key in sorted(seed_theme_keys & entry_theme_keys):
+        label = seed_theme_labels.get(key, key)
+        score += 12
+        reasons.append(f"{label} 연결")
+
     seed_theme_compacts = {
         compact_match_text(value): value
         for value in text_list(seed_terms.get("themes", []), limit=18)
@@ -16667,6 +16895,13 @@ def related_signal_entry_score(seed: dict, seed_terms: dict, entry: dict) -> tup
         if key and key in entry_theme_compacts:
             score += 7
             reasons.append(f"테마 {label}")
+    for term in text_list(seed_terms.get("expandedTerms", []), limit=54):
+        compact = compact_match_text(term)
+        if len(compact) < 2:
+            continue
+        if compact in entry_compact:
+            score += 4
+            reasons.append(term)
     for term in text_list(seed_terms.get("terms", []), limit=36):
         compact = compact_match_text(term)
         if len(compact) < 2 or compact == compact_match_text(seed_symbol):
@@ -16737,11 +16972,18 @@ def related_signal_expansion_entries(
     added: list[dict] = []
     added_by_seed: dict[str, int] = {}
     sampled_symbols: list[str] = []
+    theme_counts: dict[str, int] = {}
+    theme_labels: dict[str, str] = {}
     active = bool(expansion_profile.get("expansionActive")) or bool(seeds)
     for seed in seeds:
         if len(added) >= SIGNAL_DISCOVERY_RELATED_MAX_ADDED:
             break
         seed_terms = candidate_signal_seed_terms(seed)
+        seed_theme_keys = text_list(seed_terms.get("themeKeys", []), limit=12)
+        seed_theme_labels = text_list(seed_terms.get("themeLabels", []), limit=12)
+        for key in seed_theme_keys:
+            theme_counts[key] = theme_counts.get(key, 0) + 1
+            theme_labels[key] = str(RELATED_SIGNAL_THEME_RULES.get(key, {}).get("label") or key)
         seed_symbol = str(seed.get("symbol", "")).strip().upper()
         seed_name = str(seed.get("name") or seed_symbol).strip()
         scored: list[tuple[int, list[str], dict]] = []
@@ -16773,6 +17015,8 @@ def related_signal_expansion_entries(
                     "relatedFromName": seed_name,
                     "relatedReason": reason_text,
                     "relatedScore": bounded_int(score, 0, 100),
+                    "relatedThemeKeys": seed_theme_keys,
+                    "relatedThemeLabels": seed_theme_labels,
                     "discoveryTier": "related-signal",
                     "opportunityType": "related-signal",
                     "source": "related-signal",
@@ -16796,6 +17040,8 @@ def related_signal_expansion_entries(
         "minScore": SIGNAL_DISCOVERY_RELATED_MIN_SCORE,
         "scanLimit": SIGNAL_DISCOVERY_RELATED_SCAN_LIMIT,
         "addedBySeed": added_by_seed,
+        "themeCounts": theme_counts,
+        "themeLabels": theme_labels,
         "sampleSymbols": sampled_symbols[:12],
     }
 
