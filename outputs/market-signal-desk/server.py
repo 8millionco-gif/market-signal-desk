@@ -12428,6 +12428,74 @@ def candidate_entry_eligible(candidate: dict) -> bool:
     )
 
 
+def candidate_core_expansion_eligible(candidate: dict) -> tuple[bool, str]:
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    if str(compression.get("tier", "")) not in {"wait", ""}:
+        return False, ""
+    if candidate_is_portfolio_linked(candidate):
+        return False, ""
+    trade_gate = candidate.get("tradeDataGate", {}) if isinstance(candidate.get("tradeDataGate"), dict) else candidate_trade_data_gate(candidate)
+    if not trade_gate.get("displayReady"):
+        return False, ""
+
+    final_decision = candidate.get("finalDecision", {}) if isinstance(candidate.get("finalDecision"), dict) else {}
+    gate = candidate.get("qualityGate", {}) if isinstance(candidate.get("qualityGate"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    confidence = candidate.get("dataConfidence", {}) if isinstance(candidate.get("dataConfidence"), dict) else {}
+    source_reliability = candidate.get("sourceReliability", {}) if isinstance(candidate.get("sourceReliability"), dict) else {}
+    official = candidate.get("officialSignal", {}) if isinstance(candidate.get("officialSignal"), dict) else {}
+    evidence = candidate_discovery_evidence_strength(candidate)
+
+    action_key = str(final_decision.get("actionKey", "verify"))
+    gate_key = str(gate.get("key", "defer"))
+    reaction_gate = str(reaction.get("reactionGate", "wait"))
+    risk = bounded_int(score_detail.get("riskPenalty", 0), 0, 30)
+    heat = bounded_int(score_detail.get("heatPenalty", 0), 0, 20)
+    total = bounded_int(candidate.get("totalScore", 0), 0, 100)
+    readiness = bounded_int(candidate.get("triggerReadiness", 0), 0, 100)
+    confidence_score = bounded_int(confidence.get("score", 0), 0, 100)
+    reliability_score = bounded_int(source_reliability.get("score", confidence_score), 0, 100)
+
+    if official.get("riskLevel") == "high" or action_key == "stop" or gate_key == "exclude":
+        return False, ""
+    if reaction_gate == "blocked" or risk >= 24 or heat >= 18:
+        return False, ""
+    if not evidence["qualified"] and total < 64:
+        return False, ""
+    if total < 55 or readiness < 35:
+        return False, ""
+    if confidence_score < 48 and reliability_score < 50:
+        return False, ""
+
+    if trade_gate.get("closedBaseline"):
+        return True, "핵심/진입 조건 충족 후보가 없어 장마감 기준가와 검증 근거가 있는 후보를 우선 관찰로 확장했습니다."
+    return True, "핵심/진입 조건 충족 후보가 없어 가격 표시와 검증 근거가 있는 후보를 우선 관찰로 확장했습니다."
+
+
+def promote_candidate_to_core_expansion(candidate: dict, reason: str) -> None:
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    trade_gate = candidate.get("tradeDataGate", {}) if isinstance(candidate.get("tradeDataGate"), dict) else candidate_trade_data_gate(candidate)
+    candidate["candidateCompression"] = {
+        **compression,
+        "tier": "core",
+        "label": "핵심 관찰",
+        "tradeReady": False,
+        "entryReady": bool(trade_gate.get("entryReady")),
+        "expanded": True,
+        "expandedFrom": compression.get("tier", "wait"),
+        "reason": reason,
+    }
+    pool = candidate.get("candidatePool") if isinstance(candidate.get("candidatePool"), dict) else {}
+    if str(pool.get("stateKey", "")) not in {"entry_candidate", "portfolio"}:
+        candidate["candidatePool"] = {
+            **pool,
+            "stateKey": "validating",
+            "stateLabel": "핵심 관찰",
+            "stateReason": reason,
+        }
+
+
 def assign_candidate_compression(candidates: list[dict]) -> dict:
     max_core = 3
     max_entry = 5
@@ -12565,6 +12633,36 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
                 "validation": validation.get("label", ""),
             })
 
+    expansion_candidates: list[tuple[dict, str]] = []
+    if counts.get("core", 0) + counts.get("entry", 0) <= 0:
+        for item in ranked:
+            eligible, reason = candidate_core_expansion_eligible(item)
+            if eligible:
+                expansion_candidates.append((item, reason))
+            if len(expansion_candidates) >= max_core:
+                break
+        for item, reason in expansion_candidates:
+            compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
+            previous_tier = str(compression.get("tier", "wait"))
+            if previous_tier in counts and counts[previous_tier] > 0:
+                counts[previous_tier] -= 1
+            counts["core"] = counts.get("core", 0) + 1
+            promote_candidate_to_core_expansion(item, reason)
+            compression_score = candidate_compression_score(item)
+            final_decision = item.get("finalDecision", {}) if isinstance(item.get("finalDecision"), dict) else {}
+            validation = item.get("signalValidation", {}) if isinstance(item.get("signalValidation"), dict) else {}
+            top_candidates.append({
+                "symbol": item.get("symbol", ""),
+                "name": item.get("name", ""),
+                "tier": "core",
+                "score": item.get("totalScore", 0),
+                "compressionScore": compression_score,
+                "decision": final_decision.get("action", ""),
+                "reason": reason,
+                "validation": validation.get("label", ""),
+                "expanded": True,
+            })
+
     return {
         "candidateCompressionCounts": counts,
         "coreCandidateCount": counts.get("core", 0),
@@ -12575,6 +12673,10 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         "excludeCandidateCompressionCount": counts.get("exclude", 0),
         "compressedTopCandidates": top_candidates,
         "coreCandidateLimit": max_core,
+        "selectionExpansionActive": bool(expansion_candidates),
+        "selectionExpansionCount": len(expansion_candidates),
+        "selectionExpansionMode": "core_fallback" if expansion_candidates else "none",
+        "selectionExpansionReason": "핵심/진입 후보가 없어 조건을 만족한 대기 후보를 핵심 관찰로 확장했습니다." if expansion_candidates else "",
         "signalValidationCounts": validation_counts,
         "confirmedSignalCount": validation_counts.get("confirmed", 0),
         "evidenceWaitSignalCount": validation_counts.get("evidence_wait", 0),
@@ -14073,7 +14175,7 @@ def apply_candidate_selection(candidates: list[dict], market: dict, watched: set
     stable_decision_count = 0
     reliability_context = raw_event_reliability_context()
     for candidate in candidates:
-        item = annotate_candidate_live_price_freshness(dict(candidate))
+        item = apply_stock_master_identity(annotate_candidate_live_price_freshness(dict(candidate)))
         previous_final_decision = stable_final_decision_candidate(item)
         base_score = item.get("score", {})
         if not isinstance(base_score, dict):
@@ -14449,6 +14551,7 @@ STOCK_SEARCH_MANUAL_UNIVERSE = [
 
 
 STOCK_SEARCH_UNIVERSE_CACHE: list[dict] | None = None
+STOCK_SEARCH_SYMBOL_LOOKUP_CACHE: dict[str, dict] | None = None
 
 
 def hangul_initials(value: str) -> str:
@@ -14949,12 +15052,13 @@ def write_stock_search_generated_data(payload: dict) -> str:
 
 
 def refresh_stock_search_master(trigger: str = "manual") -> dict:
-    global STOCK_SEARCH_UNIVERSE_CACHE
+    global STOCK_SEARCH_UNIVERSE_CACHE, STOCK_SEARCH_SYMBOL_LOOKUP_CACHE
     with STOCK_SEARCH_MASTER_LOCK:
         try:
             payload = build_stock_search_master_payload(trigger=trigger)
             storage = write_stock_search_generated_data(payload)
             STOCK_SEARCH_UNIVERSE_CACHE = None
+            STOCK_SEARCH_SYMBOL_LOOKUP_CACHE = None
             status = {
                 "ok": True,
                 "storage": storage,
@@ -15023,6 +15127,73 @@ def stock_search_universe_entries() -> list[dict]:
     entries, _source_counts = merge_stock_search_entries(stock_search_source_lists(include_generated=True))
     STOCK_SEARCH_UNIVERSE_CACHE = entries
     return entries
+
+
+def symbol_identity_needs_master_name(value: object, symbol: str = "") -> bool:
+    text = str(value or "").strip()
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not text:
+        return True
+    if normalized_symbol and text.upper() == normalized_symbol:
+        return True
+    if re.fullmatch(r"\d{5,6}", text):
+        return True
+    return text.lower() in {"unknown", "n/a", "na", "-"}
+
+
+def stock_master_lookup_by_symbol() -> dict[str, dict]:
+    global STOCK_SEARCH_SYMBOL_LOOKUP_CACHE
+    if STOCK_SEARCH_SYMBOL_LOOKUP_CACHE is not None:
+        return STOCK_SEARCH_SYMBOL_LOOKUP_CACHE
+    lookup: dict[str, dict] = {}
+    for entry in stock_search_universe_entries():
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol", "")).strip().upper()
+        if symbol and symbol not in lookup:
+            lookup[symbol] = entry
+    STOCK_SEARCH_SYMBOL_LOOKUP_CACHE = lookup
+    return lookup
+
+
+def apply_stock_master_identity(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return candidate
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+    if not symbol:
+        return candidate
+    entry = stock_master_lookup_by_symbol().get(symbol, {})
+    if not isinstance(entry, dict) or not entry:
+        return candidate
+
+    resolved_name = str(entry.get("name") or entry.get("displayName") or "").strip()
+    if resolved_name and symbol_identity_needs_master_name(candidate.get("name"), symbol):
+        candidate["name"] = resolved_name
+    if resolved_name and symbol_identity_needs_master_name(candidate.get("displayName"), symbol):
+        candidate["displayName"] = resolved_name
+
+    for key in ("englishName", "market", "category", "securityType"):
+        if not str(candidate.get(key, "")).strip() and str(entry.get(key, "")).strip():
+            candidate[key] = entry.get(key)
+
+    display_name = str(candidate.get("name") or resolved_name or symbol).strip()
+    for key in ("headline", "title", "summary"):
+        text = str(candidate.get(key, "")).strip()
+        if not text:
+            continue
+        if text.startswith(f"{symbol} 관련") or text == f"{symbol} 관련 신호 점검":
+            candidate[key] = text.replace(symbol, display_name, 1)
+    if str(candidate.get("headline", "")).strip() == symbol and display_name != symbol:
+        candidate["headline"] = f"{display_name} 관련 신호 점검"
+
+    stock_master = candidate.get("stockMaster") if isinstance(candidate.get("stockMaster"), dict) else {}
+    candidate["stockMaster"] = {
+        **stock_master,
+        "nameResolved": bool(resolved_name),
+        "source": entry.get("source", stock_master.get("source", "")),
+        "sourceLabel": entry.get("sourceLabel", stock_master.get("sourceLabel", "")),
+    }
+    return candidate
 
 
 def universe_candidate_search(query: str, watched: set[str], limit: int = 8, existing_symbols: set[str] | None = None) -> list[dict]:
@@ -17300,6 +17471,10 @@ def build_dashboard_payload(context: dict) -> dict:
             "excludeCandidateCompressionCount": selection_status.get("excludeCandidateCompressionCount"),
             "compressedTopCandidates": selection_status.get("compressedTopCandidates", []),
             "coreCandidateLimit": selection_status.get("coreCandidateLimit"),
+            "selectionExpansionActive": selection_status.get("selectionExpansionActive"),
+            "selectionExpansionCount": selection_status.get("selectionExpansionCount"),
+            "selectionExpansionMode": selection_status.get("selectionExpansionMode"),
+            "selectionExpansionReason": selection_status.get("selectionExpansionReason"),
             "buyDecisionCount": selection_status.get("buyDecisionCount"),
             "addDecisionCount": selection_status.get("addDecisionCount"),
             "holdDecisionCount": selection_status.get("holdDecisionCount"),
@@ -19902,7 +20077,9 @@ def normalize_fast_live_candidate(candidate: dict, watched: set[str]) -> dict | 
     if not symbol:
         return None
     item["symbol"] = symbol
-    item.setdefault("name", symbol)
+    item = apply_stock_master_identity(item)
+    if symbol_identity_needs_master_name(item.get("name"), symbol):
+        item["name"] = symbol
     item.setdefault("market", "US" if re.search(r"[A-Z]", symbol) and not symbol.isdigit() else "KR")
     item.setdefault("category", "overseas" if item.get("market") == "US" else "domestic")
     item.setdefault("headline", item.get("stateReason") or item.get("summary") or "저장 후보")
@@ -20013,12 +20190,12 @@ def ensure_dashboard_market_snapshot(payload: dict, mode: str = "") -> dict:
     candidates = enriched_payload.get("candidates")
     if isinstance(candidates, list):
         enriched_payload["candidates"] = [
-            enrich_candidate_public_evidence_fields(candidate) if isinstance(candidate, dict) else candidate
+            enrich_candidate_public_evidence_fields(apply_stock_master_identity(candidate)) if isinstance(candidate, dict) else candidate
             for candidate in candidates
         ]
     selected = enriched_payload.get("selected")
     if isinstance(selected, dict):
-        enriched_payload["selected"] = enrich_candidate_public_evidence_fields(selected)
+        enriched_payload["selected"] = enrich_candidate_public_evidence_fields(apply_stock_master_identity(selected))
     summary["evidencePipeline"] = [
         "collect_evidence",
         "normalize_evidence",
@@ -20224,14 +20401,16 @@ def market_data_record_text_value(record: dict, row: dict, keys: tuple[str, ...]
 
 def market_data_record_candidate_name(symbol: str, record: dict, row: dict, lookup: dict[str, dict]) -> str:
     name = market_data_record_text_value(record, row, MARKET_DATA_CANDIDATE_NAME_KEYS)
-    if name:
+    if name and not symbol_identity_needs_master_name(name, symbol):
         return name
     entry = lookup.get(symbol, {}) if isinstance(lookup, dict) else {}
     if isinstance(entry, dict):
         for key in ("name", "englishName", "displayName"):
             value = str(entry.get(key, "")).strip()
-            if value:
+            if value and not symbol_identity_needs_master_name(value, symbol):
                 return value
+    if name:
+        return name
     return symbol
 
 
@@ -20263,7 +20442,7 @@ def candidate_from_market_data_latest_record(symbol: str, record: dict, lookup: 
     score = 52 if basis == "live" else (50 if basis == "closed_baseline" else 45)
     readiness = 45 if basis == "live" else (38 if basis == "closed_baseline" else 30)
 
-    return {
+    candidate = {
         "symbol": symbol,
         "name": name,
         "englishName": str((lookup.get(symbol, {}) if isinstance(lookup, dict) else {}).get("englishName", "")),
@@ -20353,6 +20532,7 @@ def candidate_from_market_data_latest_record(symbol: str, record: dict, lookup: 
         "related": [],
         "chart": [50, 50, 50, 50, 50, 50],
     }
+    return apply_stock_master_identity(candidate)
 
 
 def market_data_latest_candidates_from_data(data: dict, limit: int = 40) -> list[dict]:
