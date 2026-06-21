@@ -17550,6 +17550,7 @@ def sort_candidates_for_mode(candidates: list[dict], mode: str) -> list[dict]:
         compression = item.get("candidateCompression", {}) if isinstance(item, dict) else {}
         tier = str(compression.get("tier", "")) if isinstance(compression, dict) else ""
         return {
+            "entry": 130,
             "core": 120,
             "review": 92,
             "portfolio": 84,
@@ -17960,6 +17961,81 @@ def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> di
     }
 
 
+def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_core: int = 3) -> dict:
+    snapshot = candidate_compression_snapshot_from_candidates(candidates)
+    if snapshot.get("coreCandidateCount", 0) + snapshot.get("entryCandidateCount", 0) > 0:
+        return {
+            "applied": False,
+            "count": 0,
+            "symbols": [],
+            "reason": "",
+        }
+
+    ranked = sorted(
+        [item for item in candidates if isinstance(item, dict)],
+        key=candidate_compression_score,
+        reverse=True,
+    )
+    expanded: list[str] = []
+    reason_text = ""
+    for item in ranked:
+        eligible, reason = candidate_core_expansion_eligible(item)
+        if not eligible:
+            continue
+        promote_candidate_to_core_expansion(item, reason)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        if symbol:
+            expanded.append(symbol)
+        reason_text = reason_text or reason
+        if len(expanded) >= max_core:
+            break
+
+    return {
+        "applied": bool(expanded),
+        "count": len(expanded),
+        "symbols": expanded,
+        "reason": reason_text,
+    }
+
+
+def synchronize_selected_candidate_from_candidates(candidates: list[dict], selected: dict | None) -> dict | None:
+    if not candidates:
+        return selected if isinstance(selected, dict) else None
+
+    selected_symbol = str(selected.get("symbol", "")).strip().upper() if isinstance(selected, dict) else ""
+    selected_candidate = None
+    if selected_symbol:
+        selected_candidate = next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, dict) and str(item.get("symbol", "")).strip().upper() == selected_symbol
+            ),
+            None,
+        )
+
+    def selection_rank(item: dict) -> tuple[int, int, int]:
+        compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
+        return (
+            candidate_compression_tier_priority(str(compression.get("tier", ""))),
+            bounded_int(compression.get("score", 0), 0, 200),
+            bounded_int(item.get("totalScore", 0), 0, 100),
+        )
+
+    best_candidate = max(
+        [item for item in candidates if isinstance(item, dict)],
+        key=selection_rank,
+        default=None,
+    )
+    if not isinstance(best_candidate, dict):
+        return selected_candidate or (selected if isinstance(selected, dict) else None)
+    if not isinstance(selected_candidate, dict):
+        return copy.deepcopy(best_candidate)
+    if selection_rank(best_candidate) > selection_rank(selected_candidate):
+        return copy.deepcopy(best_candidate)
+    return copy.deepcopy(selected_candidate)
+
+
 def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return payload
@@ -17969,6 +18045,11 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     if not isinstance(candidates, list):
         candidates = []
     candidates = synchronize_selected_candidate_compression(
+        candidates,
+        enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
+    )
+    final_core_expansion = ensure_core_expansion_for_visible_candidates(candidates)
+    enriched["selected"] = synchronize_selected_candidate_from_candidates(
         candidates,
         enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
     )
@@ -17993,6 +18074,21 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         compression_counts = {}
 
     summary.update(actual_selection)
+    if final_core_expansion.get("applied"):
+        expansion_selection_fields = {
+            "selectionExpansionActive": True,
+            "selectionExpansionCount": final_core_expansion.get("count", 0),
+            "selectionExpansionMode": "core_fallback",
+            "selectionExpansionReason": (
+                final_core_expansion.get("reason")
+                or "핵심/진입 후보가 없어 조건을 만족한 대기 후보를 핵심 관찰로 확장했습니다."
+            ),
+            "selectionExpansionSymbols": final_core_expansion.get("symbols", []),
+        }
+        summary.update(expansion_selection_fields)
+        if isinstance(selection_status, dict):
+            selection_status.update(actual_selection)
+            selection_status.update(expansion_selection_fields)
 
     pool_status = integrations.get("candidatePool", {}) if isinstance(integrations.get("candidatePool"), dict) else {}
     if not pool_status:
