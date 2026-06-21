@@ -1721,6 +1721,12 @@ function candidatePoolDisplaySummary(totalCount = 0) {
   const pool = dashboardCandidatePoolSummary();
   const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, totalCount);
   const visibleTarget = candidatePoolVisibleTarget();
+  const excluded = numericSummaryValue(
+    pool.excludedHiddenCount,
+    pool.excludedRecordCount,
+    summary.hiddenExcludedCount,
+    summary.excludedRecordCount
+  );
   const domesticDb = numericSummaryValue(
     pool.visibleDomesticCount,
     summary.visibleDomesticCandidateCount,
@@ -1732,9 +1738,10 @@ function candidatePoolDisplaySummary(totalCount = 0) {
     summary.candidatePoolActiveCount,
     summary.candidatePoolCount
   );
-  const parts = [`표시 후보 ${visible || totalCount}${visibleTarget ? `/${visibleTarget}` : ""}`];
+  const parts = [`실전 후보 ${visible || totalCount}${visibleTarget ? `/${visibleTarget}` : ""}`];
   if (domesticDb) parts.push(`국내 DB ${domesticDb}`);
   if (poolActive) parts.push(`관찰 풀 ${poolActive}`);
+  if (excluded) parts.push(`탈락 기록 ${excluded} 제외`);
   return parts.join(" / ");
 }
 
@@ -1784,12 +1791,13 @@ function candidateDiscoveryNoticeMarkup() {
   const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
   if (core + entry > 0 && !active) return "";
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "핵심·진입 후보 발굴 중";
+  const policyText = "제외는 후보가 아니라 탈락 기록으로만 보관합니다.";
   const excludedText = excluded
-    ? ` · 탈락 기록 ${excluded}개는 후보 수에서 제외`
+    ? ` · 탈락 기록 ${excluded}개 제외`
     : "";
   const message = core + entry > 0
-    ? (notice.message || `서버가 관찰 풀 ${poolActive || "-"}개를 유지하며 추가 후보를 보강합니다.${excludedText}`)
-    : `조건 미달 종목은 후보가 아니라 탈락 기록으로 분리합니다. 표시 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 관찰 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""}${excludedText}`;
+    ? `${policyText} ${notice.message || `서버가 관찰 풀 ${poolActive || "-"}개를 유지하며 새 후보를 보강합니다.`}${excludedText}`
+    : `${policyText} 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 관찰 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""}${excludedText}`;
   const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
@@ -6411,7 +6419,7 @@ function strategyLabel(value) {
   if (value === "hidden") return "숨은 기회";
   if (value === "momentum") return "모멘텀";
   if (value === "holding") return "보유 대응";
-  if (value === "exclude") return "오늘 제외";
+  if (value === "exclude") return "탈락 기록";
   if (value === "all") return "전체";
   return "진입 가능";
 }
@@ -6433,6 +6441,10 @@ function renderStrategyCounts() {
   const counts = candidateStrategyCounts(baseFilteredCandidates());
   document.querySelectorAll(".strategy-button").forEach((button) => {
     const strategy = button.dataset.strategy || "action";
+    if (strategy === "exclude") {
+      button.hidden = true;
+      return;
+    }
     const label = button.dataset.label || strategyLabel(strategy);
     const count = counts[strategy] ?? 0;
     button.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(count)}</strong>`;

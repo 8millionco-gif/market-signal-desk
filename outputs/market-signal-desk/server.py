@@ -16720,13 +16720,13 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
     selection_limit = SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT if expansion_active else SIGNAL_DISCOVERY_SELECTION_LIMIT
     if expansion_active and entry_count <= 0:
         title = "다음 장 후보 탐색 중"
-        message = "조건을 통과한 진입 후보가 없어 서버가 후보를 더 넓게 발굴하고 있습니다."
+        message = "제외 기록은 후보에서 빼고, 조건을 통과할 새 실전 후보를 더 넓게 발굴하고 있습니다."
     elif expansion_active:
         title = "후보 보강 중"
-        message = "핵심/진입 가능 후보를 보강하되 기존 판단은 다음 스냅샷까지 유지합니다."
+        message = "제외 기록은 후보 수에서 빼고, 핵심/진입 가능 후보를 보강합니다."
     else:
         title = "후보 풀 유지"
-        message = "현재 후보 풀 기준으로 압축 후보를 유지합니다."
+        message = "제외 기록은 성과 검증용으로만 보관하고 현재 실전 후보를 유지합니다."
 
     return {
         "expansionActive": expansion_active,
@@ -16748,6 +16748,12 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "poolTotalCount": total_pool_count,
         "visibleCandidateCount": visible_candidate_count,
         "activeVisibleCandidateCount": visible_candidate_count,
+        "excludedAreCandidates": False,
+        "candidateDefinition": "실전 후보는 핵심·진입·대기·보유 상태만 의미하며 제외 기록은 후보 수에 포함하지 않습니다.",
+        "excludedPolicy": "제외 기록은 메인 후보에서 숨기고 DB 이력·성과 검증용으로만 보관합니다.",
+        "replacementPolicy": "제외된 자리는 새 후보 발굴과 보강 대상으로 계산합니다.",
+        "visibleCandidateStates": ["core", "entry", "wait", "portfolio"],
+        "hiddenRecordStates": ["excluded", "expired"],
         "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
         "visibleRefillTarget": SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET,
         "visibleRefillShortfall": visible_refill_shortfall,
