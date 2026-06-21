@@ -20253,6 +20253,14 @@ def discovery_bot_status() -> dict:
     pool_total = summary_count(summary.get("candidatePoolCount"), summary.get("candidatePoolActiveCount"), summary.get("candidateCount"))
     visible_total = core_count + entry_count + wait_count + portfolio_count
     expanding = bool(expansion_profile.get("expansionActive"))
+    if entry_count:
+        next_action = "장중 가격·거래량 반응이 확인된 진입 후보를 우선 관찰합니다."
+    elif core_count:
+        next_action = "핵심 후보는 다음 장 가격·거래량 반응 확인 전까지 진입 후보와 분리합니다."
+    elif visible_total:
+        next_action = "대기 후보를 보강하면서 핵심·진입 조건을 충족하는 새 종목을 계속 찾습니다."
+    else:
+        next_action = "조건을 통과한 후보가 없어 서버가 후보 풀을 확장하고 있습니다."
     pool_status = {
         "poolCount": pool_total,
         "visibleCandidateCount": visible_total,
@@ -20263,11 +20271,17 @@ def discovery_bot_status() -> dict:
         # Excluded records are no longer investable candidates. Keep them only
         # as hidden history/performance records so status consumers do not add
         # them back into visible candidate counts.
+        "excludedAreCandidates": False,
         "excludeCount": 0,
         "visibleExcludeCount": 0,
         "hiddenExcludedCount": hidden_excluded_count,
         "excludedHiddenCount": hidden_excluded_count,
         "excludedRecordCount": hidden_excluded_count,
+        "visibleCandidateStates": ["core", "entry", "wait", "portfolio"],
+        "hiddenRecordStates": ["excluded"],
+        "candidateDefinition": "후보는 핵심·진입·대기·보유 상태만 의미하며 제외 기록은 후보 수에 포함하지 않습니다.",
+        "coreDefinition": "핵심은 근거가 강한 다음 장 우선 관찰 종목이며 진입 후보와 분리합니다.",
+        "entryDefinition": "진입은 장중 live 가격·등락률·거래량 반응까지 확인된 실제 매수 관찰 종목입니다.",
         "dataWaitCount": data_wait_count,
         "statusCounts": pool_counts,
         "searchExpansionActive": expanding,
@@ -20290,6 +20304,7 @@ def discovery_bot_status() -> dict:
         "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
         "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
         "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
+        "nextAction": next_action,
         "message": (
             "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
             if expanding
