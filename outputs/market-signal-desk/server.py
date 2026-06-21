@@ -14126,7 +14126,68 @@ def candidate_pool_entry_from_record(record: dict) -> dict:
     name = str(record.get("name") or symbol)
     market = str(record.get("market") or ("US" if re.fullmatch(r"[A-Z.\-]{1,8}", symbol) else "KR"))
     category = str(record.get("category") or ("overseas" if market == "US" else "domestic"))
-    headline = str(record.get("headline") or f"{name} 후보 풀 재점검")
+    discovery = record.get("discovery") if isinstance(record.get("discovery"), dict) else {}
+    evidence = record.get("evidenceProfile") if isinstance(record.get("evidenceProfile"), dict) else {}
+    if not evidence and isinstance(discovery.get("evidenceProfile"), dict):
+        evidence = discovery.get("evidenceProfile", {})
+
+    def record_texts(source: dict, keys: tuple[str, ...], limit: int = 24) -> list[str]:
+        values: list[str] = []
+        for key in keys:
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, list):
+                values.extend(text_list(value, limit=limit))
+            elif isinstance(value, dict):
+                for nested_key in ("label", "name", "title", "headline", "summary", "reason"):
+                    nested_value = value.get(nested_key)
+                    if nested_value:
+                        values.append(str(nested_value))
+            elif value not in (None, ""):
+                values.append(str(value))
+        return unique_texts(values, limit=limit)
+
+    headline_candidates = record_texts(
+        record,
+        (
+            "headline",
+            "sourceHeadline",
+            "newsHeadline",
+            "materialHeadline",
+            "query",
+            "reason",
+            "stateReason",
+            "monitorReason",
+        ),
+        limit=8,
+    )
+    headline_candidates.extend(
+        record_texts(discovery, ("headline", "reason", "query", "summary"), limit=6)
+    )
+    headline = headline_candidates[0] if headline_candidates else f"{name} 후보 풀 재점검"
+
+    related_theme_labels = unique_texts(
+        [
+            *record_texts(record, ("relatedThemeLabels", "themes", "tags", "sector", "industry"), limit=20),
+            *record_texts(discovery, ("relatedThemeLabels", "themes", "tags", "sector", "industry"), limit=20),
+        ],
+        limit=16,
+    )
+    material_keywords = unique_texts(
+        [
+            *record_texts(record, ("materialKeywords", "evidenceReasons", "why"), limit=20),
+            *record_texts(discovery, ("materialKeywords", "evidenceReasons", "why"), limit=20),
+            *record_texts(evidence, ("reasons", "keywords", "labels"), limit=20),
+        ],
+        limit=16,
+    )
+    news_impact_types = unique_texts(
+        [
+            *record_texts(record, ("newsImpactTypes", "impactTypes"), limit=16),
+            *record_texts(discovery, ("newsImpactTypes", "impactTypes"), limit=16),
+            *record_texts(evidence, ("impactTypes", "labels"), limit=16),
+        ],
+        limit=14,
+    )
     themes = unique_texts(
         [
             record.get("monitorLabel", ""),
@@ -14134,20 +14195,39 @@ def candidate_pool_entry_from_record(record: dict) -> dict:
             record.get("finalAction", ""),
             record.get("compressionLabel", ""),
             record.get("validationLabel", ""),
+            *related_theme_labels,
+            *material_keywords,
+            *news_impact_types,
         ],
-        limit=4,
+        limit=14,
     )
+    query_terms = unique_texts([name, symbol, headline, *themes[:8]], limit=12)
     return {
         "symbol": symbol,
         "name": name,
         "market": market,
         "category": category,
         "themes": themes,
-        "query": " ".join(value for value in [name, symbol, headline] if value).strip(),
+        "tags": unique_texts([*themes, *record_texts(record, ("tags",), limit=12)], limit=14),
+        "query": " ".join(value for value in query_terms if value).strip(),
         "focusWeight": min(15, 7 + candidate_pool_rank(str(record.get("stateKey", ""))) // 10),
         "discoveryTier": "pool",
         "opportunityType": "pool-retain",
         "headline": headline,
+        "reason": str(record.get("reason") or record.get("stateReason") or record.get("monitorReason") or ""),
+        "stateLabel": str(record.get("stateLabel", "")),
+        "stateReason": str(record.get("stateReason", "")),
+        "monitorLabel": str(record.get("monitorLabel", "")),
+        "monitorReason": str(record.get("monitorReason", "")),
+        "relatedThemeLabels": related_theme_labels,
+        "materialKeywords": material_keywords,
+        "newsImpactTypes": news_impact_types,
+        "newsItems": bounded_int(record.get("newsItems", discovery.get("newsItems", 0)), 0, 1000),
+        "materialNewsItems": bounded_int(record.get("materialNewsItems", discovery.get("materialNewsItems", 0)), 0, 1000),
+        "evidenceScore": bounded_int(record.get("evidenceScore", discovery.get("evidenceScore", 0)), 0, 100),
+        "retainScore": bounded_int(record.get("retainScore", candidate_pool_selection_score(record)), 0, 100),
+        "monitorScore": bounded_int(record.get("monitorScore", 0), 0, 100),
+        "totalScore": bounded_int(record.get("totalScore", record.get("peakScore", 0)), 0, 100),
         "poolMemory": candidate_pool_memory_payload(record),
     }
 
@@ -16779,14 +16859,25 @@ def candidate_signal_seed_terms(candidate: dict) -> dict:
             values.append(str(value))
     for key in ("tags", "aliases", "why"):
         values.extend(text_list(candidate.get(key, []), limit=12))
+    for key in ("query", "reason", "stateLabel", "stateReason", "monitorLabel", "monitorReason"):
+        value = candidate.get(key)
+        if value:
+            values.append(str(value))
     for key in ("stateLabel", "stateReason", "monitorLabel", "monitorReason", "reason"):
         value = pool_memory.get(key)
         if value:
             values.append(str(value))
     for key in ("relatedThemeLabels", "newsImpactTypes", "materialKeywords"):
         theme_values.extend(text_list(discovery.get(key, []), limit=12))
+        theme_values.extend(text_list(candidate.get(key, []), limit=12))
+    for key in ("sector", "industry", "theme", "materialKeyword"):
+        value = candidate.get(key)
+        if value:
+            theme_values.append(str(value))
     for key in ("newsImpactTypes",):
         impact_values.extend(text_list(discovery.get(key, []), limit=12))
+        impact_values.extend(text_list(candidate.get(key, []), limit=12))
+    impact_values.extend(text_list(candidate.get("impactTypes", []), limit=12))
     impact_values.extend(text_list(evidence.get("impactTypes", []), limit=12))
     impact_values.extend(text_list(trend.get("impactTypes", []), limit=12))
     for item in live_news.get("items", []) if isinstance(live_news.get("items", []), list) else []:
@@ -21054,6 +21145,39 @@ def discovery_bot_status() -> dict:
         or related_expansion.get("active")
         or related_added_count
     )
+    related_seed_preview: dict = {"enabled": bool(SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED)}
+    try:
+        preview_limit = min(
+            max(SIGNAL_DISCOVERY_RELATED_SEED_LIMIT * 4, 12),
+            max(SIGNAL_CANDIDATE_POOL_SCAN_LIMIT, SIGNAL_DISCOVERY_RELATED_SEED_LIMIT),
+        )
+        preview_records = candidate_pool_retainable_records(limit=preview_limit)
+        preview_entries = [candidate_pool_entry_from_record(record) for record in preview_records]
+        preview_seeds, preview_seed_status = related_signal_seed_candidates([], preview_entries)
+        related_seed_preview = {
+            "enabled": bool(SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED),
+            "seedCount": len(preview_seeds),
+            "scanCount": len(preview_entries),
+            "seedStatus": preview_seed_status,
+            "sampleSymbols": [
+                str(seed.get("symbol", "")).strip().upper()
+                for seed in preview_seeds[:8]
+                if str(seed.get("symbol", "")).strip()
+            ],
+            "sampleThemes": unique_texts(
+                [
+                    label
+                    for seed in preview_seeds[:8]
+                    for label in text_list(candidate_signal_seed_terms(seed).get("themeLabels", []), limit=6)
+                ],
+                limit=10,
+            ),
+        }
+    except Exception as error:
+        related_seed_preview = {
+            "enabled": bool(SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED),
+            "error": str(error)[:180],
+        }
     hidden_excluded_count = max(
         hidden_excluded_count,
         summary_count(expansion_profile.get("excludedHiddenCount")),
@@ -21121,12 +21245,16 @@ def discovery_bot_status() -> dict:
         "relatedSignalExpansionSeedCount": related_seed_count,
         "relatedExpansionSampleSymbols": related_samples[:10],
         "relatedSignalExpansion": related_expansion,
+        "relatedExpansionSeedPreview": related_seed_preview,
+        "relatedSignalExpansionPreview": related_seed_preview,
         "nextAction": next_action,
         "message": (
             f"관련 뉴스·재료에서 {related_added_count}개 종목을 추가 발굴했고 후보 풀 검증 중입니다."
             if related_added_count
             else (
-                "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
+                f"관련 확장 시드 {related_seed_preview.get('seedCount', 0)}개를 준비했고 서버가 후보 풀을 계속 확장 중입니다."
+                if expanding and related_seed_preview.get("seedCount")
+                else "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
                 if expanding
                 else "핵심/진입 조건 후보가 감지되어 후보 풀을 유지·검증 중입니다."
             )
