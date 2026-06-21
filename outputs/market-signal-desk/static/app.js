@@ -1755,7 +1755,8 @@ function discoveryTriggerLabel(trigger) {
     high_exclusion_ratio: "탈락 종목 대체 중",
     candidate_refill_shortfall: "실전 후보 보강 중",
     pool_refill_shortfall: "후보 풀 보충 중",
-    excluded_replacement_needed: "탈락 종목 대체 중"
+    excluded_replacement_needed: "탈락 종목 대체 중",
+    related_signal_expansion: "관련 뉴스 종목 확장"
   };
   return labels[String(trigger || "")] || "";
 }
@@ -1788,17 +1789,40 @@ function candidateDiscoveryNoticeMarkup() {
   const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, state.dashboard?.candidates?.length);
   const visibleTarget = candidatePoolVisibleTarget();
   const excluded = numericSummaryValue(pool.excludedHiddenCount, summary.hiddenExcludedCount);
-  const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
+  const relatedAdded = numericSummaryValue(
+    pool.relatedExpansionAddedCount,
+    pool.relatedSignalExpansionAddedCount,
+    summary.relatedSignalExpansionAddedCount,
+    summary.relatedSignalExpansion?.addedCount
+  );
+  const relatedSeeds = numericSummaryValue(
+    pool.relatedExpansionSeedCount,
+    pool.relatedSignalExpansionSeedCount,
+    summary.relatedSignalExpansionSeedCount,
+    summary.relatedSignalExpansion?.seedCount
+  );
+  const active = Boolean(
+    notice.active
+      || pool.expansionActive
+      || summary.discoveryExpansionActive
+      || pool.relatedExpansionActive
+      || pool.relatedSignalExpansionActive
+      || summary.relatedSignalExpansionActive
+      || relatedAdded
+  );
   if (core + entry > 0 && !active) return "";
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "핵심·진입 후보 발굴 중";
   const policyText = "제외는 후보가 아니라 탈락 기록으로만 보관합니다.";
   const excludedText = excluded
     ? ` · 탈락 기록 ${excluded}개 제외`
     : "";
+  const relatedText = relatedAdded
+    ? ` · 관련 신호 ${relatedSeeds || "-"}개에서 ${relatedAdded}종목 추가`
+    : "";
   const message = core + entry > 0
-    ? `${policyText} ${notice.message || `서버가 관찰 풀 ${poolActive || "-"}개를 유지하며 새 후보를 보강합니다.`}${excludedText}`
-    : `${policyText} 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 관찰 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""}${excludedText}`;
-  const reason = discoveryNoticeReason(notice);
+    ? `${policyText} ${notice.message || `서버가 관찰 풀 ${poolActive || "-"}개를 유지하며 새 후보를 보강합니다.`}${relatedText}${excludedText}`
+    : `${policyText} 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 관찰 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""}${relatedText}${excludedText}`;
+  const reason = relatedAdded ? "관련 뉴스 종목 확장" : discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
       <strong>${escapeHtml(title)}</strong>

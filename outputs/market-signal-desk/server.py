@@ -20425,6 +20425,11 @@ def dashboard_summary(payload: dict) -> dict:
         "replacementNeededCount": summary.get("replacementNeededCount"),
         "candidateRefillActive": summary.get("candidateRefillActive"),
         "poolRefillShortfall": summary.get("poolRefillShortfall"),
+        "relatedSignalExpansion": summary.get("relatedSignalExpansion", {}),
+        "relatedSignalExpansionActive": summary.get("relatedSignalExpansionActive"),
+        "relatedSignalExpansionAddedCount": summary.get("relatedSignalExpansionAddedCount", 0),
+        "relatedSignalExpansionSeedCount": summary.get("relatedSignalExpansionSeedCount", 0),
+        "relatedSignalExpansionSampleSymbols": summary.get("relatedSignalExpansionSampleSymbols", []),
         "confirmedSignalCount": summary.get("confirmedSignalCount"),
         "evidenceWaitSignalCount": summary.get("evidenceWaitSignalCount"),
         "reactionOnlySignalCount": summary.get("reactionOnlySignalCount"),
@@ -20669,6 +20674,27 @@ def discovery_bot_status() -> dict:
     )
     pool_snapshot = candidate_pool_summary(fast=True)
     expansion_profile = discovery_expansion_profile(summary, pool_snapshot)
+    related_expansion = summary.get("relatedSignalExpansion", {})
+    if not isinstance(related_expansion, dict):
+        related_expansion = {}
+    related_added_count = summary_count(
+        summary.get("relatedSignalExpansionAddedCount"),
+        related_expansion.get("addedCount"),
+    )
+    related_seed_count = summary_count(
+        summary.get("relatedSignalExpansionSeedCount"),
+        related_expansion.get("seedCount"),
+    )
+    related_samples = summary.get("relatedSignalExpansionSampleSymbols")
+    if not isinstance(related_samples, list):
+        related_samples = related_expansion.get("sampleSymbols", [])
+    if not isinstance(related_samples, list):
+        related_samples = []
+    related_active = bool(
+        summary.get("relatedSignalExpansionActive")
+        or related_expansion.get("active")
+        or related_added_count
+    )
     hidden_excluded_count = max(
         hidden_excluded_count,
         summary_count(expansion_profile.get("excludedHiddenCount")),
@@ -20728,11 +20754,23 @@ def discovery_bot_status() -> dict:
         "excludedReplacementNeeded": expansion_profile.get("excludedReplacementNeeded"),
         "replacementNeededCount": expansion_profile.get("replacementNeededCount"),
         "candidateRefillActive": expansion_profile.get("candidateRefillActive"),
+        "relatedExpansionActive": related_active,
+        "relatedSignalExpansionActive": related_active,
+        "relatedExpansionAddedCount": related_added_count,
+        "relatedSignalExpansionAddedCount": related_added_count,
+        "relatedExpansionSeedCount": related_seed_count,
+        "relatedSignalExpansionSeedCount": related_seed_count,
+        "relatedExpansionSampleSymbols": related_samples[:10],
+        "relatedSignalExpansion": related_expansion,
         "nextAction": next_action,
         "message": (
-            "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
-            if expanding
-            else "핵심/진입 조건 후보가 감지되어 후보 풀을 유지·검증 중입니다."
+            f"관련 뉴스·재료에서 {related_added_count}개 종목을 추가 발굴했고 후보 풀 검증 중입니다."
+            if related_added_count
+            else (
+                "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
+                if expanding
+                else "핵심/진입 조건 후보가 감지되어 후보 풀을 유지·검증 중입니다."
+            )
         ),
     }
     return {
