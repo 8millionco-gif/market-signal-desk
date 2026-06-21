@@ -255,10 +255,10 @@ const SETTINGS_TAB_COPY = {
     description: "운영/개발 진단은 관리자 토큰 입력 후 확인합니다. 개인 투자 설정은 다른 탭에서 계속 사용할 수 있습니다."
   }
 };
-const CANDIDATE_DISPLAY_STICKY_MS = 60000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 8;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 12;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 30;
+const CANDIDATE_DISPLAY_STICKY_MS = 120000;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 12;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 20;
+const CANDIDATE_FEED_EXPANDED_LIMIT = 60;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1627,7 +1627,18 @@ function filteredCandidates() {
 }
 
 function candidateFeedBaseLimit() {
-  return state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
+  const expansionActive = isDiscoveryExpansionActive();
+  const target = candidatePoolVisibleTarget(0);
+  let limit = state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
+  if (expansionActive) {
+    const expansionLimit = state.strategy === "all" ? 24 : 16;
+    const expansionCap = state.strategy === "all" ? 30 : 20;
+    limit = Math.max(limit, Math.min(Math.max(target, expansionLimit), expansionCap));
+  }
+  if (state.strategy === "wait" && expansionActive) {
+    limit = Math.max(limit, 18);
+  }
+  return limit;
 }
 
 function visibleFeedCandidates(candidates = []) {
@@ -1635,7 +1646,12 @@ function visibleFeedCandidates(candidates = []) {
   const queryActive = Boolean(state.query.trim());
   const baseLimit = candidateFeedBaseLimit();
   const collapsedLimit = queryActive ? Math.max(baseLimit, CANDIDATE_FEED_ALL_VISIBLE_LIMIT) : baseLimit;
-  const expandedLimit = Math.max(collapsedLimit, CANDIDATE_FEED_EXPANDED_LIMIT);
+  const target = candidatePoolVisibleTarget(items.length);
+  const expandedLimit = Math.max(
+    collapsedLimit,
+    CANDIDATE_FEED_EXPANDED_LIMIT,
+    Math.min(items.length, Math.max(target, 0))
+  );
   const canToggle = items.length > collapsedLimit;
   const expanded = Boolean(state.feedExpanded && canToggle);
   const effectiveLimit = expanded ? Math.min(items.length, expandedLimit) : collapsedLimit;
@@ -1679,6 +1695,25 @@ function numericSummaryValue(...values) {
 function dashboardCandidatePoolSummary() {
   const summary = state.dashboard?.summary || {};
   return summary.candidatePoolSummary || {};
+}
+
+function isDiscoveryExpansionActive() {
+  const summary = state.dashboard?.summary || {};
+  const notice = summary.discoveryNotice || {};
+  const pool = dashboardCandidatePoolSummary();
+  return Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
+}
+
+function candidatePoolVisibleTarget(fallback = 0) {
+  const summary = state.dashboard?.summary || {};
+  const pool = dashboardCandidatePoolSummary();
+  return numericSummaryValue(
+    pool.visibleCandidateCount,
+    summary.visibleCandidateCount,
+    pool.poolActiveCount,
+    summary.candidatePoolActiveCount,
+    fallback
+  );
 }
 
 function candidatePoolDisplaySummary(totalCount = 0) {
@@ -1743,12 +1778,16 @@ function candidateDiscoveryNoticeMarkup() {
   const pool = dashboardCandidatePoolSummary();
   const core = numericSummaryValue(pool.coreCount, summary.coreCandidateCount);
   const entry = numericSummaryValue(pool.entryCount, summary.entryCandidateCount, summary.actionCandidateCount);
+  const poolActive = numericSummaryValue(pool.poolActiveCount, summary.candidatePoolActiveCount, summary.candidatePoolCount);
+  const poolTarget = numericSummaryValue(pool.poolActiveTarget, summary.discoveryPoolActiveTarget);
+  const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, state.dashboard?.candidates?.length);
+  const excluded = numericSummaryValue(pool.excludedHiddenCount, summary.hiddenExcludedCount);
   const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
   if (core + entry > 0 && !active) return "";
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "조건 충족 진입 후보 없음";
   const message = core + entry > 0
-    ? (notice.message || "기존 판단은 유지하고 서버가 추가 후보를 보강합니다.")
-    : "무리한 진입 후보는 제외하고 다음 장 관찰 후보를 계속 찾고 있습니다.";
+    ? (notice.message || `서버가 후보 풀 ${poolActive || "-"}개를 유지하며 추가 후보를 보강합니다.`)
+    : `무리한 진입 후보는 제외하고 조건 충족 후보를 계속 찾고 있습니다. 표시 ${visible || 0}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 ${excluded || 0}개 숨김`;
   const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">

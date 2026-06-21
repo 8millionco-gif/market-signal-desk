@@ -351,9 +351,12 @@ SIGNAL_CANDIDATE_POOL_ENABLED = os.getenv("SIGNAL_CANDIDATE_POOL_ENABLED", "1").
 SIGNAL_CANDIDATE_POOL_MAX_ITEMS = max(1000, int(os.getenv("SIGNAL_CANDIDATE_POOL_MAX_ITEMS", "1000")))
 SIGNAL_CANDIDATE_POOL_TTL_DAYS = int(os.getenv("SIGNAL_CANDIDATE_POOL_TTL_DAYS", "14"))
 SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS = int(os.getenv("SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS", "2"))
-SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = max(80, int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "80")))
-SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = max(400, int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "400")))
-SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "58"))
+SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT = max(240, int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_LIMIT", "240")))
+SIGNAL_CANDIDATE_POOL_SCAN_LIMIT = max(640, int(os.getenv("SIGNAL_CANDIDATE_POOL_SCAN_LIMIT", "640")))
+SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE = min(
+    52,
+    max(35, int(os.getenv("SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE", "48"))),
+)
 SIGNAL_CANDIDATE_POOL_TOP_LIMIT = int(os.getenv("SIGNAL_CANDIDATE_POOL_TOP_LIMIT", "5"))
 SIGNAL_CANDIDATE_PREFETCH_ENABLED = os.getenv("SIGNAL_CANDIDATE_PREFETCH_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 _candidate_prefetch_max_limit = max(50, int(os.getenv("SIGNAL_CANDIDATE_PREFETCH_MAX_LIMIT", "60")))
@@ -16674,8 +16677,12 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
         tier, rank, reason = "reserve", 1, "후보 풀에서 관찰 가치가 남아 있어 대기 후보로 재점검"
     elif hidden and score >= reserve_floor and evidence_score >= review_evidence_floor:
         tier, rank, reason = "reserve", 1, "숨은 후보 신호가 있어 추가 검증 대기"
+    elif raw_news >= 2 and score >= review_score_floor and evidence_score >= max(26, review_evidence_floor - 6):
+        tier, rank, reason = "reserve", 1, "복수 뉴스 신호가 있어 확장 후보로 유지"
     elif raw_news and filtered and score >= review_score_floor and evidence_score >= review_evidence_floor:
         tier, rank, reason = "reserve", 1, "검색 뉴스 신호가 있어 관련성 보강 대기"
+    elif focus >= 5 and raw_news and score >= review_score_floor and evidence_score >= max(26, review_evidence_floor - 6):
+        tier, rank, reason = "reserve", 1, "테마와 뉴스 신호가 있어 추가 발굴 후보로 유지"
     elif focus >= 6 and score >= review_score_floor and evidence_score >= review_evidence_floor:
         tier, rank, reason = "reserve", 1, "테마·관심 가중치가 있어 확장 후보로 유지"
     elif raw_news and filtered and not news_items:
