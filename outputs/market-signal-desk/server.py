@@ -16767,6 +16767,9 @@ def candidate_signal_seed_terms(candidate: dict) -> dict:
     trend = candidate.get("trend") if isinstance(candidate.get("trend"), dict) else {}
     live_news = candidate.get("liveNews") if isinstance(candidate.get("liveNews"), dict) else {}
     evidence = discovery.get("evidenceProfile") if isinstance(discovery.get("evidenceProfile"), dict) else {}
+    pool_memory = discovery.get("poolMemory") if isinstance(discovery.get("poolMemory"), dict) else {}
+    if not pool_memory and isinstance(candidate.get("poolMemory"), dict):
+        pool_memory = candidate.get("poolMemory", {})
     values: list[str] = []
     theme_values: list[str] = []
     impact_values: list[str] = []
@@ -16776,6 +16779,12 @@ def candidate_signal_seed_terms(candidate: dict) -> dict:
             values.append(str(value))
     for key in ("tags", "aliases", "why"):
         values.extend(text_list(candidate.get(key, []), limit=12))
+    for key in ("stateLabel", "stateReason", "monitorLabel", "monitorReason", "reason"):
+        value = pool_memory.get(key)
+        if value:
+            values.append(str(value))
+    for key in ("relatedThemeLabels", "newsImpactTypes", "materialKeywords"):
+        theme_values.extend(text_list(discovery.get(key, []), limit=12))
     for key in ("newsImpactTypes",):
         impact_values.extend(text_list(discovery.get(key, []), limit=12))
     impact_values.extend(text_list(evidence.get("impactTypes", []), limit=12))
@@ -16922,6 +16931,126 @@ def related_signal_entry_score(seed: dict, seed_terms: dict, entry: dict) -> tup
     return bounded_int(score, 0, 100), unique_texts(reasons, limit=5)
 
 
+def related_signal_seed_pool_memory(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    discovery = item.get("discovery") if isinstance(item.get("discovery"), dict) else {}
+    if isinstance(discovery.get("poolMemory"), dict):
+        return discovery.get("poolMemory", {})
+    if isinstance(item.get("poolMemory"), dict):
+        return item.get("poolMemory", {})
+    return {}
+
+
+def related_signal_seed_metrics(item: dict, source: str) -> dict:
+    if not isinstance(item, dict):
+        return {"eligible": False, "score": 0}
+    discovery = item.get("discovery") if isinstance(item.get("discovery"), dict) else {}
+    pool_memory = related_signal_seed_pool_memory(item)
+    seed_terms = candidate_signal_seed_terms(item)
+    news_items = bounded_int(discovery.get("newsItems", item.get("newsItems", 0)), 0, 1000)
+    material_news_items = bounded_int(discovery.get("materialNewsItems", item.get("materialNewsItems", 0)), 0, 1000)
+    evidence_score = max(
+        bounded_int(discovery.get("evidenceScore", item.get("evidenceScore", 0)), 0, 100),
+        bounded_int(pool_memory.get("evidenceScore", 0), 0, 100),
+    )
+    discovery_score = bounded_int(discovery.get("score", item.get("score", 0)), 0, 100)
+    pool_score = max(
+        bounded_int(pool_memory.get("score", item.get("poolScore", 0)), 0, 100),
+        bounded_int(item.get("retainScore", 0), 0, 100),
+    )
+    monitor_score = max(
+        bounded_int(pool_memory.get("monitorScore", item.get("monitorScore", 0)), 0, 100),
+        bounded_int(item.get("monitorScore", 0), 0, 100),
+    )
+    peak_score = max(
+        bounded_int(pool_memory.get("peakScore", item.get("peakScore", 0)), 0, 100),
+        bounded_int(item.get("totalScore", 0), 0, 100),
+    )
+    theme_count = len(text_list(seed_terms.get("themeKeys", []), limit=20))
+    term_count = (
+        len(text_list(seed_terms.get("terms", []), limit=80))
+        + len(text_list(seed_terms.get("expandedTerms", []), limit=80))
+        + theme_count * 2
+    )
+    has_recent_material = news_items > 0 or material_news_items > 0 or evidence_score >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
+    has_pool_signal = max(pool_score, monitor_score, peak_score) >= SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and term_count >= 6
+    has_theme_signal = theme_count > 0 and max(pool_score, monitor_score, evidence_score, discovery_score) >= max(45, SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE - 5)
+    eligible = bool(has_recent_material or has_pool_signal or has_theme_signal)
+    score = bounded_int(
+        material_news_items * 18
+        + news_items * 5
+        + evidence_score
+        + discovery_score
+        + pool_score
+        + monitor_score
+        + peak_score
+        + theme_count * 8
+        + min(30, term_count),
+        0,
+        1000,
+    )
+    return {
+        "eligible": eligible,
+        "score": score,
+        "source": source,
+        "newsItems": news_items,
+        "materialNewsItems": material_news_items,
+        "evidenceScore": evidence_score,
+        "discoveryScore": discovery_score,
+        "poolScore": pool_score,
+        "monitorScore": monitor_score,
+        "peakScore": peak_score,
+        "themeCount": theme_count,
+        "termCount": term_count,
+    }
+
+
+def related_signal_seed_candidates(discovered: list[dict], existing_entries: list[dict]) -> tuple[list[dict], dict]:
+    seeds: list[dict] = []
+    seen_symbols: set[str] = set()
+    source_counts: dict[str, int] = {"discovered": 0, "pool": 0}
+    eligible_counts: dict[str, int] = {"discovered": 0, "pool": 0}
+    rejected_counts: dict[str, int] = {"discovered": 0, "pool": 0}
+    for source, items in (("discovered", discovered), ("pool", existing_entries)):
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if not symbol or symbol in seen_symbols:
+                continue
+            source_counts[source] = source_counts.get(source, 0) + 1
+            metrics = related_signal_seed_metrics(item, source)
+            if not metrics.get("eligible"):
+                rejected_counts[source] = rejected_counts.get(source, 0) + 1
+                continue
+            seed = dict(item)
+            seed["_relatedSeedMetrics"] = metrics
+            seed["_relatedSeedSource"] = source
+            seeds.append(seed)
+            seen_symbols.add(symbol)
+            eligible_counts[source] = eligible_counts.get(source, 0) + 1
+    seeds.sort(
+        key=lambda item: (
+            bounded_int(item.get("_relatedSeedMetrics", {}).get("score", 0), 0, 1000),
+            bounded_int(item.get("_relatedSeedMetrics", {}).get("materialNewsItems", 0), 0, 1000),
+            bounded_int(item.get("_relatedSeedMetrics", {}).get("evidenceScore", 0), 0, 100),
+            bounded_int(item.get("_relatedSeedMetrics", {}).get("monitorScore", 0), 0, 100),
+            score_candidate(item),
+        ),
+        reverse=True,
+    )
+    return seeds[:SIGNAL_DISCOVERY_RELATED_SEED_LIMIT], {
+        "sourceCounts": source_counts,
+        "eligibleCounts": eligible_counts,
+        "rejectedCounts": rejected_counts,
+        "totalEligible": len(seeds),
+        "selectedLimit": SIGNAL_DISCOVERY_RELATED_SEED_LIMIT,
+    }
+
+
 def related_signal_expansion_entries(
     discovered: list[dict],
     existing_entries: list[dict],
@@ -16929,26 +17058,7 @@ def related_signal_expansion_entries(
 ) -> tuple[list[dict], dict]:
     if not SIGNAL_DISCOVERY_RELATED_EXPANSION_ENABLED or SIGNAL_DISCOVERY_RELATED_MAX_ADDED <= 0:
         return [], {"enabled": False, "active": False, "addedCount": 0}
-    seeds = [
-        item
-        for item in discovered
-        if isinstance(item, dict)
-        and (
-            bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1000) > 0
-            or bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1000) > 0
-            or bounded_int(item.get("discovery", {}).get("evidenceScore", 0), 0, 100) >= SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE
-        )
-    ]
-    seeds.sort(
-        key=lambda item: (
-            bounded_int(item.get("discovery", {}).get("materialNewsItems", 0), 0, 1000),
-            bounded_int(item.get("discovery", {}).get("evidenceScore", 0), 0, 100),
-            bounded_int(item.get("discovery", {}).get("score", 0), 0, 100),
-            score_candidate(item),
-        ),
-        reverse=True,
-    )
-    seeds = seeds[:SIGNAL_DISCOVERY_RELATED_SEED_LIMIT]
+    seeds, seed_status = related_signal_seed_candidates(discovered, existing_entries)
     if not seeds:
         return [], {
             "enabled": True,
@@ -16956,6 +17066,7 @@ def related_signal_expansion_entries(
             "trigger": "no_seed",
             "seedCount": 0,
             "addedCount": 0,
+            "seedStatus": seed_status,
         }
 
     seen_symbols = {
@@ -17034,6 +17145,8 @@ def related_signal_expansion_entries(
         "active": active,
         "trigger": "related_signal",
         "seedCount": len(seeds),
+        "seedStatus": seed_status,
+        "seedSourceCounts": seed_status.get("eligibleCounts", {}),
         "addedCount": len(added),
         "maxAdded": SIGNAL_DISCOVERY_RELATED_MAX_ADDED,
         "perSeed": SIGNAL_DISCOVERY_RELATED_PER_SEED,
