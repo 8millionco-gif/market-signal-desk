@@ -4823,6 +4823,67 @@ def candidate_text_for_personalization(candidate: dict) -> str:
     return " ".join(str(piece or "") for piece in pieces).lower()
 
 
+def candidate_market_for_personalization(candidate: dict) -> str:
+    fields = []
+    for key in ["market", "marketKey", "country", "exchange", "category", "assetType", "type"]:
+        value = candidate.get(key)
+        if isinstance(value, str):
+            fields.append(value)
+    text = " ".join(fields + [candidate_text_for_personalization(candidate)]).lower()
+    symbol = str(candidate.get("symbol", "")).strip().upper()
+
+    overseas_tokens = ["overseas", "foreign", "usa", "nasdaq", "nyse", "amex", "해외", "미국"]
+    domestic_tokens = ["domestic", "krx", "kospi", "kosdaq", "한국", "국내"]
+    if any(token in text for token in overseas_tokens):
+        return "overseas"
+    if any(token in text for token in domestic_tokens):
+        return "domestic"
+    if re.fullmatch(r"\d{5,6}", symbol):
+        return "domestic"
+    if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", symbol):
+        return "overseas"
+    return "domestic"
+
+
+def candidate_risk_score_for_personalization(candidate: dict) -> int:
+    for key in ["riskScore", "risk_score", "risk"]:
+        value = candidate.get(key)
+        if isinstance(value, dict):
+            for nested_key in ["score", "total", "riskScore"]:
+                if nested_key in value:
+                    return bounded_int(value.get(nested_key), 0, 100)
+        if value is not None:
+            return bounded_int(value, 0, 100)
+    scores = candidate.get("scores")
+    if isinstance(scores, dict):
+        for key in ["risk", "riskScore"]:
+            if key in scores:
+                return bounded_int(scores.get(key), 0, 100)
+    return 0
+
+
+def personalization_thresholds(settings: dict) -> dict:
+    thresholds = settings.get("thresholds") if isinstance(settings.get("thresholds"), dict) else {}
+    core_min = bounded_int(thresholds.get("coreMinScore", 70), 0, 100)
+    entry_min = bounded_int(thresholds.get("entryMinScore", 78), 0, 100)
+    max_risk = bounded_int(thresholds.get("maxRiskScore", 60), 0, 100)
+    risk_profile = str(settings.get("riskProfile", "neutral") or "neutral").lower()
+    if risk_profile == "conservative":
+        core_min = bounded_int(core_min + 2, 0, 100)
+        entry_min = bounded_int(entry_min + 4, 0, 100)
+        max_risk = bounded_int(max_risk - 8, 0, 100)
+    elif risk_profile == "aggressive":
+        core_min = bounded_int(core_min - 2, 0, 100)
+        entry_min = bounded_int(entry_min - 4, 0, 100)
+        max_risk = bounded_int(max_risk + 10, 0, 100)
+    return {
+        "coreMinScore": core_min,
+        "entryMinScore": entry_min,
+        "maxRiskScore": max_risk,
+        "riskProfile": risk_profile,
+    }
+
+
 def personalize_dashboard_payload(payload: object, user: dict | None) -> object:
     if not user or not isinstance(payload, dict):
         return payload
@@ -4831,6 +4892,13 @@ def personalize_dashboard_payload(payload: object, user: dict | None) -> object:
     watched = set(user_watchlist(str(user.get("id", ""))))
     excluded_symbols = {str(item).upper() for item in settings.get("excludedSymbols", [])}
     excluded_terms = [str(item).lower() for item in settings.get("excludedSectors", []) if str(item).strip()]
+    preferred_terms = [str(item).lower() for item in settings.get("preferredSectors", []) if str(item).strip()]
+    markets = {str(item).lower() for item in settings.get("markets", []) if str(item).strip()}
+    if not markets:
+        markets = {"domestic", "overseas"}
+    thresholds = personalization_thresholds(settings)
+    hidden_by_market = 0
+    hidden_by_exclusion = 0
 
     def is_excluded(candidate: dict) -> bool:
         symbol = str(candidate.get("symbol", "")).upper()
@@ -4839,16 +4907,75 @@ def personalize_dashboard_payload(payload: object, user: dict | None) -> object:
         text = candidate_text_for_personalization(candidate)
         return any(term and term in text for term in excluded_terms)
 
-    candidates = [item for item in cloned.get("candidates", []) if isinstance(item, dict) and not is_excluded(item)]
-    for item in candidates:
-        item["isWatched"] = str(item.get("symbol", "")).upper() in watched
+    def market_visible(candidate: dict) -> bool:
+        return candidate_market_for_personalization(candidate) in markets
+
+    def decorate_candidate(candidate: dict, original_index: int) -> dict:
+        symbol = str(candidate.get("symbol", "")).upper()
+        text = candidate_text_for_personalization(candidate)
+        matched_terms = [term for term in preferred_terms if term and term in text]
+        is_watched = symbol in watched
+        total_score = bounded_int(candidate.get("totalScore", candidate.get("score", 0)), 0, 100)
+        risk_score = candidate_risk_score_for_personalization(candidate)
+        risk_over_limit = max(0, risk_score - thresholds["maxRiskScore"])
+        risk_penalty = min(18, 4 + (risk_over_limit // 2)) if risk_over_limit else 0
+        preferred_boost = min(12, len(matched_terms) * 4)
+        watch_boost = 8 if is_watched else 0
+        personal_score = bounded_int(total_score + preferred_boost + watch_boost - risk_penalty, 0, 100)
+        candidate["isWatched"] = is_watched
+        candidate["personalScore"] = personal_score
+        candidate["personalization"] = {
+            "applied": True,
+            "market": candidate_market_for_personalization(candidate),
+            "watchlisted": is_watched,
+            "preferredMatch": bool(matched_terms),
+            "preferredTerms": matched_terms,
+            "scoreBoost": preferred_boost + watch_boost,
+            "riskPenalty": risk_penalty,
+            "riskBlocked": bool(risk_over_limit),
+            "riskScore": risk_score,
+            "thresholds": thresholds,
+            "originalIndex": original_index,
+        }
+        return candidate
+
+    candidates = []
+    raw_candidates = cloned.get("candidates", [])
+    if not isinstance(raw_candidates, list):
+        raw_candidates = []
+    for index, item in enumerate(raw_candidates):
+        if not isinstance(item, dict):
+            continue
+        if is_excluded(item):
+            hidden_by_exclusion += 1
+            continue
+        if not market_visible(item):
+            hidden_by_market += 1
+            continue
+        candidates.append(decorate_candidate(item, index))
+
+    candidates.sort(
+        key=lambda item: (
+            not bool(item.get("personalization", {}).get("riskBlocked")),
+            bool(item.get("isWatched")),
+            bool(item.get("personalization", {}).get("preferredMatch")),
+            bounded_int(item.get("personalScore", item.get("totalScore", 0)), 0, 100),
+            bounded_int(item.get("totalScore", 0), 0, 100),
+            -int(item.get("personalization", {}).get("originalIndex", 0)),
+        ),
+        reverse=True,
+    )
     cloned["candidates"] = candidates
     selected = cloned.get("selected")
+    visible_by_symbol = {str(item.get("symbol", "")).upper(): item for item in candidates if item.get("symbol")}
     if isinstance(selected, dict):
-        if is_excluded(selected):
+        selected_symbol = str(selected.get("symbol", "")).upper()
+        if selected_symbol in visible_by_symbol:
+            cloned["selected"] = visible_by_symbol[selected_symbol]
+        elif is_excluded(selected) or not market_visible(selected):
             cloned["selected"] = candidates[0] if candidates else None
         else:
-            selected["isWatched"] = str(selected.get("symbol", "")).upper() in watched
+            cloned["selected"] = decorate_candidate(selected, 0)
     elif candidates:
         cloned["selected"] = candidates[0]
     summary = cloned.get("summary")
@@ -4858,13 +4985,27 @@ def personalize_dashboard_payload(payload: object, user: dict | None) -> object:
     summary["candidateCount"] = len(candidates)
     summary["watchedCount"] = sum(1 for item in candidates if item.get("isWatched"))
     summary["personalized"] = True
-    summary["excludedByUser"] = len(payload.get("candidates", [])) - len(candidates)
+    summary["excludedByUser"] = hidden_by_exclusion
+    summary["hiddenByMarket"] = hidden_by_market
+    summary["preferredMatchCount"] = sum(
+        1 for item in candidates if item.get("personalization", {}).get("preferredMatch")
+    )
+    summary["riskBlockedCount"] = sum(
+        1 for item in candidates if item.get("personalization", {}).get("riskBlocked")
+    )
+    summary["personalRiskProfile"] = thresholds["riskProfile"]
+    summary["personalThresholds"] = thresholds
     cloned["personalization"] = {
         "enabled": True,
         "user": {"email": user.get("email"), "displayName": user.get("displayName", "")},
         "markets": settings.get("markets", []),
+        "preferredSectors": settings.get("preferredSectors", []),
         "riskProfile": settings.get("riskProfile", "neutral"),
+        "thresholds": thresholds,
         "excludedSymbols": settings.get("excludedSymbols", []),
+        "excludedSectors": settings.get("excludedSectors", []),
+        "hiddenByMarket": hidden_by_market,
+        "hiddenByExclusion": hidden_by_exclusion,
         "watchlistCount": len(watched),
     }
     return cloned
