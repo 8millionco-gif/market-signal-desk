@@ -3122,11 +3122,42 @@ function cardForElement(element) {
   return element?.closest?.(".compact-section") ?? null;
 }
 
+function setCardHidden(element, hidden) {
+  const card = cardForElement(element);
+  if (card) card.hidden = Boolean(hidden);
+}
+
 function moveSettingsCard(targetPanel, element) {
   const card = cardForElement(element);
   if (targetPanel && card && card.parentElement !== targetPanel) {
     targetPanel.appendChild(card);
   }
+}
+
+function diagnosticsUnlocked() {
+  return !state.authEnabled || (Boolean(state.adminToken) && !state.authRequired);
+}
+
+function ensureDiagnosticsLockNotice(panel) {
+  if (!panel) return null;
+  let notice = panel.querySelector("[data-diagnostics-lock-notice]");
+  if (!notice) {
+    notice = document.createElement("section");
+    notice.className = "compact-section";
+    notice.dataset.diagnosticsLockNotice = "true";
+    panel.insertBefore(notice, panel.firstChild);
+  }
+  notice.innerHTML = `
+    <div class="section-title">
+      <p class="eyebrow">운영 진단</p>
+      <h2>관리자 확인 필요</h2>
+    </div>
+    <div class="settings-note">
+      <strong>운영/개발 진단은 관리자 토큰 입력 후 표시됩니다.</strong>
+      <span>일반 화면은 투자 후보, 가격, 판단, 다음 행동 중심으로 유지합니다.</span>
+    </div>
+  `;
+  return notice;
 }
 
 function arrangeSettingsTabs() {
@@ -3137,6 +3168,9 @@ function arrangeSettingsTabs() {
     connections: document.querySelector('[data-settings-panel="connections"]'),
     diagnostics: document.querySelector('[data-settings-panel="diagnostics"]')
   };
+  const unlocked = diagnosticsUnlocked();
+  const lockNotice = ensureDiagnosticsLockNotice(panels.diagnostics);
+  if (lockNotice) lockNotice.hidden = unlocked;
   moveSettingsCard(panels.personal, els.principles);
   moveSettingsCard(panels.personal, els.metricCandidates);
   moveSettingsCard(panels.alerts, els.notificationStatus);
@@ -3146,6 +3180,14 @@ function arrangeSettingsTabs() {
   moveSettingsCard(panels.connections, els.newsStatus);
   moveSettingsCard(panels.connections, els.openaiStatus);
   [
+    els.principles,
+    els.metricCandidates,
+    els.notificationStatus,
+    els.marketStatus,
+    els.tossStatus,
+    els.dartStatus,
+    els.newsStatus,
+    els.openaiStatus,
     els.authStatus,
     els.schedulerStatus,
     els.discoveryBotStatus,
@@ -3157,7 +3199,24 @@ function arrangeSettingsTabs() {
     els.evidenceStatus,
     els.stockMasterStatus,
     els.networkStatus
-  ].forEach((element) => moveSettingsCard(panels.diagnostics, element));
+  ].forEach((element) => setCardHidden(element, false));
+  const diagnosticElements = [
+    els.authStatus,
+    els.schedulerStatus,
+    els.discoveryBotStatus,
+    els.readinessStatus,
+    els.livePriceStatus,
+    els.candidatePoolStatus,
+    els.snapshotHistory,
+    els.storageStatus,
+    els.evidenceStatus,
+    els.stockMasterStatus,
+    els.networkStatus
+  ];
+  diagnosticElements.forEach((element) => moveSettingsCard(panels.diagnostics, element));
+  diagnosticElements
+    .filter((element) => element !== els.authStatus)
+    .forEach((element) => setCardHidden(element, !unlocked));
 }
 
 function showSettingsTab(tab) {
@@ -3440,6 +3499,7 @@ function saveAdminToken(token) {
   state.authRequired = false;
   writeStoredValue("marketSignalAdminToken", trimmed);
   renderAuthStatus();
+  renderSettingsTabs();
   loadDashboard();
 }
 
@@ -3448,6 +3508,7 @@ function clearAdminToken() {
   state.authRequired = state.authEnabled;
   removeStoredValue("marketSignalAdminToken");
   renderAuthStatus();
+  renderSettingsTabs();
   if (state.authEnabled && !state.authReadOnlyPublic) {
     renderAuthGate();
   } else {
@@ -3465,6 +3526,7 @@ function promptAdminToken() {
 function renderAuthGate() {
   state.authRequired = true;
   renderAuthStatus();
+  renderSettingsTabs();
   els.candidateCount.textContent = "보호됨";
   if (els.candidateSource) els.candidateSource.textContent = "관리자 토큰 필요";
   renderCandidateSourceDetail([
