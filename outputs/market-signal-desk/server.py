@@ -2844,6 +2844,8 @@ def market_data_latest_status(fast: bool = False) -> dict:
         "lastGoodPriceCount": last_good_price_count,
         "closedBaselinePriceCount": closed_baseline_price_count,
         "dataWaitPriceCount": basis_counts.get("data_wait", 0),
+        "rawDataWaitPriceCount": basis_counts.get("data_wait", 0),
+        "diagnosticDataWaitPriceCount": basis_counts.get("data_wait", 0),
         "missingPriceValueCount": missing_price_value_count,
         "missingPriceTimestampCount": missing_price_timestamp_count,
         "missingFieldCounts": missing_field_counts,
@@ -2877,6 +2879,8 @@ def market_data_latest_status(fast: bool = False) -> dict:
             "lastGoodPriceCount": last_good_price_count,
             "stalePriceCount": stale_price_count,
             "dataWaitPriceCount": basis_counts.get("data_wait", 0),
+            "rawDataWaitPriceCount": basis_counts.get("data_wait", 0),
+            "diagnosticDataWaitPriceCount": basis_counts.get("data_wait", 0),
             "missingPriceValueCount": missing_price_value_count,
             "unknownBasisCount": unknown_basis_count,
             "priceCoverage": price_coverage,
@@ -17122,6 +17126,9 @@ def run_price_collection_cycle(
                 "closedBaselinePriceCount": storage_summary.get("closedBaselinePriceCount", 0),
                 "livePriceCount": storage_summary.get("livePriceCount", 0),
                 "dataWaitPriceCount": storage_summary.get("dataWaitPriceCount", 0),
+                "activeCandidatePriceGapCount": storage_summary.get("activeCandidatePriceGapCount", 0),
+                "rawDataWaitPriceCount": storage_summary.get("rawDataWaitPriceCount", 0),
+                "diagnosticDataWaitPriceCount": storage_summary.get("diagnosticDataWaitPriceCount", 0),
                 "priceCoverage": storage_summary.get("priceCoverage", 0),
                 "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
                 "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
@@ -17264,7 +17271,12 @@ def price_collector_storage_summary(mode: str | None = None, market_status: dict
     closed_count = bounded_int(market_data.get("closedBaselinePriceCount", 0), 0, 1_000_000)
     last_good_count = bounded_int(market_data.get("lastGoodPriceCount", 0), 0, 1_000_000)
     stale_count = bounded_int(market_data.get("stalePriceCount", 0), 0, 1_000_000)
-    data_wait_count = bounded_int(market_data.get("dataWaitPriceCount", 0), 0, 1_000_000)
+    raw_data_wait_count = bounded_int(
+        market_data.get("rawDataWaitPriceCount", market_data.get("dataWaitPriceCount", 0)),
+        0,
+        1_000_000,
+    )
+    active_data_wait_count = max(0, candidate_count - usable_price_count) if candidate_count > 0 else raw_data_wait_count
     unknown_count = bounded_int(market_data.get("unknownBasisCount", 0), 0, 1_000_000)
     denominator = candidate_count if candidate_count > 0 else price_value_count
     coverage = min(1, round(usable_price_count / denominator, 4)) if denominator > 0 else 0
@@ -17285,7 +17297,7 @@ def price_collector_storage_summary(mode: str | None = None, market_status: dict
         state = "last_good_only"
         message = "마지막 정상 가격만 있어 신규 진입 판단은 보류하고 후보는 유지합니다."
         next_action = "가격 수집 봇으로 live 또는 장마감 기준가 재확보"
-    elif data_wait_count > 0 or price_value_count <= 0:
+    elif active_data_wait_count > 0 or price_value_count <= 0:
         state = "data_wait"
         message = "가격 필수값이 부족해 진입 후보가 아니라 데이터 보강 대기 상태입니다."
         next_action = "후보 풀 가격/등락률 수집"
@@ -17305,7 +17317,10 @@ def price_collector_storage_summary(mode: str | None = None, market_status: dict
         "closedBaselinePriceCount": closed_count,
         "lastGoodPriceCount": last_good_count,
         "stalePriceCount": stale_count,
-        "dataWaitPriceCount": data_wait_count,
+        "dataWaitPriceCount": active_data_wait_count,
+        "activeCandidatePriceGapCount": active_data_wait_count,
+        "rawDataWaitPriceCount": raw_data_wait_count,
+        "diagnosticDataWaitPriceCount": raw_data_wait_count,
         "unknownBasisCount": unknown_count,
         "priceCoverage": coverage,
         "priceCoveragePercent": display_percent_abs(Decimal(str(coverage * 100))) if denominator > 0 else "0%",
@@ -17357,6 +17372,9 @@ def price_collector_status() -> dict:
         "closedBaselinePriceCount": storage_summary.get("closedBaselinePriceCount", 0),
         "livePriceCount": storage_summary.get("livePriceCount", 0),
         "dataWaitPriceCount": storage_summary.get("dataWaitPriceCount", 0),
+        "activeCandidatePriceGapCount": storage_summary.get("activeCandidatePriceGapCount", 0),
+        "rawDataWaitPriceCount": storage_summary.get("rawDataWaitPriceCount", 0),
+        "diagnosticDataWaitPriceCount": storage_summary.get("diagnosticDataWaitPriceCount", 0),
         "priceCoverage": storage_summary.get("priceCoverage", 0),
         "priceCoveragePercent": storage_summary.get("priceCoveragePercent", "0%"),
         "nextPriorityRunAt": priority_next,
@@ -18025,10 +18043,26 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     )
     last_good_price_count = bounded_int(market_data.get("lastGoodPriceCount", basis_counts.get("last_good", 0)), 0, 1_000_000)
     unknown_basis_count = bounded_int(market_data.get("unknownBasisCount", basis_counts.get("unknown", 0)), 0, 1_000_000)
-    data_wait_price_count = bounded_int(market_data.get("dataWaitPriceCount", basis_counts.get("data_wait", 0)), 0, 1_000_000)
+    raw_data_wait_price_count = bounded_int(
+        market_data.get("rawDataWaitPriceCount", market_data.get("dataWaitPriceCount", basis_counts.get("data_wait", 0))),
+        0,
+        1_000_000,
+    )
+    active_candidate_price_gap_count = (
+        max(0, stored_candidate_count - usable_price_count)
+        if stored_candidate_count > 0
+        else raw_data_wait_price_count
+    )
+    data_wait_price_count = active_candidate_price_gap_count
     missing_price_value_count = bounded_int(market_data.get("missingPriceValueCount", 0), 0, 1_000_000)
     actionable_live_price_count = bounded_int(market_data.get("actionableLivePriceCount", live_price_count), 0, 1_000_000)
     missing_price_count = bounded_int(market_data.get("missingPriceTimestampCount", 0), 0, 1_000_000)
+    price_readiness = copy.deepcopy(market_data.get("readiness", {})) if isinstance(market_data.get("readiness"), dict) else {}
+    if price_readiness:
+        price_readiness["dataWaitPriceCount"] = data_wait_price_count
+        price_readiness["activeCandidatePriceGapCount"] = active_candidate_price_gap_count
+        price_readiness["rawDataWaitPriceCount"] = raw_data_wait_price_count
+        price_readiness["diagnosticDataWaitPriceCount"] = raw_data_wait_price_count
     price_coverage_denominator = stored_candidate_count if stored_candidate_count > 0 else stored_price_count
     price_coverage = (
         min(1, round(usable_price_count / price_coverage_denominator, 4))
@@ -18115,11 +18149,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "lastGoodPriceCount": last_good_price_count,
             "unknownBasisCount": unknown_basis_count,
             "dataWaitPriceCount": data_wait_price_count,
+            "activeCandidatePriceGapCount": active_candidate_price_gap_count,
+            "rawDataWaitPriceCount": raw_data_wait_price_count,
+            "diagnosticDataWaitPriceCount": raw_data_wait_price_count,
             "missingPriceValueCount": missing_price_value_count,
             "actionableLivePriceCount": actionable_live_price_count,
             "stalePriceRatio": stale_price_ratio,
             "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
-            "priceReadiness": market_data.get("readiness", {}),
+            "priceReadiness": price_readiness,
             "missingPriceTimestampCount": missing_price_count,
             "latestPriceAt": market_data.get("latestPriceAt", ""),
             "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
@@ -18197,11 +18234,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "lastGoodPriceCount": last_good_price_count,
         "unknownBasisCount": unknown_basis_count,
         "dataWaitPriceCount": data_wait_price_count,
+        "activeCandidatePriceGapCount": active_candidate_price_gap_count,
+        "rawDataWaitPriceCount": raw_data_wait_price_count,
+        "diagnosticDataWaitPriceCount": raw_data_wait_price_count,
         "missingPriceValueCount": missing_price_value_count,
         "actionableLivePriceCount": actionable_live_price_count,
         "stalePriceRatio": stale_price_ratio,
         "stalePricePercent": display_percent_abs(Decimal(str(stale_price_ratio * 100))) if stored_price_count > 0 else "0%",
-        "priceReadiness": market_data.get("readiness", {}),
+        "priceReadiness": price_readiness,
         "missingPriceTimestampCount": missing_price_count,
         "latestPriceAt": market_data.get("latestPriceAt", ""),
         "lastPriceCollectorAt": collector_status.get("lastRun", {}).get("updatedAt", "") if isinstance(collector_status.get("lastRun"), dict) else "",
