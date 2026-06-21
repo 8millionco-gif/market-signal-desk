@@ -6133,9 +6133,44 @@ def market_index_data_from_latest_item(item: dict | None) -> tuple[dict, dict, s
 def market_index_item_has_value(index_item: object) -> bool:
     if not isinstance(index_item, dict):
         return False
-    for key in ("value", "display", "price", "close", "last", "current", "level", "indexValue"):
+    placeholder_markers = (
+        "값 대기",
+        "저장값 대기",
+        "대기",
+        "수집",
+        "대체",
+        "sample",
+        "pending",
+        "wait",
+        "fallback",
+        "unavailable",
+        "unknown",
+        "none",
+        "null",
+    )
+    value_keys = (
+        "value",
+        "display",
+        "price",
+        "close",
+        "last",
+        "current",
+        "level",
+        "indexValue",
+        "closePrice",
+        "lastPrice",
+        "currentPrice",
+        "regularMarketPrice",
+        "tradePrice",
+    )
+    for key in value_keys:
         value = str(index_item.get(key) or "").strip()
-        if value and value != "-":
+        normalized = value.lower()
+        if not value or value == "-":
+            continue
+        if any(marker in normalized for marker in placeholder_markers):
+            continue
+        if re.search(r"\d", value):
             return True
     return False
 
