@@ -294,6 +294,10 @@ SIGNAL_DASHBOARD_ALLOW_GET_REFRESH = os.getenv("SIGNAL_DASHBOARD_ALLOW_GET_REFRE
     "no",
     "off",
 }
+SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS = max(
+    int(os.getenv("SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS", "120")),
+    0,
+)
 SIGNAL_CLOSE_RUN_TIME = os.getenv("SIGNAL_CLOSE_RUN_TIME", "16:40")
 SIGNAL_CLOSE_RUN_WINDOW_MINUTES = int(os.getenv("SIGNAL_CLOSE_RUN_WINDOW_MINUTES", "360"))
 SIGNAL_PREOPEN_RUN_TIME = os.getenv("SIGNAL_PREOPEN_RUN_TIME", "08:40")
@@ -21000,6 +21004,7 @@ def discovery_bot_config_status() -> dict:
         "dashboardStoredDiscoveryFirst": SIGNAL_DASHBOARD_STORED_DISCOVERY_FIRST,
         "dashboardSnapshotOnly": SIGNAL_DASHBOARD_SNAPSHOT_ONLY,
         "dashboardAllowGetRefresh": SIGNAL_DASHBOARD_ALLOW_GET_REFRESH,
+        "dashboardStoredSnapshotMaxAgeSeconds": SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS,
         "candidatePrefetchEnabled": SIGNAL_CANDIDATE_PREFETCH_ENABLED,
         "candidatePrefetchLimit": SIGNAL_CANDIDATE_PREFETCH_LIMIT,
         "candidatePrefetchIntervalSeconds": SIGNAL_CANDIDATE_PREFETCH_INTERVAL_SECONDS,
@@ -21372,45 +21377,88 @@ def lightweight_discovery_dashboard_cache_payload(mode: str, fallback_error: str
     return None, "none"
 
 
+def publish_lightweight_discovery_dashboard_cache(
+    mode: str,
+    trigger: str,
+    fallback_error: str = "",
+    phase: str = "stored",
+) -> dict:
+    """Publish the newest stored DB-backed dashboard without running discovery analysis."""
+    selected_mode = normalize_signal_mode(mode)
+    payload, source = lightweight_discovery_dashboard_cache_payload(
+        selected_mode,
+        fallback_error=fallback_error,
+    )
+    candidate_count = 0
+    updated = False
+    if isinstance(payload, dict):
+        candidates = payload.get("candidates", [])
+        candidate_count = len(candidates) if isinstance(candidates, list) else 0
+        if isinstance(payload.get("summary"), dict):
+            payload["summary"].update({
+                "dashboardCacheUpdateSource": f"discovery-{trigger}-{phase}",
+                "dashboardCacheUpdatePhase": phase,
+                "dashboardCacheBaseSource": source,
+            })
+        updated = write_dashboard_cache_record(
+            selected_mode,
+            payload,
+            source=f"discovery-{trigger}-{phase}",
+        )
+    return {
+        "updated": updated,
+        "source": source,
+        "candidateCount": candidate_count,
+        "phase": phase,
+        "mode": selected_mode,
+    }
+
+
 def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") -> dict:
     selected_mode = discovery_bot_mode(mode)
+    already_running = False
+    latest = None
+    running_phase = "running"
     with DISCOVERY_BOT_LOCK:
         if DISCOVERY_BOT_STATE.get("running"):
+            already_running = True
             latest = discovery_latest_record(False)
-            return {
-                "ok": False,
-                "skipped": True,
-                "message": "발굴 봇이 이미 실행 중입니다.",
-                "phase": DISCOVERY_BOT_STATE.get("phase", "running"),
-                "latest": latest,
-            }
-        DISCOVERY_BOT_STATE["running"] = True
-        started_at = datetime.now(KST).isoformat(timespec="seconds")
-        DISCOVERY_BOT_STATE["lastStartedAt"] = started_at
-        DISCOVERY_BOT_STATE["lastCheckedAt"] = started_at
-        DISCOVERY_BOT_STATE["lastProgressAt"] = started_at
-        DISCOVERY_BOT_STATE["phase"] = "starting"
+            running_phase = DISCOVERY_BOT_STATE.get("phase", "running")
+        else:
+            DISCOVERY_BOT_STATE["running"] = True
+            started_at = datetime.now(KST).isoformat(timespec="seconds")
+            DISCOVERY_BOT_STATE["lastStartedAt"] = started_at
+            DISCOVERY_BOT_STATE["lastCheckedAt"] = started_at
+            DISCOVERY_BOT_STATE["lastProgressAt"] = started_at
+            DISCOVERY_BOT_STATE["phase"] = "starting"
+
+    if already_running:
+        stored_cache_result = publish_lightweight_discovery_dashboard_cache(
+            selected_mode,
+            trigger,
+            fallback_error=f"discovery {trigger} already running",
+            phase="running-stored",
+        )
+        return {
+            "ok": False,
+            "skipped": True,
+            "message": "발굴 봇이 이미 실행 중입니다. 저장된 최신 후보/가격 스냅샷만 갱신했습니다.",
+            "phase": running_phase,
+            "latest": latest,
+            "storedDashboardCache": stored_cache_result,
+        }
 
     try:
         now = datetime.now(KST)
         update_discovery_bot_progress("publishing-stored-dashboard-cache")
-        stored_payload, stored_source = lightweight_discovery_dashboard_cache_payload(
+        stored_cache_result = publish_lightweight_discovery_dashboard_cache(
             selected_mode,
             fallback_error=f"discovery {trigger} running",
+            trigger=trigger,
+            phase="stored",
         )
-        stored_cache_updated = False
-        if stored_payload is not None:
-            if isinstance(stored_payload.get("summary"), dict):
-                stored_payload["summary"].update({
-                    "dashboardCacheUpdateSource": f"discovery-{trigger}-stored",
-                    "dashboardCacheUpdatePhase": "stored",
-                    "dashboardCacheBaseSource": stored_source,
-                })
-            stored_cache_updated = write_dashboard_cache_record(
-                selected_mode,
-                stored_payload,
-                source=f"discovery-{trigger}-stored",
-            )
+        stored_cache_updated = bool(stored_cache_result.get("updated"))
+        stored_source = str(stored_cache_result.get("source") or "none")
 
         update_discovery_bot_progress("building-dashboard")
         payload = dashboard(selected_mode, force_discovery=True)
@@ -21445,6 +21493,7 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
         summary["postPrefetchMerge"] = post_prefetch_status
         summary["storedDashboardCacheUpdated"] = stored_cache_updated
         summary["storedDashboardCacheSource"] = stored_source
+        summary["storedDashboardCacheResult"] = stored_cache_result
         summary["dashboardCacheUpdateSource"] = f"discovery-{trigger}"
         update_discovery_bot_progress("writing-final-dashboard-cache")
         cache_updated = write_dashboard_cache_record(
@@ -22421,6 +22470,97 @@ def stored_candidate_pool_dashboard_payload(mode: str, fallback_error: str = "")
     return ensure_dashboard_market_snapshot(payload, mode)
 
 
+def dashboard_cache_age_seconds(payload: dict | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    cache = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+    timestamp = str(cache.get("createdAt") or payload.get("generatedAt") or "").strip()
+    if not timestamp:
+        return None
+    return seconds_since_timestamp(timestamp)
+
+
+def stored_snapshot_dashboard_payload(mode: str, fallback_error: str = "") -> tuple[dict, str] | None:
+    selected_mode = normalize_signal_mode(mode)
+    candidate_data_payload = stored_candidate_data_dashboard_payload(
+        selected_mode,
+        fallback_error=fallback_error,
+    )
+    if candidate_data_payload is not None:
+        return candidate_data_payload, "candidate_data_snapshots"
+
+    candidate_pool_payload = stored_candidate_pool_dashboard_payload(
+        selected_mode,
+        fallback_error=fallback_error,
+    )
+    if candidate_pool_payload is not None:
+        return candidate_pool_payload, "candidate_pool"
+
+    market_payload = dashboard_payload_from_market_data_latest_store(selected_mode)
+    if market_payload is not None:
+        payload, source = market_payload
+        if isinstance(payload.get("cache"), dict):
+            payload["cache"]["fallbackError"] = fallback_error
+        return payload, source
+
+    return None
+
+
+def dashboard_snapshot_payload(
+    mode: str,
+    fallback_error: str = "",
+    include_discovery: bool = False,
+) -> dict | None:
+    selected_mode = normalize_signal_mode(mode)
+    cached_payload = cached_dashboard_payload(
+        selected_mode,
+        fallback_error=fallback_error,
+        include_discovery=include_discovery,
+    )
+    if cached_payload is not None:
+        cache_age = dashboard_cache_age_seconds(cached_payload)
+        cache_is_fresh = (
+            SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS == 0
+            or cache_age is None
+            or cache_age <= SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS
+        )
+        if cache_is_fresh:
+            return cached_payload
+
+        stored_payload = stored_snapshot_dashboard_payload(
+            selected_mode,
+            fallback_error=fallback_error,
+        )
+        if stored_payload is not None:
+            payload, source = stored_payload
+            cached_cache = cached_payload.get("cache") if isinstance(cached_payload.get("cache"), dict) else {}
+            payload_cache = payload.setdefault("cache", {})
+            if isinstance(payload_cache, dict):
+                payload_cache["staleCacheBypassed"] = True
+                payload_cache["bypassedCacheSource"] = cached_cache.get("source", "")
+                payload_cache["bypassedCacheCreatedAt"] = cached_cache.get("createdAt", "")
+                payload_cache["bypassedCacheAgeSeconds"] = cache_age
+                payload_cache["source"] = source
+                payload_cache["fallbackError"] = fallback_error
+            if isinstance(payload.get("summary"), dict):
+                payload["summary"]["staleDashboardCacheBypassed"] = True
+                payload["summary"]["staleDashboardCacheAgeSeconds"] = cache_age
+                payload["summary"]["staleDashboardCacheSource"] = cached_cache.get("source", "")
+                payload["summary"]["dashboardCacheSource"] = source
+                payload["summary"]["dashboardCacheFallbackError"] = fallback_error
+            return payload
+
+        return cached_payload
+
+    stored_payload = stored_snapshot_dashboard_payload(
+        selected_mode,
+        fallback_error=fallback_error,
+    )
+    if stored_payload is not None:
+        return stored_payload[0]
+    return None
+
+
 def stored_snapshot_unavailable_dashboard_payload(mode: str, fallback_error: str = "") -> dict:
     selected_mode = normalize_signal_mode(mode)
     now_text = datetime.now(KST).isoformat(timespec="seconds")
@@ -23109,10 +23249,10 @@ def live_price_fast_store_payloads() -> dict[str, dict]:
 
 def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None = None) -> tuple[dict, str]:
     if SIGNAL_DASHBOARD_SNAPSHOT_ONLY:
-        cached_payload = cached_dashboard_payload(mode, include_discovery=False)
-        if cached_payload is not None:
-            cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
-            return cached_payload, str(cache.get("source") or "dashboard_cache")
+        snapshot_payload = dashboard_snapshot_payload(mode, include_discovery=False)
+        if snapshot_payload is not None:
+            cache = snapshot_payload.get("cache", {}) if isinstance(snapshot_payload.get("cache"), dict) else {}
+            return snapshot_payload, str(cache.get("source") or "dashboard_snapshot")
         store_payloads = store_payloads if isinstance(store_payloads, dict) else {}
         market_data_payload = store_payloads.get("marketData") if isinstance(store_payloads.get("marketData"), dict) else None
         fallback_payload = dashboard_payload_from_market_data_latest_store(mode, market_data_payload)
@@ -23139,10 +23279,10 @@ def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None =
 
 def dashboard_base_for_live_prices(mode: str) -> tuple[dict, str]:
     if SIGNAL_DASHBOARD_SNAPSHOT_ONLY:
-        cached_payload = cached_dashboard_payload(mode, include_discovery=False)
-        if cached_payload is not None:
-            cache = cached_payload.get("cache", {}) if isinstance(cached_payload.get("cache"), dict) else {}
-            return cached_payload, str(cache.get("source") or "dashboard_cache")
+        snapshot_payload = dashboard_snapshot_payload(mode, include_discovery=False)
+        if snapshot_payload is not None:
+            cache = snapshot_payload.get("cache", {}) if isinstance(snapshot_payload.get("cache"), dict) else {}
+            return snapshot_payload, str(cache.get("source") or "dashboard_snapshot")
         fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
         if fallback_payload is not None:
             return fallback_payload
@@ -24889,88 +25029,41 @@ class AppHandler(BaseHTTPRequestHandler):
             if refresh_blocked:
                 force_refresh = False
             if not force_refresh:
-                cached_payload = cached_dashboard_payload(mode, include_discovery=not snapshot_only)
-                if cached_payload is not None:
+                fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
+                snapshot_payload = dashboard_snapshot_payload(
+                    mode,
+                    fallback_error=fallback_error,
+                    include_discovery=not snapshot_only,
+                )
+                if snapshot_payload is not None:
                     if refresh_blocked:
-                        cached_payload["cache"]["refreshIgnored"] = True
-                        cached_payload["cache"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
-                        if isinstance(cached_payload.get("summary"), dict):
-                            cached_payload["summary"]["refreshIgnored"] = True
-                            cached_payload["summary"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
-                    self.send_dashboard_json(cached_payload)
+                        snapshot_cache = snapshot_payload.setdefault("cache", {})
+                        if isinstance(snapshot_cache, dict):
+                            snapshot_cache["refreshIgnored"] = True
+                            snapshot_cache["refreshIgnoredReason"] = "snapshot-only dashboard mode"
+                        if isinstance(snapshot_payload.get("summary"), dict):
+                            snapshot_payload["summary"]["refreshIgnored"] = True
+                            snapshot_payload["summary"]["refreshIgnoredReason"] = "snapshot-only dashboard mode"
+                    self.send_dashboard_json(snapshot_payload)
                     return
-                if snapshot_only:
-                    fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
-                    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=fallback_error)
-                    if stored_candidate_data_payload is not None:
-                        self.send_dashboard_json(stored_candidate_data_payload)
-                        return
-                    stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=fallback_error)
-                    if stored_pool_payload is not None:
-                        self.send_dashboard_json(stored_pool_payload)
-                        return
-                    fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
-                    if fallback_payload is not None:
-                        fallback_payload[0]["cache"]["fallbackError"] = fallback_error
-                        self.send_dashboard_json(fallback_payload[0])
-                        return
-                    self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
-                    return
-                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode)
-                if stored_candidate_data_payload is not None:
-                    self.send_dashboard_json(stored_candidate_data_payload)
-                    return
-                stored_pool_payload = stored_candidate_pool_dashboard_payload(mode)
-                if stored_pool_payload is not None:
-                    self.send_dashboard_json(stored_pool_payload)
-                    return
-                fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
-                if fallback_payload is not None:
-                    self.send_dashboard_json(fallback_payload[0])
-                    return
-                self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode))
+                self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
                 return
             try:
                 payload = dashboard(mode, force_discovery=force_refresh)
                 write_dashboard_cache_record(mode, payload, source="manual-refresh" if force_refresh else "computed")
                 self.send_dashboard_json(payload)
             except Exception as error:
-                cached_payload = cached_dashboard_payload(
+                fallback_error = str(error)[:240]
+                snapshot_payload = dashboard_snapshot_payload(
                     mode,
-                    fallback_error=str(error)[:240],
+                    fallback_error=fallback_error,
                     include_discovery=not snapshot_only,
                 )
-                if cached_payload is not None:
-                    self.send_dashboard_json(cached_payload)
+                if snapshot_payload is not None:
+                    self.send_dashboard_json(snapshot_payload)
                     return
                 if snapshot_only:
-                    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
-                    if stored_candidate_data_payload is not None:
-                        self.send_dashboard_json(stored_candidate_data_payload)
-                        return
-                    stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
-                    if stored_pool_payload is not None:
-                        self.send_dashboard_json(stored_pool_payload)
-                        return
-                    fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
-                    if fallback_payload is not None:
-                        fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
-                        self.send_dashboard_json(fallback_payload[0])
-                        return
-                    self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=str(error)[:240]))
-                    return
-                stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
-                if stored_candidate_data_payload is not None:
-                    self.send_dashboard_json(stored_candidate_data_payload)
-                    return
-                stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
-                if stored_pool_payload is not None:
-                    self.send_dashboard_json(stored_pool_payload)
-                    return
-                fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
-                if fallback_payload is not None:
-                    fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
-                    self.send_dashboard_json(fallback_payload[0])
+                    self.send_dashboard_json(stored_snapshot_unavailable_dashboard_payload(mode, fallback_error=fallback_error))
                     return
                 raise
             return
