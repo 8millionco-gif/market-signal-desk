@@ -6390,6 +6390,8 @@ def should_use_stored_index_fallback(market: dict, status: dict) -> bool:
     details = market.get("indexDetails") if isinstance(market, dict) else {}
     if not isinstance(details, dict) or not details:
         return True
+    if not market_index_payload_has_values(details):
+        return True
     source = str(status.get("source") or "").strip()
     return source in {"sample", "error", "stored-missing", "unavailable"}
 
@@ -6408,7 +6410,7 @@ def enrich_market_with_last_good_sources(market: dict, index_status: dict | None
 
     if should_use_stored_index_fallback(enriched, resolved_index_status):
         stored_market, stored_status = enrich_market_with_stored_latest_indices(enriched)
-        if stored_status.get("source") == "market-data-latest" and stored_status.get("count", 0):
+        if stored_status.get("source") in {"market-data-latest", "raw-events-latest"} and stored_status.get("count", 0):
             enriched = stored_market
             resolved_index_status = {
                 **stored_status,

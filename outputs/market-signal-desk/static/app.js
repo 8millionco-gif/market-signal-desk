@@ -4470,7 +4470,7 @@ function renderMarket() {
   const indexSource = market.indexSource;
   const indexTimestamp = indexSource?.lastGoodAt || indexSource?.timestamp || "";
   const indexText =
-    indexSource?.source === "index-api" || indexSource?.source === "market-data-latest"
+    indexSource?.source === "index-api" || indexSource?.source === "market-data-latest" || indexSource?.source === "raw-events-latest"
       ? `지수: ${indexSource.provider}${indexTimestamp ? ` · ${indexTimestamp}` : ""}${indexSource.stale ? " · 지연" : ""}`
       : indexSource?.source === "index-api-partial"
         ? `지수: ${indexSource.provider} 일부${indexTimestamp ? ` · ${indexTimestamp}` : ""}`
