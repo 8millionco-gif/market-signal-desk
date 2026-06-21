@@ -6144,6 +6144,92 @@ def market_index_payload_has_values(indices: object) -> bool:
     return isinstance(indices, dict) and any(market_index_item_has_value(item) for item in indices.values())
 
 
+def db_latest_raw_events(source: str, event_type: str, limit: int = 40) -> list[dict]:
+    if not database_storage_enabled() or not ensure_database_schema():
+        return []
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, source, event_type, symbol, query, collected_at, payload
+                    FROM signal_raw_events
+                    WHERE source = %s AND event_type = %s
+                    ORDER BY collected_at DESC
+                    LIMIT %s
+                    """,
+                    (
+                        str(source or "").strip().lower(),
+                        str(event_type or "").strip().lower(),
+                        max(1, min(int(limit or 40), 200)),
+                    ),
+                )
+                rows = cur.fetchall()
+        events: list[dict] = []
+        for row in rows:
+            collected_at = row[5]
+            events.append({
+                "id": row[0],
+                "source": row[1],
+                "eventType": row[2],
+                "symbol": row[3],
+                "query": row[4],
+                "collectedAt": collected_at.isoformat(timespec="seconds") if hasattr(collected_at, "isoformat") else str(collected_at),
+                "payload": row[6] if isinstance(row[6], dict) else {},
+            })
+        set_db_error("")
+        return events
+    except Exception as error:
+        set_db_error(error)
+        return []
+
+
+def file_latest_raw_events(source: str, event_type: str, limit: int = 40) -> list[dict]:
+    existing = safe_read_json_file(RAW_EVENTS_FILE)
+    if isinstance(existing, dict):
+        events = existing.get("events", [])
+    elif isinstance(existing, list):
+        events = existing
+    else:
+        events = []
+    normalized_source = str(source or "").strip().lower()
+    normalized_type = str(event_type or "").strip().lower()
+    filtered = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("source", "")).strip().lower() != normalized_source:
+            continue
+        if str(event.get("eventType", "")).strip().lower() != normalized_type:
+            continue
+        filtered.append(event)
+    return filtered[: max(1, min(int(limit or 40), 200))]
+
+
+def latest_raw_market_index_item() -> tuple[dict | None, dict | None]:
+    events = db_latest_raw_events("market-index", "indices", limit=40)
+    if not events:
+        events = file_latest_raw_events("market-index", "indices", limit=40)
+    latest_good = None
+    latest_good_timestamp = ""
+    latest_attempt = None
+    latest_attempt_timestamp = ""
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        indices, _, timestamp = market_index_data_from_latest_item(event)
+        timestamp = timestamp or str(event.get("updatedAt") or event.get("collectedAt") or "")
+        if latest_attempt is None or timestamp >= latest_attempt_timestamp:
+            latest_attempt = event
+            latest_attempt_timestamp = timestamp
+        if not market_index_payload_has_values(indices):
+            continue
+        if latest_good is None or timestamp >= latest_good_timestamp:
+            latest_good = event
+            latest_good_timestamp = timestamp
+    return latest_good, latest_attempt
+
+
 def latest_good_market_index_item() -> tuple[dict | None, dict | None]:
     data = market_data_latest_data()
     items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
@@ -6174,6 +6260,13 @@ def latest_good_market_index_item() -> tuple[dict | None, dict | None]:
 def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
     enriched = dict(market)
     item, latest_attempt = latest_good_market_index_item()
+    source_label = "market-data-latest"
+    if not item:
+        raw_item, raw_attempt = latest_raw_market_index_item()
+        if raw_item:
+            item = raw_item
+            latest_attempt = raw_attempt or raw_item
+            source_label = "raw-events-latest"
     if not item:
         _, errors, latest_attempt_at = market_index_data_from_latest_item(latest_attempt)
         return enriched, {
@@ -6191,7 +6284,7 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
             enriched[key] = index_item["change"]
     enriched["indexDetails"] = indices
     enriched["indexSource"] = {
-        "source": "market-data-latest",
+        "source": source_label,
         "provider": market_index_provider_label(),
         "count": len(indices),
         "timestamp": latest_timestamp,
@@ -6200,7 +6293,7 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
         "errors": errors,
     }
     return enriched, {
-        "source": "market-data-latest",
+        "source": source_label,
         "enabled": True,
         "provider": market_index_provider_label(),
         "count": len(indices),
@@ -6209,7 +6302,7 @@ def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
         "lastGoodAt": latest_timestamp,
         "stale": True,
         "updatedAt": str(item.get("updatedAt") or item.get("collectedAt") or ""),
-        "message": "DB에 저장된 최신 지수 값을 사용합니다.",
+        "message": "DB에 저장된 최신 지수 값을 사용합니다." if source_label == "market-data-latest" else "DB raw 이벤트의 최신 정상 지수 값을 사용합니다.",
     }
 
 
