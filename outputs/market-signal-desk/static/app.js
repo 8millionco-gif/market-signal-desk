@@ -3249,6 +3249,9 @@ function candidateSourceDetailRows(summary = {}) {
   const cachedAt = cache.createdAt || summary.dashboardCacheCreatedAt || summary.storedDiscoveryCreatedAt || state.dashboard?.generatedAt || "";
   const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
+  const expandedNewsCandidates = Number(summary.expandedNewsPageCandidateCount ?? discovery.expandedNewsPageCandidateCount ?? 0);
+  const expandedNewsPages = Number(summary.expandedNewsPagesPerSymbol ?? discovery.expandedNewsPagesPerSymbol ?? discovery.expandedNewsPages ?? 0);
+  const newsPageFetchCount = Number(summary.newsPageFetchCount ?? discovery.newsPageFetchCount ?? 0);
   const materialPolicy = summary.materialCollectionPolicy && typeof summary.materialCollectionPolicy === "object" ? summary.materialCollectionPolicy : {};
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
   const compressionCounts = summary.candidateCompressionCounts ?? {};
@@ -3277,10 +3280,15 @@ function candidateSourceDetailRows(summary = {}) {
       ? `${timeLabel(live.updatedAt)} · ${live.error ? live.message || "갱신 실패" : live.message || "토스 현재가 반영"}`
       : "대기";
   const basisText = live.updatedAt && !live.error ? liveText : priceText;
+  const expansionText = expandedNewsCandidates > 0
+    ? ` · 확장 ${expandedNewsCandidates}종목${expandedNewsPages ? ` ${expandedNewsPages}p` : ""}`
+    : newsPageFetchCount > 0
+      ? ` · 뉴스 ${newsPageFetchCount}p`
+      : "";
   const materialText = scanned > 0
-    ? `${scanned}종목 점검 · 재료 누적 ${materialNews}건 · 후보 제한 아님`
+    ? `${scanned}종목 점검 · 재료 누적 ${materialNews}건${expansionText} · 후보 제한 아님`
     : materialNews > 0
-      ? `재료 누적 ${materialNews}건 · 후보 제한 아님`
+      ? `재료 누적 ${materialNews}건${expansionText} · 후보 제한 아님`
       : "서버 수집 대기";
   const policyText = materialPolicy.label || "서버가 후보 풀을 계속 넓히는 중";
   return [
@@ -4350,6 +4358,7 @@ function candidateBriefForMain(summary = {}) {
       discovery.materialNewsItemCount ??
       0
   );
+  const expandedNewsCandidates = Number(summary.expandedNewsPageCandidateCount ?? discovery.expandedNewsPageCandidateCount ?? 0);
   const priceText =
     liveCount > 0
       ? `실시간 ${liveCount}`
@@ -4372,7 +4381,7 @@ function candidateBriefForMain(summary = {}) {
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
-    materialNews ? `재료 누적 ${materialNews}` : "",
+    materialNews ? `재료 누적 ${materialNews}${expandedNewsCandidates ? ` · 확장 ${expandedNewsCandidates}` : ""}` : "",
     priceText
   ].filter(Boolean).join(" · ");
   return {

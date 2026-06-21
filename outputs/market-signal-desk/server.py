@@ -361,7 +361,13 @@ try:
     SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal(os.getenv("SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER", "0.35"))
 except (InvalidOperation, ValueError):
     SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal("0.35")
-SIGNAL_DISCOVERY_NEWS_DISPLAY = int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))
+SIGNAL_DISCOVERY_NEWS_DISPLAY = max(1, min(100, int(os.getenv("SIGNAL_DISCOVERY_NEWS_DISPLAY", "3"))))
+SIGNAL_DISCOVERY_NEWS_PAGES = max(1, min(5, int(os.getenv("SIGNAL_DISCOVERY_NEWS_PAGES", "1"))))
+SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES = max(
+    SIGNAL_DISCOVERY_NEWS_PAGES,
+    min(5, int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES", "2"))),
+)
+SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT = max(0, int(os.getenv("SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT", "120")))
 SIGNAL_DISCOVERY_CACHE_SECONDS = int(os.getenv("SIGNAL_DISCOVERY_CACHE_SECONDS", "600"))
 SIGNAL_DISCOVERY_SYMBOLS = os.getenv("SIGNAL_DISCOVERY_SYMBOLS", "").strip()
 SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED = os.getenv("SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
@@ -16234,7 +16240,21 @@ def discovery_evidence_profile(
     }
 
 
-def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
+def discovery_news_dedupe_key(item: dict) -> str:
+    for key in ("originalUrl", "naverUrl"):
+        value = str(item.get(key, "")).strip().lower()
+        if value:
+            return value
+    title = compact_match_text(str(item.get("title", "")))
+    published_at = str(item.get("publishedAt", ""))[:19]
+    return f"{title}:{published_at}" if title else ""
+
+
+def discovery_news_for_entry(
+    entry: dict,
+    news_pages: int | None = None,
+    expansion_active: bool = False,
+) -> tuple[list[dict], dict]:
     if not (NAVER_LIVE_NEWS and naver_news_config_status()["readyForNews"]):
         return [], {
             "source": "disabled",
@@ -16242,10 +16262,54 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
         }
 
     query = universe_query(entry)
-    payload = fetch_naver_news(query, display=SIGNAL_DISCOVERY_NEWS_DISPLAY, sort="date")
-    normalized = [normalize_news_item(news_item) for news_item in payload.get("items", [])]
-    normalized = [news_item for news_item in normalized if news_item.get("title")]
-    relevant = filter_relevant_news_items(entry, normalized)
+    pages = max(1, min(5, int(news_pages or SIGNAL_DISCOVERY_NEWS_PAGES)))
+    normalized: list[dict] = []
+    page_starts: list[int] = []
+    page_totals: list[int] = []
+    page_displays: list[int] = []
+    errors: list[str] = []
+    raw_item_count = 0
+    raw_total = 0
+
+    for page_index in range(pages):
+        start = 1 + page_index * SIGNAL_DISCOVERY_NEWS_DISPLAY
+        page_starts.append(start)
+        try:
+            payload = fetch_naver_news(
+                query,
+                display=SIGNAL_DISCOVERY_NEWS_DISPLAY,
+                start=start,
+                sort="date",
+            )
+        except Exception as error:
+            errors.append(str(error)[:160])
+            continue
+        raw_total = max(raw_total, bounded_int(payload.get("total", 0), 0, 10_000_000))
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        raw_item_count += len(items)
+        page_totals.append(bounded_int(payload.get("total", 0), 0, 10_000_000))
+        page_displays.append(bounded_int(payload.get("display", len(items)), 0, 100))
+        normalized.extend(
+            normalize_news_item(news_item)
+            for news_item in items
+            if isinstance(news_item, dict)
+        )
+
+    deduped: list[dict] = []
+    seen_keys: set[str] = set()
+    for news_item in normalized:
+        if not news_item.get("title"):
+            continue
+        key = discovery_news_dedupe_key(news_item)
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        deduped.append(news_item)
+
+    relevant = filter_relevant_news_items(entry, deduped)
     relevance_summary = news_relevance_summary(relevant)
     news_storage = write_news_events(
         "naver",
@@ -16254,23 +16318,39 @@ def discovery_news_for_entry(entry: dict) -> tuple[list[dict], dict]:
         query=query,
         metadata={
             "stage": "discovery",
-            "rawTotal": payload.get("total", 0),
-            "rawDisplay": payload.get("display", len(normalized)),
-            "filteredOut": max(0, len(normalized) - len(relevant)),
+            "rawTotal": raw_total,
+            "rawDisplay": len(deduped),
+            "rawItemCount": raw_item_count,
+            "dedupedRawDisplay": len(deduped),
+            "filteredOut": max(0, len(deduped) - len(relevant)),
             "relevanceSummary": relevance_summary,
+            "pages": pages,
+            "pageStarts": page_starts,
+            "pageTotals": page_totals,
+            "pageDisplays": page_displays,
+            "expansionActive": expansion_active,
+            "errors": errors[:3],
         },
     )
     return relevant, {
         "source": "naver",
         "query": query,
         "total": len(relevant),
-        "rawTotal": payload.get("total", 0),
+        "rawTotal": raw_total,
         "display": len(relevant),
-        "rawDisplay": payload.get("display", len(normalized)),
-        "filteredOut": max(0, len(normalized) - len(relevant)),
+        "rawDisplay": len(deduped),
+        "rawItemCount": raw_item_count,
+        "dedupedRawDisplay": len(deduped),
+        "filteredOut": max(0, len(deduped) - len(relevant)),
         "relevanceSummary": relevance_summary,
         "materialNewsCount": relevance_summary.get("material", 0),
         "newsStorage": news_storage,
+        "pages": pages,
+        "pageStarts": page_starts,
+        "pageTotals": page_totals,
+        "pageDisplays": page_displays,
+        "expansionActive": expansion_active,
+        "errors": errors[:3],
     }
 
 
@@ -16352,9 +16432,19 @@ def default_candidate_for_entry(entry: dict, news_items: list[dict], news_status
     }
 
 
-def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], watched: set[str]) -> dict:
+def candidate_from_universe_entry(
+    entry: dict,
+    seed_lookup: dict[str, dict],
+    watched: set[str],
+    news_pages: int | None = None,
+    news_expansion_active: bool = False,
+) -> dict:
     symbol = str(entry.get("symbol", "")).strip().upper()
-    news_items, news_status = discovery_news_for_entry(entry)
+    news_items, news_status = discovery_news_for_entry(
+        entry,
+        news_pages=news_pages,
+        expansion_active=news_expansion_active,
+    )
     base = copy.deepcopy(seed_lookup.get(symbol)) if symbol in seed_lookup else default_candidate_for_entry(entry, news_items, news_status)
     base["aliases"] = unique_texts(
         [
@@ -16391,7 +16481,14 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
             "rawTotal": news_status.get("rawTotal", news_status.get("total", len(news_items))),
             "display": news_status.get("display", len(news_items)),
             "rawDisplay": news_status.get("rawDisplay", news_status.get("display", len(news_items))),
+            "rawItemCount": news_status.get("rawItemCount", news_status.get("rawDisplay", 0)),
+            "dedupedRawDisplay": news_status.get("dedupedRawDisplay", news_status.get("rawDisplay", 0)),
             "filteredOut": news_status.get("filteredOut", 0),
+            "pages": news_status.get("pages", news_pages or SIGNAL_DISCOVERY_NEWS_PAGES),
+            "pageStarts": news_status.get("pageStarts", []),
+            "pageDisplays": news_status.get("pageDisplays", []),
+            "expansionActive": bool(news_status.get("expansionActive")),
+            "errors": news_status.get("errors", []),
             "items": news_items,
             "relevanceSummary": relevance_summary,
             "discovery": True,
@@ -16435,11 +16532,18 @@ def candidate_from_universe_entry(entry: dict, seed_lookup: dict[str, dict], wat
         "score": discovery_score,
         "newsItems": len(news_items),
         "rawNewsItems": bounded_int(news_status.get("rawDisplay", 0), 0, 100),
+        "rawNewsItemCount": bounded_int(news_status.get("rawItemCount", 0), 0, 1_000),
+        "dedupedRawNewsItems": bounded_int(news_status.get("dedupedRawDisplay", news_status.get("rawDisplay", 0)), 0, 1_000),
         "filteredNewsItems": bounded_int(news_status.get("filteredOut", 0), 0, 100),
         "materialNewsItems": material_news,
         "newsRelevanceAverage": relevance_summary.get("averageScore", 0),
         "newsImpactTypes": relevance_summary.get("impactTypes", []),
         "newsTotal": news_total,
+        "newsPages": bounded_int(news_status.get("pages", news_pages or SIGNAL_DISCOVERY_NEWS_PAGES), 1, 5),
+        "newsPageStarts": news_status.get("pageStarts", []),
+        "newsPageDisplays": news_status.get("pageDisplays", []),
+        "newsExpansionActive": bool(news_status.get("expansionActive")),
+        "newsFetchErrors": news_status.get("errors", []),
         "focusWeight": focus,
         "quality": "matched-news" if news_items else ("filtered-news" if no_relevant_live_news else "universe"),
         "evidenceProfile": evidence,
@@ -16801,6 +16905,9 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "scanRotation": SIGNAL_DISCOVERY_SCAN_ROTATION_ENABLED,
             "scanBucket": discovery_scan_bucket(),
             "display": SIGNAL_DISCOVERY_NEWS_DISPLAY,
+            "newsPages": SIGNAL_DISCOVERY_NEWS_PAGES,
+            "expandedNewsPages": SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES,
+            "deepNewsScanLimit": SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT,
             "qualityMinScore": SIGNAL_DISCOVERY_QUALITY_MIN_SCORE,
             "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
             "strongEvidenceScore": SIGNAL_DISCOVERY_STRONG_EVIDENCE_SCORE,
@@ -17571,9 +17678,20 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
     seed_lookup = seed_candidate_by_symbol()
     discovered = []
     errors = []
-    for entry in entries:
+    expansion_active = bool(expansion_profile.get("expansionActive"))
+    for index, entry in enumerate(entries):
         try:
-            discovered.append(candidate_from_universe_entry(entry, seed_lookup, watched))
+            deep_news_scan = expansion_active and index < SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT
+            news_pages = SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES if deep_news_scan else SIGNAL_DISCOVERY_NEWS_PAGES
+            discovered.append(
+                candidate_from_universe_entry(
+                    entry,
+                    seed_lookup,
+                    watched,
+                    news_pages=news_pages,
+                    news_expansion_active=deep_news_scan,
+                )
+            )
         except Exception as error:
             errors.append(str(error)[:160])
 
@@ -17612,6 +17730,20 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         balance_status.get("qualitySelectedReserve", 0),
         0,
         1_000,
+    )
+    expanded_news_candidates = sum(
+        1
+        for item in discovered
+        if bool(item.get("discovery", {}).get("newsExpansionActive"))
+    )
+    news_page_fetch_count = sum(
+        bounded_int(item.get("discovery", {}).get("newsPages", SIGNAL_DISCOVERY_NEWS_PAGES), 1, 5)
+        for item in discovered
+    )
+    news_fetch_error_count = sum(
+        len(item.get("discovery", {}).get("newsFetchErrors", []))
+        for item in discovered
+        if isinstance(item.get("discovery", {}).get("newsFetchErrors", []), list)
     )
     status = {
         "source": source,
@@ -17653,6 +17785,15 @@ def initial_candidates(data: dict, watched: set[str], mode: str = "", force_disc
         "candidatePoolMemoryAppliedCount": pool_memory_status.get("appliedCount", 0),
         "candidatePoolSelectedCount": len(pool_selected),
         "candidatePoolSelectedSymbols": [item.get("symbol", "") for item in pool_selected],
+        "newsDisplayPerPage": SIGNAL_DISCOVERY_NEWS_DISPLAY,
+        "newsPagesPerSymbol": SIGNAL_DISCOVERY_NEWS_PAGES,
+        "expandedNewsPagesPerSymbol": SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES,
+        "deepNewsScanLimit": SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT,
+        "expandedNewsPageCandidateCount": expanded_news_candidates,
+        "newsPageFetchCount": news_page_fetch_count,
+        "newsRawItemCount": sum(bounded_int(item.get("discovery", {}).get("rawNewsItemCount", 0), 0, 1_000) for item in discovered),
+        "newsDedupedItemCount": sum(bounded_int(item.get("discovery", {}).get("dedupedRawNewsItems", 0), 0, 1_000) for item in discovered),
+        "newsFetchErrorCount": news_fetch_error_count,
         **balance_status,
         "newsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in discovered),
         "selectedNewsItemCount": sum(bounded_int(item.get("discovery", {}).get("newsItems", 0), 0, 1_000) for item in selected),
@@ -20094,6 +20235,10 @@ def discovery_bot_config_status() -> dict:
         "coreEntryTarget": SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
         "replacementMinExcluded": SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED,
         "excludedRatioTrigger": float(SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER),
+        "newsDisplay": SIGNAL_DISCOVERY_NEWS_DISPLAY,
+        "newsPages": SIGNAL_DISCOVERY_NEWS_PAGES,
+        "expandedNewsPages": SIGNAL_DISCOVERY_EXPANDED_NEWS_PAGES,
+        "deepNewsScanLimit": SIGNAL_DISCOVERY_DEEP_NEWS_SCAN_LIMIT,
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
         "candidatePoolFile": display_local_path(CANDIDATE_POOL_FILE),
     }
