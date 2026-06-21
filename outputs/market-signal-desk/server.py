@@ -8368,6 +8368,43 @@ def candidate_data_has_change(candidate: dict) -> bool:
     return candidate_change_decimal(candidate) is not None
 
 
+def candidate_market_response_signal(candidate: dict) -> dict:
+    trend = candidate.get("trend", {}) if isinstance(candidate.get("trend"), dict) else {}
+    score_detail = candidate.get("score", {}) if isinstance(candidate.get("score"), dict) else {}
+    reaction = candidate.get("priceReaction", {}) if isinstance(candidate.get("priceReaction"), dict) else {}
+    metrics = reaction.get("metrics", {}) if isinstance(reaction.get("metrics"), dict) else {}
+    signals: list[str] = []
+    sources: list[str] = []
+
+    if metrics.get("volumeConfirmed"):
+        signals.append("거래량")
+        sources.append("price_reaction")
+    if metrics.get("liquidityConfirmed"):
+        signals.append("수급")
+        sources.append("price_reaction")
+
+    volume = display_multiplier_to_decimal(trend.get("volumeSpike"))
+    if volume is not None:
+        if volume >= Decimal("1.5"):
+            signals.append(f"거래량 {volume.quantize(Decimal('0.1'))}배")
+            sources.append("trend_volume")
+        elif volume >= Decimal("1.2"):
+            signals.append(f"거래량 {volume.quantize(Decimal('0.1'))}배 관찰")
+            sources.append("trend_volume")
+
+    score_volume = bounded_int(score_detail.get("volume", 0), 0, 100)
+    if score_volume >= 15:
+        signals.append("거래량 점수 양호")
+        sources.append("score_volume")
+
+    return {
+        "ok": bool(signals),
+        "label": "거래량/수급 반응" if signals else "거래 반응 대기",
+        "signals": unique_texts(signals, limit=5),
+        "sources": unique_texts(sources, limit=5),
+    }
+
+
 def candidate_data_completeness(candidate: dict) -> dict:
     live_price = candidate.get("livePrice", {}) if isinstance(candidate.get("livePrice"), dict) else {}
     live_candles = candidate.get("liveCandles", {}) if isinstance(candidate.get("liveCandles"), dict) else {}
@@ -8393,8 +8430,11 @@ def candidate_data_completeness(candidate: dict) -> dict:
     candle_ok = candidate_data_source_ok(live_candles)
     orderbook_ok = candidate_data_source_ok(live_orderbook)
     trade_ok = candidate_data_source_ok(live_trades)
+    market_response = candidate_market_response_signal(candidate)
+    market_response_ok = bool(market_response.get("ok"))
+    detailed_reaction_ok = bool(candle_ok or orderbook_ok or trade_ok)
     material_ok = news_count > 0 or disclosure_count > 0
-    reaction_ready = False if closed_market_baseline else live_price_ok and change_ok and (candle_ok or orderbook_ok or trade_ok)
+    reaction_ready = False if closed_market_baseline else live_price_ok and change_ok and (detailed_reaction_ok or market_response_ok)
     display_ready = price_ok and change_ok and material_ok
     entry_ready = False if closed_market_baseline else display_ready and reaction_ready
     missing = []
@@ -8404,8 +8444,8 @@ def candidate_data_completeness(candidate: dict) -> dict:
         missing.append("등락률")
     if not material_ok:
         missing.append("뉴스/공시")
-    if not closed_market_baseline and not (candle_ok or orderbook_ok or trade_ok):
-        missing.append("차트/호가/체결")
+    if not closed_market_baseline and not (detailed_reaction_ok or market_response_ok):
+        missing.append("거래량/차트/호가/체결")
     status = "entry_ready" if entry_ready else "display_ready" if display_ready else "collecting"
     return {
         "status": status,
@@ -8419,6 +8459,9 @@ def candidate_data_completeness(candidate: dict) -> dict:
         "candleOk": candle_ok,
         "orderbookOk": orderbook_ok,
         "tradeOk": trade_ok,
+        "marketResponseOk": market_response_ok,
+        "marketResponseSignals": market_response.get("signals", []),
+        "marketResponseSources": market_response.get("sources", []),
         "materialOk": material_ok,
         "reactionReady": reaction_ready,
         "displayReady": display_ready,
@@ -8634,7 +8677,7 @@ def candidate_price_readiness(candidate: dict) -> dict:
     elif display_ready and (status == "closed-baseline" or closed_market_baseline):
         key, label, message = "closed_baseline", "장마감 기준가", "장마감 기준가와 전일 등락률 기준으로 다음 거래일 후보를 평가합니다. 장 시작 후 가격·거래량 반응을 확인합니다."
     elif display_ready:
-        key, label, message = "display_ready", "후보 분석 가능", "가격 기준은 있으나 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
+        key, label, message = "display_ready", "후보 분석 가능", "가격 기준은 있으나 거래량·차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
     elif price_ok and not change_ok:
         key, label, message = "change_wait", "등락률 수집 중", "현재가는 있으나 등락률이 없어 서버 보강 전까지 가격 반응 판단을 보류합니다."
     elif not price_ok:
@@ -8682,7 +8725,7 @@ def candidate_evaluation_mode(candidate: dict) -> dict:
             "key": "display_ready",
             "label": "후보 분석 가능",
             "status": "analysis",
-            "message": "가격과 재료는 확보됐지만 차트·호가·체결 보강 전까지 진입 후보로 올리지 않습니다.",
+            "message": "가격과 재료는 확보됐지만 거래량·차트·호가·체결 보강 전까지 진입 후보로 올리지 않습니다.",
             "tradeEligible": False,
             "rankEligible": True,
         },
@@ -8755,7 +8798,7 @@ def candidate_trade_data_gate(candidate: dict) -> dict:
         reason = "장마감 기준가와 전일 등락률 기준으로 후보를 평가합니다. 장 시작 후 실시간 가격·거래량 반응을 확인합니다."
     elif display_ready:
         label = "반응 검증 대기"
-        reason = "가격과 재료는 확보됐지만 차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
+        reason = "가격과 재료는 확보됐지만 거래량·차트·호가·체결 반응 보강 전까지 진입 후보로 올리지 않습니다."
     else:
         label = str(readiness.get("label") or evaluation.get("label") or "서버 수집 중")
         reason = str(evaluation.get("message") or readiness.get("message") or "필수 데이터를 서버에서 보강 중입니다.")
