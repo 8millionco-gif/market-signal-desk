@@ -332,6 +332,15 @@ SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT = max(
     240,
     SIGNAL_DISCOVERY_SELECTION_LIMIT,
 )
+SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT = max(
+    40,
+    int(os.getenv("SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT", "40")),
+)
+SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT = max(
+    SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT,
+    80,
+    int(os.getenv("SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT", "80")),
+)
 SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET = max(160, int(os.getenv("SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET", "160")))
 SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET = max(20, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET", "20")))
 SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET = max(24, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET", "24")))
@@ -16550,6 +16559,8 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "limit": SIGNAL_AUTO_CANDIDATE_LIMIT,
             "selectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
             "expandedSelectionLimit": expansion_profile.get("expandedSelectionLimit"),
+            "fallbackSelectionLimit": SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT,
+            "expandedFallbackSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT,
             "domesticLimit": SIGNAL_DOMESTIC_CANDIDATE_LIMIT,
             "overseasLimit": SIGNAL_OVERSEAS_CANDIDATE_LIMIT,
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
@@ -16833,7 +16844,12 @@ def balanced_candidate_selection(
 
     fallback_selected = 0
     if not selected and quality_candidates:
-        selected = quality_candidates[: min(selection_limit, 12)]
+        fallback_limit = (
+            SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT
+            if profile.get("expansionActive")
+            else SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT
+        )
+        selected = quality_candidates[: min(selection_limit, fallback_limit)]
         fallback_selected = len(selected)
 
     domestic_selected = sorted(
@@ -16885,6 +16901,11 @@ def balanced_candidate_selection(
         "reserveMinScore": SIGNAL_DISCOVERY_RESERVE_MIN_SCORE,
         "targetCandidateCount": selection_limit,
         "selectionLimit": selection_limit,
+        "fallbackSelectionLimit": (
+            SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT
+            if profile.get("expansionActive")
+            else SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT
+        ),
         "discoveryExpansionActive": bool(profile.get("expansionActive")),
         "discoveryExpansionTrigger": profile.get("expansionTrigger", ""),
         "discoveryExpansionTriggers": profile.get("expansionTriggers", []),
@@ -19745,6 +19766,8 @@ def discovery_bot_config_status() -> dict:
         "expandedMaxSymbols": SIGNAL_DISCOVERY_EXPANDED_MAX_SYMBOLS,
         "selectionLimit": SIGNAL_DISCOVERY_SELECTION_LIMIT,
         "expandedSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
+        "fallbackSelectionLimit": SIGNAL_DISCOVERY_FALLBACK_SELECTION_LIMIT,
+        "expandedFallbackSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_FALLBACK_SELECTION_LIMIT,
         "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
         "visibleDomesticTarget": SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET,
         "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,

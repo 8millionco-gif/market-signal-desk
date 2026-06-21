@@ -256,8 +256,8 @@ const SETTINGS_TAB_COPY = {
   }
 };
 const CANDIDATE_DISPLAY_STICKY_MS = 120000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 12;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 20;
+const CANDIDATE_FEED_VISIBLE_LIMIT = 16;
+const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 28;
 const CANDIDATE_FEED_EXPANDED_LIMIT = 60;
 
 function scoreClass(score) {
@@ -1631,12 +1631,12 @@ function candidateFeedBaseLimit() {
   const target = candidatePoolVisibleTarget(0);
   let limit = state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
   if (expansionActive) {
-    const expansionLimit = state.strategy === "all" ? 24 : 16;
-    const expansionCap = state.strategy === "all" ? 30 : 20;
+    const expansionLimit = state.strategy === "all" ? 32 : 24;
+    const expansionCap = state.strategy === "all" ? 44 : 32;
     limit = Math.max(limit, Math.min(Math.max(target, expansionLimit), expansionCap));
   }
   if (state.strategy === "wait" && expansionActive) {
-    limit = Math.max(limit, 18);
+    limit = Math.max(limit, 24);
   }
   return limit;
 }
