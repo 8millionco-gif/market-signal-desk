@@ -56,6 +56,10 @@ SIGNAL_DB_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("SIGNAL_DB_CONNECT_TIME
 SIGNAL_DB_RETRY_DELAY_SECONDS = max(0.05, float(os.getenv("SIGNAL_DB_RETRY_DELAY_SECONDS", "0.35") or "0.35"))
 SIGNAL_DB_FAILURE_BACKOFF_SECONDS = max(1, int(os.getenv("SIGNAL_DB_FAILURE_BACKOFF_SECONDS", "30") or "30"))
 SIGNAL_DB_REFUSED_BACKOFF_SECONDS = max(5, int(os.getenv("SIGNAL_DB_REFUSED_BACKOFF_SECONDS", "60") or "60"))
+SIGNAL_DB_RECENT_SUCCESS_REFUSED_BACKOFF_SECONDS = max(
+    1,
+    int(os.getenv("SIGNAL_DB_RECENT_SUCCESS_REFUSED_BACKOFF_SECONDS", "5") or "5"),
+)
 SIGNAL_DB_BACKOFF_MAX_SECONDS = max(
     SIGNAL_DB_FAILURE_BACKOFF_SECONDS,
     SIGNAL_DB_REFUSED_BACKOFF_SECONDS,
@@ -620,6 +624,19 @@ def db_failure_backoff_seconds(classification: dict) -> tuple[int, str, int]:
     global DB_CONSECUTIVE_FAILURES, DB_LAST_FAILURE_KIND
     if classification.get("staleConnection"):
         return SIGNAL_DB_STALE_CONNECTION_BACKOFF_SECONDS, "stale", DB_CONSECUTIVE_FAILURES
+    if classification.get("connectionRefused") and database_recently_succeeded():
+        failure_kind = "recent-refused"
+        if DB_LAST_FAILURE_KIND == failure_kind:
+            DB_CONSECUTIVE_FAILURES += 1
+        else:
+            DB_CONSECUTIVE_FAILURES = 1
+            DB_LAST_FAILURE_KIND = failure_kind
+        multiplier = min(4, 2 ** max(0, DB_CONSECUTIVE_FAILURES - 1))
+        return (
+            min(SIGNAL_DB_BACKOFF_MAX_SECONDS, SIGNAL_DB_RECENT_SUCCESS_REFUSED_BACKOFF_SECONDS * multiplier),
+            failure_kind,
+            DB_CONSECUTIVE_FAILURES,
+        )
     failure_kind = "refused" if classification.get("connectionRefused") else "connection"
     base_seconds = (
         SIGNAL_DB_REFUSED_BACKOFF_SECONDS
@@ -864,6 +881,7 @@ def db_connect_with_retry():
             DB_CONSECUTIVE_FAILURES = 0
             DB_LAST_FAILURE_KIND = ""
             DB_LAST_SUCCESS_AT = db_diag_now()
+            set_db_error("")
             return psycopg, Jsonb, conn
         except Exception as error:
             last_error = error
