@@ -1708,10 +1708,10 @@ function candidatePoolVisibleTarget(fallback = 0) {
   const summary = state.dashboard?.summary || {};
   const pool = dashboardCandidatePoolSummary();
   return numericSummaryValue(
+    pool.visibleCandidateTarget,
+    summary.visibleCandidateTarget,
     pool.visibleCandidateCount,
     summary.visibleCandidateCount,
-    pool.poolActiveCount,
-    summary.candidatePoolActiveCount,
     fallback
   );
 }
@@ -1720,6 +1720,7 @@ function candidatePoolDisplaySummary(totalCount = 0) {
   const summary = state.dashboard?.summary || {};
   const pool = dashboardCandidatePoolSummary();
   const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, totalCount);
+  const visibleTarget = candidatePoolVisibleTarget();
   const domesticDb = numericSummaryValue(
     pool.visibleDomesticCount,
     summary.visibleDomesticCandidateCount,
@@ -1737,7 +1738,7 @@ function candidatePoolDisplaySummary(totalCount = 0) {
     summary.excludeCandidateCount,
     summary.excludeCandidateCompressionCount
   );
-  const parts = [`후보 ${visible || totalCount}`];
+  const parts = [`후보 ${visible || totalCount}${visibleTarget ? `/${visibleTarget}` : ""}`];
   if (domesticDb) parts.push(`국내 DB ${domesticDb}`);
   if (poolActive) parts.push(`후보 풀 ${poolActive}`);
   if (excluded) parts.push(`제외 기록 ${excluded}`);
@@ -1748,6 +1749,7 @@ function discoveryTriggerLabel(trigger) {
   const labels = {
     core_entry_shortfall: "핵심·진입 후보 부족",
     entry_empty: "진입 조건 미충족",
+    visible_candidate_shortfall: "실전 후보 보강 중",
     domestic_visible_shortfall: "국내 후보 보강 중",
     pool_active_shortfall: "감시 후보 확장 중",
     high_exclusion_ratio: "제외 기록 대체 중"
@@ -1781,13 +1783,14 @@ function candidateDiscoveryNoticeMarkup() {
   const poolActive = numericSummaryValue(pool.poolActiveCount, summary.candidatePoolActiveCount, summary.candidatePoolCount);
   const poolTarget = numericSummaryValue(pool.poolActiveTarget, summary.discoveryPoolActiveTarget);
   const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, state.dashboard?.candidates?.length);
+  const visibleTarget = candidatePoolVisibleTarget();
   const excluded = numericSummaryValue(pool.excludedHiddenCount, summary.hiddenExcludedCount);
   const active = Boolean(notice.active || pool.expansionActive || summary.discoveryExpansionActive);
   if (core + entry > 0 && !active) return "";
   const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "조건 충족 진입 후보 없음";
   const message = core + entry > 0
     ? (notice.message || `서버가 후보 풀 ${poolActive || "-"}개를 유지하며 추가 후보를 보강합니다.`)
-    : `조건 미달 종목은 후보에서 제외하고 기록으로 보관합니다. 후보 ${visible || 0}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 기록 ${excluded || 0}개`;
+    : `조건 미달 종목은 후보가 아니라 제외 기록으로 분리합니다. 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 후보 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""} · 제외 기록 ${excluded || 0}개`;
   const reason = discoveryNoticeReason(notice);
   return `
     <div class="feed-discovery-notice ${active ? "active" : ""}">
@@ -4289,6 +4292,7 @@ function renderMarket() {
 function candidateBriefForMain(summary = {}) {
   const discovery = state.dashboard?.integrations?.discovery ?? {};
   const cache = state.dashboard?.cache ?? {};
+  const pool = dashboardCandidatePoolSummary();
   const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
   const sourceLabel = candidateSourceLabel(summary);
   const compressionCounts = summary.candidateCompressionCounts ?? {};
@@ -4298,7 +4302,9 @@ function candidateBriefForMain(summary = {}) {
   const coreCount = hasVisibleBasis ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
   const actionCount = hasVisibleBasis ? Number(visibleCounts.action ?? 0) : Number(summary.entryCandidateCount ?? compressionCounts.entry ?? summary.actionCandidateCount ?? compressionCounts.action ?? 0);
   const waitCount = hasVisibleBasis ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
-  const candidateCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
+  const candidateCount = hasVisibleBasis
+    ? visibility.visibleCount
+    : numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, 0);
   const excludedCount = hasVisibleBasis ? visibility.excludedCount : Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
   const storedCount = Number(visibility.storedCount ?? summary.candidateCount ?? 0);
   const liveCount = Number(priceBasis.live ?? 0);
@@ -4345,10 +4351,13 @@ function candidateBriefForMain(summary = {}) {
 
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
+  const pool = dashboardCandidatePoolSummary();
   const visibility = currentCandidateScopeSummary();
   const hasVisibleBasis = visibility.totalCount > 0;
   const visibleCandidates = visibility.visible ?? [];
-  const visibleCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
+  const visibleCount = hasVisibleBasis
+    ? visibility.visibleCount
+    : numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, 0);
   els.candidateCount.textContent = `${visibleCount}개`;
   if (els.candidateSource) {
     const brief = candidateBriefForMain(summary);
@@ -4359,10 +4368,10 @@ function renderMetrics() {
   els.metricCandidates.textContent = visibleCount;
   els.metricHighScore.textContent = hasVisibleBasis
     ? visibleCandidates.filter((item) => Number(item?.totalScore ?? 0) >= 75).length
-    : summary.highScoreCount ?? 0;
+    : numericSummaryValue(pool.coreCount, summary.coreCandidateCount, 0);
   els.metricReady.textContent = hasVisibleBasis
     ? visibleCandidates.filter((item) => Number(item?.triggerReadiness ?? 0) >= 70).length
-    : summary.readyCount ?? 0;
+    : numericSummaryValue(pool.entryCount, summary.entryCandidateCount, summary.actionCandidateCount, 0);
   els.metricWatched.textContent = hasVisibleBasis
     ? visibleCandidates.filter((item) => item?.isWatched).length
     : summary.watchedCount ?? 0;

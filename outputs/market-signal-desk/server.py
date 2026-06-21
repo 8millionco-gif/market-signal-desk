@@ -334,6 +334,7 @@ SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT = max(
 )
 SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET = max(160, int(os.getenv("SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET", "160")))
 SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET = max(20, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET", "20")))
+SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET = max(24, int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET", "24")))
 SIGNAL_DISCOVERY_CORE_ENTRY_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_CORE_ENTRY_TARGET", "3")))
 try:
     SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER = Decimal(os.getenv("SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER", "0.35"))
@@ -16459,8 +16460,6 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         active_pool_count + excluded_count,
     )
     visible_candidate_count = core_count + entry_count + wait_count + portfolio_count
-    if not visible_candidate_count:
-        visible_candidate_count = summary_count_value(summary.get("candidateCount"))
     visible_domestic_count = summary_count_value(
         summary.get("domesticVisibleCandidateCount"),
         summary.get("domesticMainCandidateCount"),
@@ -16481,6 +16480,9 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
     if entry_count <= 0:
         triggers.append("entry_empty")
         reasons.append("진입 후보가 없음")
+    if visible_candidate_count < SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET:
+        triggers.append("visible_candidate_shortfall")
+        reasons.append("실전 표시 후보가 목표보다 적음")
     visible_basis = visible_domestic_count or visible_candidate_count
     if visible_basis and visible_basis < SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET:
         triggers.append("domestic_visible_shortfall")
@@ -16523,6 +16525,7 @@ def discovery_expansion_profile(summary: dict | None = None, pool_status: dict |
         "poolTotalCount": total_pool_count,
         "visibleCandidateCount": visible_candidate_count,
         "activeVisibleCandidateCount": visible_candidate_count,
+        "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
         "visibleDomesticCount": visible_domestic_count,
         "newCandidateCount": new_candidate_count,
         "excludedHiddenCount": excluded_count,
@@ -16552,6 +16555,7 @@ def auto_candidate_cache_key(watched: set[str]) -> str:
             "maxSymbols": SIGNAL_DISCOVERY_MAX_SYMBOLS,
             "expandedMaxSymbols": expansion_profile.get("expandedScanLimit"),
             "poolActiveTarget": expansion_profile.get("poolActiveTarget"),
+            "visibleCandidateTarget": expansion_profile.get("visibleCandidateTarget"),
             "discoveryExpansionActive": expansion_profile.get("expansionActive"),
             "discoveryScanLimit": expansion_profile.get("scanLimit"),
             "poolActiveCount": expansion_profile.get("poolActiveCount"),
@@ -19743,6 +19747,7 @@ def discovery_bot_config_status() -> dict:
         "expandedSelectionLimit": SIGNAL_DISCOVERY_EXPANDED_SELECTION_LIMIT,
         "poolActiveTarget": SIGNAL_DISCOVERY_POOL_ACTIVE_TARGET,
         "visibleDomesticTarget": SIGNAL_DISCOVERY_VISIBLE_DOMESTIC_TARGET,
+        "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
         "coreEntryTarget": SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
         "excludedRatioTrigger": float(SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER),
         "latestFile": display_local_path(DISCOVERY_LATEST_FILE),
