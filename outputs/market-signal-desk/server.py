@@ -18060,7 +18060,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     candidate_data = candidate_data_snapshot_status(fast=fast)
     market_data = market_data_latest_status(fast=fast)
     migration_attempt = None
-    if SIGNAL_STORAGE_STATUS_AUTO_MIGRATE and db_status["enabled"] and db_status["ready"]:
+    storage_status_migration_ready = bool(
+        SIGNAL_STORAGE_STATUS_AUTO_MIGRATE
+        and db_status.get("enabled")
+        and db_status.get("connectionReady")
+        and not db_status.get("transientDegraded")
+        and (not fast or database_fast_read_allowed())
+    )
+    if storage_status_migration_ready:
         needs_file_promotion = any([
             candidate_data.get("readSource") == "filesystem" and bounded_int(candidate_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
             market_data.get("readSource") == "filesystem" and bounded_int(market_data.get("fileItemCount", 0), 0, 1_000_000) > 0,
@@ -18232,6 +18239,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "candidateData": candidate_data,
             "marketData": market_data,
             "migrationAttempt": migration_attempt or {},
+            "migrationReady": storage_status_migration_ready,
             "fast": fast,
             "message": message,
             "error": error,
@@ -18321,6 +18329,7 @@ def snapshot_storage_status(fast: bool = True) -> dict:
         "candidateData": candidate_data,
         "marketData": market_data,
         "migrationAttempt": migration_attempt or {},
+        "migrationReady": storage_status_migration_ready,
         "fast": fast,
         "message": (
             "영구 저장소로 표시되어 있습니다."
