@@ -5977,7 +5977,7 @@ def enrich_market_with_indices(market: dict) -> tuple[dict, dict]:
         write_raw_event(
             "market-index",
             "indices",
-            {"data": payload},
+            payload,
             metadata={"provider": market_index_provider_label(), "count": len(payload.get("indices", {}))},
         )
         indices = payload.get("indices", {})
@@ -6101,26 +6101,94 @@ def latest_market_data_item(source_values: set[str], event_values: set[str]) -> 
     return latest_item
 
 
+def market_index_data_from_latest_item(item: dict | None) -> tuple[dict, dict, str]:
+    if not isinstance(item, dict):
+        return {}, {}, ""
+    payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
+    data_candidates = [payload]
+    payload_data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(payload_data, dict):
+        data_candidates.append(payload_data)
+        nested_data = payload_data.get("data")
+        if isinstance(nested_data, dict):
+            data_candidates.append(nested_data)
+    data = {}
+    for candidate in data_candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("indices"), dict):
+            data = candidate
+            break
+    indices = data.get("indices", {}) if isinstance(data.get("indices"), dict) else {}
+    errors = data.get("errors", {}) if isinstance(data.get("errors"), dict) else {}
+    timestamp = max(
+        [
+            str(index_item.get("timestamp", ""))
+            for index_item in indices.values()
+            if isinstance(index_item, dict) and index_item.get("timestamp")
+        ],
+        default=str(item.get("updatedAt") or item.get("collectedAt") or ""),
+    )
+    return indices, errors, timestamp
+
+
+def market_index_item_has_value(index_item: object) -> bool:
+    if not isinstance(index_item, dict):
+        return False
+    for key in ("value", "display", "price", "close", "last", "current", "level", "indexValue"):
+        value = str(index_item.get(key) or "").strip()
+        if value and value != "-":
+            return True
+    return False
+
+
+def market_index_payload_has_values(indices: object) -> bool:
+    return isinstance(indices, dict) and any(market_index_item_has_value(item) for item in indices.values())
+
+
+def latest_good_market_index_item() -> tuple[dict | None, dict | None]:
+    data = market_data_latest_data()
+    items = data.get("items", {}) if isinstance(data.get("items"), dict) else {}
+    latest_good = None
+    latest_good_timestamp = ""
+    latest_attempt = None
+    latest_attempt_timestamp = ""
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source", "")).strip().lower()
+        event_type = str(item.get("eventType", "")).strip().lower()
+        if source != "market-index" or event_type != "indices":
+            continue
+        indices, _, timestamp = market_index_data_from_latest_item(item)
+        timestamp = timestamp or str(item.get("updatedAt") or item.get("collectedAt") or "")
+        if latest_attempt is None or timestamp >= latest_attempt_timestamp:
+            latest_attempt = item
+            latest_attempt_timestamp = timestamp
+        if not market_index_payload_has_values(indices):
+            continue
+        if latest_good is None or timestamp >= latest_good_timestamp:
+            latest_good = item
+            latest_good_timestamp = timestamp
+    return latest_good, latest_attempt
+
+
 def enrich_market_with_stored_latest_indices(market: dict) -> tuple[dict, dict]:
     enriched = dict(market)
-    item = latest_market_data_item({"market-index"}, {"indices"})
+    item, latest_attempt = latest_good_market_index_item()
     if not item:
+        _, errors, latest_attempt_at = market_index_data_from_latest_item(latest_attempt)
         return enriched, {
             "source": "stored-missing",
             "enabled": MARKET_INDEX_LIVE,
-            "message": "DB에 저장된 지수 최신값이 없어 기존 지수 표시를 유지합니다.",
+            "provider": market_index_provider_label(),
+            "count": 0,
+            "errors": errors,
+            "lastAttemptAt": latest_attempt_at,
+            "message": "DB에 저장된 정상 지수 값이 없어 기존 지수 표시를 유지합니다.",
         }
-    payload = item.get("payload", {}) if isinstance(item.get("payload"), dict) else {}
-    data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
-    indices = data.get("indices", {}) if isinstance(data.get("indices"), dict) else {}
-    errors = data.get("errors", {}) if isinstance(data.get("errors"), dict) else {}
+    indices, errors, latest_timestamp = market_index_data_from_latest_item(item)
     for key, index_item in indices.items():
         if isinstance(index_item, dict) and index_item.get("change"):
             enriched[key] = index_item["change"]
-    latest_timestamp = max(
-        [str(index_item.get("timestamp", "")) for index_item in indices.values() if isinstance(index_item, dict) and index_item.get("timestamp")],
-        default=str(item.get("updatedAt") or item.get("collectedAt") or ""),
-    )
     enriched["indexDetails"] = indices
     enriched["indexSource"] = {
         "source": "market-data-latest",

@@ -289,6 +289,16 @@ function displayChangeText(change) {
   return `${sign}${value}%`;
 }
 
+function displayIndexDetailValue(detail) {
+  if (!detail || typeof detail !== "object") return "";
+  const keys = ["value", "display", "price", "close", "last", "current", "level", "indexValue"];
+  for (const key of keys) {
+    const value = String(detail[key] ?? "").trim();
+    if (value && value !== "-") return value;
+  }
+  return "";
+}
+
 function changeMissingText(item) {
   const livePrice = item?.livePrice ?? {};
   const hasLivePrice = livePrice.source === "toss" && Boolean(livePrice.lastPrice);
@@ -4426,8 +4436,10 @@ function renderNotificationStatus() {
 function marketIndexDisplay(market, key) {
   const detail = market?.indexDetails?.[key] ?? {};
   const change = displayChangeText(detail.change || market?.[key] || "-");
+  const value = displayIndexDetailValue(detail);
+  const hasStoredIndex = Number(market?.indexSource?.count ?? 0) > 0;
   return {
-    value: detail.value || (change && change !== "-" ? "값 대기" : "-"),
+    value: value || (hasStoredIndex ? "저장값 대기" : "-"),
     change
   };
 }
