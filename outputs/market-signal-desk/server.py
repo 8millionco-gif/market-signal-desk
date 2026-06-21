@@ -17871,6 +17871,145 @@ def dashboard(mode: str, force_discovery: bool = False) -> dict:
     return build_dashboard_payload(context)
 
 
+def dashboard_discovery_notice(expansion_summary: dict | None) -> dict:
+    expansion_summary = expansion_summary if isinstance(expansion_summary, dict) else {}
+    return {
+        "active": bool(expansion_summary.get("expansionActive")),
+        "title": expansion_summary.get("title"),
+        "message": expansion_summary.get("message"),
+        "trigger": expansion_summary.get("expansionTrigger"),
+        "triggers": expansion_summary.get("expansionTriggers", []),
+        "reasons": expansion_summary.get("reasons", []),
+        "scanLimit": expansion_summary.get("scanLimit"),
+        "poolActiveTarget": expansion_summary.get("poolActiveTarget"),
+        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
+def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+
+    enriched = copy.deepcopy(payload)
+    candidates = enriched.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+
+    summary = enriched.get("summary", {}) if isinstance(enriched.get("summary"), dict) else {}
+    integrations = enriched.get("integrations", {}) if isinstance(enriched.get("integrations"), dict) else {}
+    selection_status = integrations.get("selection", {}) if isinstance(integrations.get("selection"), dict) else {}
+
+    fallback_selection = price_only_selection_status(candidates, summary, integrations) if candidates else {}
+    compression_counts = (
+        selection_status.get("candidateCompressionCounts")
+        if isinstance(selection_status.get("candidateCompressionCounts"), dict)
+        else summary.get("candidateCompressionCounts")
+    )
+    if not isinstance(compression_counts, dict):
+        compression_counts = fallback_selection.get("candidateCompressionCounts", {})
+    if not isinstance(compression_counts, dict):
+        compression_counts = {}
+
+    pool_status = integrations.get("candidatePool", {}) if isinstance(integrations.get("candidatePool"), dict) else {}
+    if not pool_status:
+        try:
+            pool_status = candidate_pool_summary(fast=True)
+        except Exception:
+            pool_status = {}
+
+    expansion_input = {
+        "candidateCompressionCounts": compression_counts,
+        "coreCandidateCount": summary_count_value(
+            selection_status.get("coreCandidateCount"),
+            summary.get("coreCandidateCount"),
+            fallback_selection.get("candidateCompressionCounts", {}).get("core")
+            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
+            else None,
+        ),
+        "entryCandidateCount": summary_count_value(
+            selection_status.get("entryCandidateCount"),
+            selection_status.get("actionCandidateCount"),
+            summary.get("entryCandidateCount"),
+            summary.get("actionCandidateCount"),
+            fallback_selection.get("candidateCompressionCounts", {}).get("entry")
+            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
+            else None,
+        ),
+        "waitCandidateCount": summary_count_value(
+            selection_status.get("waitCandidateCount"),
+            summary.get("waitCandidateCount"),
+            fallback_selection.get("candidateCompressionCounts", {}).get("wait")
+            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
+            else None,
+        ),
+        "portfolioLinkedCandidateCount": summary_count_value(
+            summary.get("portfolioLinkedCandidateCount"),
+            fallback_selection.get("candidateCompressionCounts", {}).get("portfolio")
+            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
+            else None,
+        ),
+        "excludeCandidateCount": summary_count_value(
+            selection_status.get("excludeCandidateCount"),
+            summary.get("hiddenExcludedCount"),
+            summary.get("excludeCandidateCount"),
+            fallback_selection.get("candidateCompressionCounts", {}).get("exclude")
+            if isinstance(fallback_selection.get("candidateCompressionCounts"), dict)
+            else None,
+        ),
+        "candidateCount": summary_count_value(summary.get("candidateCount"), len(candidates)),
+        "domesticSelected": summary_count_value(summary.get("domesticSelected")),
+        "candidatePoolCount": summary_count_value(summary.get("candidatePoolCount"), pool_status.get("totalCount")),
+        "candidatePoolActiveCount": summary_count_value(summary.get("candidatePoolActiveCount"), pool_status.get("activeCount")),
+        "candidatePoolNewCount": summary_count_value(summary.get("candidatePoolNewCount"), pool_status.get("newCount")),
+        "serverCollectingCount": summary_count_value(
+            selection_status.get("serverCollectingCount"),
+            summary.get("serverCollectingCount"),
+            fallback_selection.get("serverCollectingCount"),
+        ),
+        "priceBasisWaitCount": summary_count_value(
+            selection_status.get("priceBasisWaitCount"),
+            summary.get("priceBasisWaitCount"),
+            fallback_selection.get("priceBasisWaitCount"),
+        ),
+        "changeWaitCount": summary_count_value(
+            selection_status.get("changeWaitCount"),
+            summary.get("changeWaitCount"),
+            fallback_selection.get("changeWaitCount"),
+        ),
+        "unavailableEvaluationCount": summary_count_value(
+            selection_status.get("unavailableEvaluationCount"),
+            summary.get("unavailableEvaluationCount"),
+            fallback_selection.get("unavailableEvaluationCount"),
+        ),
+        "candidatePoolStatusCounts": summary.get("candidatePoolStatusCounts", {}),
+    }
+    expansion_summary = discovery_expansion_profile(expansion_input, pool_status)
+    notice = dashboard_discovery_notice(expansion_summary)
+
+    summary.update({
+        "candidatePoolSummary": expansion_summary,
+        "hiddenExcludedCount": expansion_summary.get("excludedHiddenCount"),
+        "discoveryNotice": notice,
+        "discoveryExpansionActive": expansion_summary.get("expansionActive"),
+        "discoveryExpansionTrigger": expansion_summary.get("expansionTrigger"),
+        "discoveryExpansionReasons": expansion_summary.get("reasons", []),
+        "discoveryScanLimit": expansion_summary.get("scanLimit"),
+        "discoveryExpandedScanLimit": expansion_summary.get("expandedScanLimit"),
+        "candidatePoolActiveTarget": expansion_summary.get("poolActiveTarget"),
+        "visibleCandidateCount": expansion_summary.get("visibleCandidateCount"),
+        "visibleDomesticCandidateCount": expansion_summary.get("visibleDomesticCount"),
+        "newCandidateCount": expansion_summary.get("newCandidateCount"),
+    })
+
+    if pool_status and not integrations.get("candidatePool"):
+        integrations["candidatePool"] = pool_status
+    integrations["candidatePoolExpansion"] = expansion_summary
+    integrations["discoveryNotice"] = notice
+    enriched["summary"] = summary
+    enriched["integrations"] = integrations
+    return enriched
+
+
 def refresh_dashboard_payload_with_latest_candidate_data(payload: dict, mode: str) -> tuple[dict, dict]:
     mode = normalize_signal_mode(mode)
     if not isinstance(payload, dict):
@@ -22487,7 +22626,8 @@ class AppHandler(BaseHTTPRequestHandler):
         )
 
     def send_dashboard_json(self, payload, status: int = 200) -> None:
-        self.send_json(personalize_dashboard_payload(payload, self.current_user()), status)
+        enriched_payload = ensure_dashboard_discovery_expansion_fields(payload)
+        self.send_json(personalize_dashboard_payload(enriched_payload, self.current_user()), status)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
