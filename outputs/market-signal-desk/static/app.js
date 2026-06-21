@@ -139,6 +139,9 @@ const els = {
   signalDetail: document.querySelector("#signalDetail"),
   workspaceView: document.querySelector("#workspaceView"),
   settingsView: document.querySelector("#settingsView"),
+  settingsHeaderEyebrow: document.querySelector("#settingsHeaderEyebrow"),
+  settingsHeaderTitle: document.querySelector("#settingsHeaderTitle"),
+  settingsHeaderDescription: document.querySelector("#settingsHeaderDescription"),
   settingsTabs: document.querySelector("#settingsTabs"),
   settingsTabPanels: document.querySelectorAll("[data-settings-panel]"),
   userAccountStatus: document.querySelector("#userAccountStatus"),
@@ -218,6 +221,34 @@ const LIVE_PRICE_SYMBOL_LIMIT = 80;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
+
+const SETTINGS_TAB_COPY = {
+  personal: {
+    eyebrow: "개인 설정",
+    title: "투자 기준과 계정",
+    description: "관심 시장, 제외 종목, 위험 성향과 후보 기준을 계정별로 저장합니다."
+  },
+  alerts: {
+    eyebrow: "알림 설정",
+    title: "매수 구간과 리스크 알림",
+    description: "신규 시그널, 진입가 도달, 손절 기준 이탈처럼 행동이 필요한 알림만 관리합니다."
+  },
+  connections: {
+    eyebrow: "연결 설정",
+    title: "외부 데이터 연결",
+    description: "Toss, OpenDART, 뉴스, OpenAI 연결 상태를 확인합니다. 상세 운영 진단은 관리자 영역에 둡니다."
+  },
+  diagnostics: {
+    eyebrow: "관리자",
+    title: "운영 진단",
+    description: "DB, 수집 봇, 스케줄러, 저장소 상태를 점검합니다. 일반 투자 화면에는 노출하지 않습니다."
+  },
+  diagnosticsLocked: {
+    eyebrow: "관리자",
+    title: "운영 진단 잠금",
+    description: "운영/개발 진단은 관리자 토큰 입력 후 확인합니다. 개인 투자 설정은 다른 탭에서 계속 사용할 수 있습니다."
+  }
+};
 const CANDIDATE_DISPLAY_STICKY_MS = 60000;
 const CANDIDATE_FEED_VISIBLE_LIMIT = 4;
 const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 5;
@@ -3226,12 +3257,25 @@ function showSettingsTab(tab) {
   renderSettingsTabs();
 }
 
+function updateSettingsHeader(unlocked) {
+  const key = state.settingsTab === "diagnostics" && !unlocked ? "diagnosticsLocked" : state.settingsTab;
+  const copy = SETTINGS_TAB_COPY[key] ?? SETTINGS_TAB_COPY.personal;
+  if (els.settingsHeaderEyebrow) els.settingsHeaderEyebrow.textContent = copy.eyebrow;
+  if (els.settingsHeaderTitle) els.settingsHeaderTitle.textContent = copy.title;
+  if (els.settingsHeaderDescription) els.settingsHeaderDescription.textContent = copy.description;
+}
+
 function renderSettingsTabs() {
   arrangeSettingsTabs();
+  const unlocked = diagnosticsUnlocked();
+  updateSettingsHeader(unlocked);
   els.settingsTabs?.querySelectorAll("[data-settings-tab]").forEach((button) => {
     const active = button.dataset.settingsTab === state.settingsTab;
+    const locked = button.dataset.settingsTab === "diagnostics" && !unlocked;
     button.classList.toggle("active", active);
+    button.classList.toggle("locked", locked);
     button.setAttribute("aria-selected", active ? "true" : "false");
+    button.setAttribute("title", locked ? "관리자 토큰 입력 후 상세 진단을 볼 수 있습니다." : "");
     if (!button.dataset.bound) {
       button.dataset.bound = "1";
       button.addEventListener("click", () => showSettingsTab(button.dataset.settingsTab));
