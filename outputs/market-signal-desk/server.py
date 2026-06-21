@@ -13392,6 +13392,29 @@ def candidate_pool_summary(data: dict | None = None, fast: bool = False) -> dict
         if performance_measured_count
         else Decimal("0")
     )
+    revision_source = {
+        "updatedAt": payload.get("updatedAt", ""),
+        "totalCount": len(items),
+        "activeCount": active_count,
+        "statusCounts": counts,
+        "topCandidates": [
+            {
+                "symbol": record.get("symbol", ""),
+                "stateKey": record.get("stateKey", ""),
+                "score": record.get("score", 0),
+                "peakScore": record.get("peakScore", 0),
+                "readiness": record.get("readiness", 0),
+                "monitorScore": record.get("monitorScore", 0),
+                "reactionGate": record.get("reactionGate", ""),
+                "lastSeenAt": record.get("lastSeenAt", ""),
+            }
+            for record in top_records[:80]
+            if isinstance(record, dict)
+        ],
+    }
+    revision = hashlib.sha256(
+        json.dumps(revision_source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
     return {
         "enabled": SIGNAL_CANDIDATE_POOL_ENABLED,
         "file": display_local_path(CANDIDATE_POOL_FILE),
@@ -13415,6 +13438,7 @@ def candidate_pool_summary(data: dict | None = None, fast: bool = False) -> dict
         "performanceAverageChange": display_decimal_percent(performance_average_change) if performance_measured_count else "-",
         "performanceLatestAt": performance_latest_at,
         "updatedAt": payload.get("updatedAt", ""),
+        "revision": revision,
         "maxItems": SIGNAL_CANDIDATE_POOL_MAX_ITEMS,
         "ttlDays": SIGNAL_CANDIDATE_POOL_TTL_DAYS,
         "demotionConfirmations": max(1, SIGNAL_CANDIDATE_POOL_DEMOTION_CONFIRMATIONS),
@@ -21266,6 +21290,10 @@ def discovery_bot_status() -> dict:
     else:
         next_action = "조건을 통과한 후보가 없어 서버가 후보 풀을 확장하고 있습니다."
     pool_status = {
+        "updatedAt": pool_snapshot.get("updatedAt", ""),
+        "poolUpdatedAt": pool_snapshot.get("updatedAt", ""),
+        "revision": pool_snapshot.get("revision", ""),
+        "poolRevision": pool_snapshot.get("revision", ""),
         "poolCount": pool_total,
         "visibleCandidateCount": visible_total,
         "coreCount": core_count,
@@ -22039,6 +22067,135 @@ def dashboard_cache_record(mode: str) -> dict | None:
     return None
 
 
+def dashboard_revision_candidate_item(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return {}
+    compression = candidate.get("compression") if isinstance(candidate.get("compression"), dict) else {}
+    pool = candidate.get("candidatePool") if isinstance(candidate.get("candidatePool"), dict) else {}
+    decision = candidate.get("finalDecision") if isinstance(candidate.get("finalDecision"), dict) else {}
+    final_plan = candidate.get("tradePlan") if isinstance(candidate.get("tradePlan"), dict) else {}
+    live_price = candidate.get("livePrice") if isinstance(candidate.get("livePrice"), dict) else {}
+    evidence_summary = candidate.get("evidenceSummary") if isinstance(candidate.get("evidenceSummary"), dict) else {}
+    return {
+        "symbol": str(candidate.get("symbol", "")).strip().upper(),
+        "name": str(candidate.get("name", ""))[:80],
+        "score": bounded_int(candidate.get("totalScore", candidate.get("score", 0)), 0, 100),
+        "readiness": bounded_int(candidate.get("triggerReadiness", 0), 0, 100),
+        "confidence": bounded_int(candidate.get("confidenceScore", 0), 0, 100),
+        "evidence": bounded_int(candidate.get("evidenceScore", 0), 0, 100),
+        "reaction": bounded_int(candidate.get("reactionScore", 0), 0, 100),
+        "compression": compression.get("key") or compression.get("tier") or "",
+        "action": decision.get("actionKey") or final_plan.get("actionKey") or candidate.get("finalActionKey", ""),
+        "decision": decision.get("label") or final_plan.get("action") or candidate.get("finalDecisionLabel", ""),
+        "stateKey": pool.get("stateKey") or candidate.get("stateKey", ""),
+        "stateReason": str(pool.get("stateReason") or candidate.get("stateReason", ""))[:160],
+        "qualityGate": candidate.get("qualityGate", ""),
+        "reactionGate": candidate.get("reactionGate", ""),
+        "priceBasis": live_price.get("basis", ""),
+        "sourceCount": bounded_int(candidate.get("sourceCount", 0), 0, 100_000),
+        "newsCount": bounded_int(candidate.get("newsCount", evidence_summary.get("newsCount", 0)), 0, 100_000),
+        "disclosureCount": bounded_int(candidate.get("disclosureCount", evidence_summary.get("disclosureCount", 0)), 0, 100_000),
+    }
+
+
+def dashboard_payload_revision(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    pool_summary = summary.get("candidatePoolSummary") if isinstance(summary.get("candidatePoolSummary"), dict) else {}
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    selected = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
+    source = {
+        "mode": normalize_signal_mode(payload.get("mode") or summary.get("analysisMode") or "auto"),
+        "candidateCount": len(candidates),
+        "selected": str(selected.get("symbol", "")).strip().upper(),
+        "counts": {
+            "candidateCount": summary.get("candidateCount", len(candidates)),
+            "core": summary.get("coreCandidateCount", summary.get("coreCount", "")),
+            "entry": summary.get("entryCandidateCount", summary.get("entryCount", "")),
+            "wait": summary.get("waitCandidateCount", summary.get("waitCount", "")),
+            "portfolio": summary.get("portfolioLinkedCandidateCount", summary.get("portfolioCount", "")),
+            "hiddenExcluded": summary.get("hiddenExcludedCount", ""),
+            "dataWait": summary.get("dataWaitCount", ""),
+        },
+        "candidatePool": {
+            "revision": pool_summary.get("revision", ""),
+            "updatedAt": pool_summary.get("updatedAt", ""),
+            "activeCount": pool_summary.get("activeCount", ""),
+            "statusCounts": pool_summary.get("statusCounts", {}),
+        },
+        "candidates": [
+            dashboard_revision_candidate_item(candidate)
+            for candidate in candidates[:80]
+            if isinstance(candidate, dict)
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def attach_dashboard_revision(payload: dict, source: str = "") -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    revision = dashboard_payload_revision(payload)
+    if not revision:
+        return payload
+    summary = payload.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        payload["summary"] = summary
+    selected_mode = normalize_signal_mode(payload.get("mode") or summary.get("analysisMode") or "auto")
+    snapshot_id = f"{selected_mode}:{revision}"
+    summary["candidateListRevision"] = revision
+    summary["candidateSignalKey"] = snapshot_id
+    summary["snapshotId"] = snapshot_id
+    summary["dashboardRevisionSource"] = source or summary.get("dashboardCacheSource", "") or payload.get("source", "")
+    payload["snapshotId"] = snapshot_id
+    cache = payload.get("cache")
+    if isinstance(cache, dict):
+        cache["revision"] = revision
+        cache["snapshotId"] = snapshot_id
+    return payload
+
+
+def mark_dashboard_cache_bypassed(
+    payload: dict,
+    cached_payload: dict,
+    source: str,
+    fallback_error: str,
+    cache_age: float | None,
+    reason: str,
+) -> dict:
+    cached_cache = cached_payload.get("cache") if isinstance(cached_payload.get("cache"), dict) else {}
+    cached_revision = dashboard_payload_revision(cached_payload)
+    stored_revision = dashboard_payload_revision(payload)
+    payload_cache = payload.setdefault("cache", {})
+    if isinstance(payload_cache, dict):
+        payload_cache["dashboardCacheBypassed"] = True
+        payload_cache["staleCacheBypassed"] = reason == "stale"
+        payload_cache["bypassReason"] = reason
+        payload_cache["bypassedCacheSource"] = cached_cache.get("source", "")
+        payload_cache["bypassedCacheCreatedAt"] = cached_cache.get("createdAt", "")
+        payload_cache["bypassedCacheAgeSeconds"] = cache_age
+        payload_cache["bypassedCacheRevision"] = cached_revision
+        payload_cache["storedDashboardRevision"] = stored_revision
+        payload_cache["source"] = source
+        payload_cache["fallbackError"] = fallback_error
+    summary = payload.setdefault("summary", {})
+    if isinstance(summary, dict):
+        summary["dashboardCacheBypassed"] = True
+        summary["dashboardCacheBypassReason"] = reason
+        summary["staleDashboardCacheBypassed"] = reason == "stale"
+        summary["staleDashboardCacheAgeSeconds"] = cache_age
+        summary["staleDashboardCacheSource"] = cached_cache.get("source", "")
+        summary["dashboardCacheSource"] = source
+        summary["dashboardCacheFallbackError"] = fallback_error
+        summary["cachedDashboardRevision"] = cached_revision
+        summary["storedDashboardRevision"] = stored_revision
+    return attach_dashboard_revision(payload, source=source)
+
+
 def write_dashboard_cache_record(mode: str, dashboard_payload: dict, source: str = "dashboard") -> bool:
     if not isinstance(dashboard_payload, dict) or not dashboard_payload:
         return False
@@ -22049,6 +22206,7 @@ def write_dashboard_cache_record(mode: str, dashboard_payload: dict, source: str
     payload = copy.deepcopy(dashboard_payload)
     payload["mode"] = selected_mode
     payload.pop("cache", None)
+    payload = attach_dashboard_revision(payload, source=source)
     created_at = str(payload.get("generatedAt") or datetime.now(KST).isoformat(timespec="seconds"))
     record = {
         "id": f"{created_at}-{selected_mode}-dashboard-cache",
@@ -22524,8 +22682,6 @@ def dashboard_snapshot_payload(
             or cache_age is None
             or cache_age <= SIGNAL_DASHBOARD_STORED_SNAPSHOT_MAX_AGE_SECONDS
         )
-        if cache_is_fresh:
-            return cached_payload
 
         stored_payload = stored_snapshot_dashboard_payload(
             selected_mode,
@@ -22533,22 +22689,29 @@ def dashboard_snapshot_payload(
         )
         if stored_payload is not None:
             payload, source = stored_payload
-            cached_cache = cached_payload.get("cache") if isinstance(cached_payload.get("cache"), dict) else {}
-            payload_cache = payload.setdefault("cache", {})
-            if isinstance(payload_cache, dict):
-                payload_cache["staleCacheBypassed"] = True
-                payload_cache["bypassedCacheSource"] = cached_cache.get("source", "")
-                payload_cache["bypassedCacheCreatedAt"] = cached_cache.get("createdAt", "")
-                payload_cache["bypassedCacheAgeSeconds"] = cache_age
-                payload_cache["source"] = source
-                payload_cache["fallbackError"] = fallback_error
-            if isinstance(payload.get("summary"), dict):
-                payload["summary"]["staleDashboardCacheBypassed"] = True
-                payload["summary"]["staleDashboardCacheAgeSeconds"] = cache_age
-                payload["summary"]["staleDashboardCacheSource"] = cached_cache.get("source", "")
-                payload["summary"]["dashboardCacheSource"] = source
-                payload["summary"]["dashboardCacheFallbackError"] = fallback_error
-            return payload
+            cached_revision = dashboard_payload_revision(cached_payload)
+            stored_revision = dashboard_payload_revision(payload)
+            if cached_revision != stored_revision:
+                return mark_dashboard_cache_bypassed(
+                    payload,
+                    cached_payload,
+                    source,
+                    fallback_error,
+                    cache_age,
+                    "revision_changed",
+                )
+            if not cache_is_fresh:
+                return mark_dashboard_cache_bypassed(
+                    payload,
+                    cached_payload,
+                    source,
+                    fallback_error,
+                    cache_age,
+                    "stale",
+                )
+
+        if cache_is_fresh:
+            return cached_payload
 
         return cached_payload
 
@@ -22833,7 +22996,10 @@ def ensure_dashboard_market_snapshot(payload: dict, mode: str = "") -> dict:
         "description": "재료 수는 후보 등록 상한이 아니라 DB에 저장된 뉴스·공시·트렌드 근거 누적값입니다.",
         "refreshPolicy": "스케줄러와 수동 발굴이 후보 풀을 계속 넓히고, 화면은 저장 스냅샷을 압축 표시합니다.",
     }
-    return enriched_payload
+    return attach_dashboard_revision(
+        enriched_payload,
+        source=str(summary.get("dashboardCacheSource", "") or enriched_payload.get("source", "")),
+    )
 
 
 def dashboard_payload_from_candidate_data_file(mode: str) -> tuple[dict, str] | None:

@@ -741,6 +741,7 @@ async function loadDashboard(options = {}) {
     renderNewsStatus();
     renderOpenAIStatus();
     renderCandidateSourceDetail();
+    maybeShowSignalUpdate(schedulerStatus, discoveryBotStatus);
   });
 
   let warmCacheRendered = false;
@@ -1484,6 +1485,7 @@ async function refreshLivePrices() {
     requestedCount: symbols.length
   };
   const payload = await safeFetchJson(`/api/dashboard/live-prices?${params.toString()}`, fallback, 12000);
+  maybeShowDashboardSignalUpdate(payload);
   const priceOnlyPayload = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const stableDecisionCount = state.livePrice.stableDecisionCount ?? 0;
   const finalDecisionStabilitySeconds = state.livePrice.finalDecisionStabilitySeconds ?? 0;
@@ -4528,21 +4530,45 @@ function latestDiscoveryRun(status = state.discoveryBotStatus) {
   return status?.state?.lastRun ?? null;
 }
 
+function candidatePoolSignalKey(discoveryStatus = state.discoveryBotStatus) {
+  const pool = discoveryStatus?.candidatePool ?? discoveryStatus?.poolStatus ?? {};
+  const summary = discoveryStatus?.summary ?? {};
+  return [
+    pool.poolRevision ?? pool.revision ?? summary.candidatePoolRevision,
+    pool.poolUpdatedAt ?? pool.updatedAt ?? summary.candidatePoolUpdatedAt,
+    pool.poolActiveCount ?? pool.activeCount,
+    pool.visibleCandidateCount,
+    pool.coreCount,
+    pool.entryCount,
+    pool.waitCount,
+    pool.portfolioCount,
+    pool.hiddenExcludedCount
+  ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "").join(":");
+}
+
 function statusSignalKey(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
   return [
     runSignalKey(latestSchedulerRun(schedulerStatus)),
-    runSignalKey(latestDiscoveryRun(discoveryStatus))
+    runSignalKey(latestDiscoveryRun(discoveryStatus)),
+    candidatePoolSignalKey(discoveryStatus)
   ].filter(Boolean).join("|");
 }
 
 function dashboardSignalKey(dashboard = state.dashboard) {
   const summary = dashboard?.summary ?? {};
-  const value = summary.snapshotId ?? summary.runId ?? summary.generatedAt ?? dashboard?.generatedAt ?? dashboard?.asOf;
+  const value = summary.candidateSignalKey
+    ?? summary.candidateListRevision
+    ?? summary.snapshotId
+    ?? dashboard?.snapshotId
+    ?? summary.runId
+    ?? summary.generatedAt
+    ?? dashboard?.generatedAt
+    ?? dashboard?.asOf;
   return String(value ?? "").trim();
 }
 
 function activeSignalKey() {
-  return statusSignalKey() || dashboardSignalKey();
+  return [statusSignalKey(), dashboardSignalKey()].filter(Boolean).join("|");
 }
 
 function signalUpdateSummary(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
@@ -4582,7 +4608,9 @@ function markCurrentSignalSnapshot() {
 
 function maybeShowSignalUpdate(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
   if (!state.dashboard || state.activity.active) return;
-  const key = statusSignalKey(schedulerStatus, discoveryStatus);
+  const statusKey = statusSignalKey(schedulerStatus, discoveryStatus);
+  const dashboardKey = dashboardSignalKey();
+  const key = [statusKey, dashboardKey].filter(Boolean).join("|");
   if (!key) return;
   if (!state.signalUpdate.currentKey) {
     state.signalUpdate.currentKey = key;
@@ -4593,6 +4621,31 @@ function maybeShowSignalUpdate(schedulerStatus = state.schedulerStatus, discover
   state.signalUpdate.pending = {
     key,
     ...signalUpdateSummary(schedulerStatus, discoveryStatus)
+  };
+  renderSignalUpdateToast();
+}
+
+function maybeShowDashboardSignalUpdate(payload) {
+  if (!state.dashboard || state.activity.active || !payload || typeof payload !== "object") return;
+  const nextDashboardKey = dashboardSignalKey(payload);
+  if (!nextDashboardKey) return;
+  const key = [statusSignalKey(), nextDashboardKey].filter(Boolean).join("|");
+  if (!key) return;
+  if (!state.signalUpdate.currentKey) {
+    state.signalUpdate.currentKey = key;
+    writeStoredValue("marketSignalCurrentSnapshotKey", key);
+    return;
+  }
+  if (key === state.signalUpdate.currentKey || key === state.signalUpdate.dismissedKey) return;
+  const summary = payload.summary ?? {};
+  const count = Number(summary.candidateCount ?? payload.candidates?.length ?? 0);
+  const detail = Number.isFinite(count) && count > 0
+    ? `${modeLabel(payload.mode || state.mode)} · 후보 ${count.toLocaleString("ko-KR")}개 스냅샷이 새로 저장됐습니다 · 클릭 시 목록 반영`
+    : `${modeLabel(payload.mode || state.mode)} · 새 후보 스냅샷이 저장됐습니다 · 클릭 시 목록 반영`;
+  state.signalUpdate.pending = {
+    key,
+    title: "새로운 종목 시그널 발생",
+    detail: shortText(detail, 96)
   };
   renderSignalUpdateToast();
 }
