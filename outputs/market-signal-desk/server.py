@@ -12573,12 +12573,6 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
         elif not trade_gate.get("tradeReady") and hard_exclude:
             tier, label = "exclude", "제외"
             reason = "가격 반응 데이터가 미완성이고 리스크 기준에 걸려 신규 진입 제외"
-        elif not trade_gate.get("tradeReady"):
-            if trade_gate.get("closedBaseline"):
-                tier, label = "wait", "장마감 관찰"
-            else:
-                tier, label = "wait", "보강 대기"
-            reason = f"{trade_gate.get('reason') or price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
         elif id(item) in entry_item_ids:
             tier, label = "entry", "진입"
             reason = "실시간 가격·등락률·거래 반응과 발굴 근거가 함께 확인된 매수 관찰 후보"
@@ -12590,6 +12584,12 @@ def assign_candidate_compression(candidates: list[dict]) -> dict:
                 reason = "발굴 근거와 가격 반응이 동시에 확인된 압축 후보"
             else:
                 reason = "강한 뉴스·공시 근거와 신뢰도 기준으로 우선 추적할 핵심 후보"
+        elif not trade_gate.get("tradeReady"):
+            if trade_gate.get("closedBaseline"):
+                tier, label = "wait", "장마감 관찰"
+            else:
+                tier, label = "wait", "보강 대기"
+            reason = f"{trade_gate.get('reason') or price_readiness['message']} 진입 후보 승격은 가격·등락률·차트/호가/체결 반응 확인 후에만 허용합니다."
         elif hard_exclude:
             tier, label = "exclude", "제외"
             reason = "리스크나 최종 판단 기준으로 오늘 신규 진입 제외"
