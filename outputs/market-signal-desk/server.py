@@ -16556,6 +16556,10 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
     pool_score = bounded_int(pool_memory.get("score", discovery.get("poolScore", 0)), 0, 100)
     hidden = is_hidden_discovery_candidate(candidate)
     watched_hit = symbol in watched
+    reserve_floor = max(35, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE - 10)
+    review_score_floor = max(34, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE - 12)
+    review_evidence_floor = max(32, SIGNAL_DISCOVERY_QUALIFIED_EVIDENCE_SCORE - 20)
+    pool_retain_floor = max(35, SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE - 12)
 
     if evidence_grade == "strong" and score >= SIGNAL_DISCOVERY_RESERVE_MIN_SCORE:
         tier, rank, reason = "primary", 0, "강한 발굴 근거와 투자 재료성 뉴스가 확인된 후보"
@@ -16577,6 +16581,14 @@ def discovery_quality_profile(candidate: dict, watched: set[str]) -> dict:
         tier, rank, reason = "reserve", 1, "테마 가중치가 높아 보조 후보로 유지"
     elif pool_retained and pool_score >= SIGNAL_CANDIDATE_POOL_RETAIN_MIN_SCORE and score >= max(40, SIGNAL_DISCOVERY_RESERVE_MIN_SCORE - 8):
         tier, rank, reason = "reserve", 1, "후보 풀에서 검증 상태가 유지되어 재점검 대상"
+    elif pool_retained and pool_score >= pool_retain_floor and (score >= review_score_floor or evidence_score >= review_evidence_floor):
+        tier, rank, reason = "reserve", 1, "후보 풀에서 관찰 가치가 남아 있어 대기 후보로 재점검"
+    elif hidden and score >= reserve_floor and evidence_score >= review_evidence_floor:
+        tier, rank, reason = "reserve", 1, "숨은 후보 신호가 있어 추가 검증 대기"
+    elif raw_news and filtered and score >= review_score_floor and evidence_score >= review_evidence_floor:
+        tier, rank, reason = "reserve", 1, "검색 뉴스 신호가 있어 관련성 보강 대기"
+    elif focus >= 6 and score >= review_score_floor and evidence_score >= review_evidence_floor:
+        tier, rank, reason = "reserve", 1, "테마·관심 가중치가 있어 확장 후보로 유지"
     elif raw_news and filtered and not news_items:
         tier, rank, reason = "rejected", 3, "검색 뉴스는 있었지만 종목 관련성이 낮음"
     elif evidence_grade == "weak":
@@ -16681,8 +16693,8 @@ def balanced_candidate_selection(
     ]
     domestic = [item for item in selectable if candidate_bucket(item) == "domestic"]
     overseas = [item for item in selectable if candidate_bucket(item) == "overseas"]
-    domestic_all = [item for item in quality_candidates if candidate_bucket(item) == "domestic"]
-    overseas_all = [item for item in quality_candidates if candidate_bucket(item) == "overseas"]
+    domestic_all = [item for item in selectable if candidate_bucket(item) == "domestic"]
+    overseas_all = [item for item in selectable if candidate_bucket(item) == "overseas"]
     selected: list[dict] = []
 
     def add_from_bucket(bucket: list[dict], limit: int, tier: str | None = None) -> None:
