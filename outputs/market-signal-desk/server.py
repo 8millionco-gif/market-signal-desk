@@ -21267,6 +21267,14 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 if snapshot_only:
                     fallback_error = "GET refresh disabled in snapshot-only mode" if refresh_blocked else ""
+                    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=fallback_error)
+                    if stored_candidate_data_payload is not None:
+                        self.send_json(stored_candidate_data_payload)
+                        return
+                    stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=fallback_error)
+                    if stored_pool_payload is not None:
+                        self.send_json(stored_pool_payload)
+                        return
                     fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                     if fallback_payload is not None:
                         fallback_payload[0]["cache"]["fallbackError"] = fallback_error
@@ -21302,6 +21310,14 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json(cached_payload)
                     return
                 if snapshot_only:
+                    stored_candidate_data_payload = stored_candidate_data_dashboard_payload(mode, fallback_error=str(error)[:240])
+                    if stored_candidate_data_payload is not None:
+                        self.send_json(stored_candidate_data_payload)
+                        return
+                    stored_pool_payload = stored_candidate_pool_dashboard_payload(mode, fallback_error=str(error)[:240])
+                    if stored_pool_payload is not None:
+                        self.send_json(stored_pool_payload)
+                        return
                     fallback_payload = dashboard_payload_from_market_data_latest_store(mode)
                     if fallback_payload is not None:
                         fallback_payload[0]["cache"]["fallbackError"] = str(error)[:240]
