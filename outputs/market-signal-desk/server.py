@@ -4111,21 +4111,22 @@ def db_recent_scheduler_runs(limit: int) -> list[dict]:
         return []
 
 
-def db_scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
+def db_scheduled_snapshot_exists(run_date: str, mode: str, run_trigger: str | None = None) -> bool:
     if not ensure_database_schema():
         return False
     try:
         psycopg, _jsonb = psycopg_modules()
+        trigger = str(run_trigger or "scheduled")
         with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT 1
                     FROM signal_snapshots
-                    WHERE mode = %s AND run_trigger = 'scheduled' AND created_at::date = %s::date
+                    WHERE mode = %s AND run_trigger = %s AND created_at::date = %s::date
                     LIMIT 1
                     """,
-                    (mode, run_date),
+                    (mode, trigger, run_date),
                 )
                 row = cur.fetchone()
         set_db_error("")
@@ -17479,10 +17480,20 @@ def minutes_from_hhmm(value: str) -> int | None:
 def scheduler_jobs() -> list[dict]:
     return [
         {
+            "id": "preopen",
+            "mode": "close",
+            "label": "장전 후보 발굴",
+            "time": SIGNAL_PREOPEN_RUN_TIME,
+            "windowMinutes": SIGNAL_PREOPEN_RUN_WINDOW_MINUTES,
+            "description": "장 시작 전 뉴스·공시·전일 기준가로 다음 거래일 후보를 고정합니다.",
+        },
+        {
+            "id": "close",
             "mode": "close",
             "label": "장마감 후보 발굴",
             "time": SIGNAL_CLOSE_RUN_TIME,
             "windowMinutes": SIGNAL_CLOSE_RUN_WINDOW_MINUTES,
+            "description": "정규장 마감 후 장마감 기준가와 당일 재료로 후보를 고정합니다.",
         },
     ]
 
@@ -17521,13 +17532,24 @@ def scheduler_config_status() -> dict:
     }
 
 
-def scheduled_snapshot_exists(run_date: str, mode: str) -> bool:
+def scheduler_job_id(job: dict) -> str:
+    value = str(job.get("id") or job.get("label") or job.get("time") or "snapshot").strip().lower()
+    value = re.sub(r"[^a-z0-9_-]+", "-", value).strip("-")
+    return value or "snapshot"
+
+
+def scheduler_job_trigger(job: dict) -> str:
+    return f"scheduled-{scheduler_job_id(job)}"
+
+
+def scheduled_snapshot_exists(run_date: str, mode: str, run_trigger: str | None = None) -> bool:
     mode = normalize_signal_mode(mode)
+    trigger = run_trigger or "scheduled"
     if database_storage_enabled():
-        exists = db_scheduled_snapshot_exists(run_date, mode)
+        exists = db_scheduled_snapshot_exists(run_date, mode, trigger)
         if exists or not DB_LAST_ERROR:
             return exists
-    return any(RUNS_DIR.glob(f"{run_date}_{mode}_scheduled_*.json"))
+    return any(RUNS_DIR.glob(f"{run_date}_{mode}_{trigger}_*.json"))
 
 
 def job_is_due(job: dict, now: datetime) -> bool:
@@ -17538,7 +17560,7 @@ def job_is_due(job: dict, now: datetime) -> bool:
     window = bounded_int(job.get("windowMinutes", 0), 0, 24 * 60)
     if now_minutes < scheduled_minutes or now_minutes > scheduled_minutes + window:
         return False
-    return not scheduled_snapshot_exists(now.date().isoformat(), str(job.get("mode", "")))
+    return not scheduled_snapshot_exists(now.date().isoformat(), str(job.get("mode", "")), scheduler_job_trigger(job))
 
 
 def scheduled_datetime(job: dict, run_date) -> datetime | None:
@@ -17558,7 +17580,8 @@ def next_scheduler_run(now: datetime | None = None) -> dict:
             continue
         window_minutes = bounded_int(job.get("windowMinutes", 0), 0, 24 * 60)
         window_end = run_at + timedelta(minutes=window_minutes)
-        already_ran_today = scheduled_snapshot_exists(now.date().isoformat(), mode)
+        trigger = scheduler_job_trigger(job)
+        already_ran_today = scheduled_snapshot_exists(now.date().isoformat(), mode, trigger)
         if already_ran_today or now > window_end:
             run_at = scheduled_datetime(job, now.date() + timedelta(days=1))
             already_ran_today = False
@@ -17567,16 +17590,83 @@ def next_scheduler_run(now: datetime | None = None) -> dict:
         due_seconds = max(0, int((run_at - now).total_seconds()))
         status = "ready-now" if SIGNAL_SCHEDULER_ENABLED and due_seconds == 0 and not already_ran_today else "waiting"
         candidates.append({
+            "id": scheduler_job_id(job),
             "mode": mode,
+            "trigger": trigger,
             "label": job.get("label", ""),
+            "description": job.get("description", ""),
             "time": job.get("time", ""),
             "runAt": run_at.isoformat(timespec="seconds"),
             "dueInMinutes": due_seconds // 60,
             "windowMinutes": window_minutes,
+            "alreadyRanToday": already_ran_today,
             "status": status,
         })
     candidates.sort(key=lambda item: item["runAt"])
     return candidates[0] if candidates else {}
+
+
+def scheduler_job_statuses(now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(KST)
+    statuses: list[dict] = []
+    today = now.date()
+    for job in scheduler_jobs():
+        mode = normalize_signal_mode(str(job.get("mode", "")))
+        trigger = scheduler_job_trigger(job)
+        run_at = scheduled_datetime(job, today)
+        if run_at is None:
+            continue
+        window_minutes = bounded_int(job.get("windowMinutes", 0), 0, 24 * 60)
+        window_end = run_at + timedelta(minutes=window_minutes)
+        already_ran_today = scheduled_snapshot_exists(today.isoformat(), mode, trigger)
+        due_now = (
+            SIGNAL_SCHEDULER_ENABLED
+            and not already_ran_today
+            and run_at <= now <= window_end
+        )
+        next_run_at = run_at
+        if already_ran_today or now > window_end:
+            next_run_at = scheduled_datetime(job, today + timedelta(days=1))
+        due_seconds = max(0, int(((next_run_at or run_at) - now).total_seconds()))
+        statuses.append({
+            "id": scheduler_job_id(job),
+            "mode": mode,
+            "trigger": trigger,
+            "label": job.get("label", ""),
+            "description": job.get("description", ""),
+            "time": job.get("time", ""),
+            "windowMinutes": window_minutes,
+            "runAt": run_at.isoformat(timespec="seconds"),
+            "windowEndAt": window_end.isoformat(timespec="seconds"),
+            "nextRunAt": (next_run_at or run_at).isoformat(timespec="seconds"),
+            "dueInMinutes": due_seconds // 60,
+            "alreadyRanToday": already_ran_today,
+            "status": "ready-now" if due_now else "done-today" if already_ran_today else "waiting",
+        })
+    return statuses
+
+
+def discovery_run_timing_status(now: datetime | None = None) -> dict:
+    now = now or datetime.now(KST)
+    with DISCOVERY_BOT_LOCK:
+        state_last_run = DISCOVERY_BOT_STATE.get("lastRun")
+    latest = state_last_run if isinstance(state_last_run, dict) and state_last_run else discovery_latest_record(False)
+    if not isinstance(latest, dict):
+        latest = {}
+    last_at = str(latest.get("createdAt") or latest.get("updatedAt") or latest.get("checkedAt") or "")
+    parsed = parse_iso_datetime(last_at)
+    next_at = ""
+    age_seconds = None
+    if parsed is not None:
+        parsed_kst = parsed.astimezone(KST)
+        age_seconds = max(0, int((now - parsed_kst).total_seconds()))
+        next_at = (parsed_kst + timedelta(seconds=SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS)).isoformat(timespec="seconds")
+    return {
+        "lastDiscoveryRunAt": parsed.astimezone(KST).isoformat(timespec="seconds") if parsed else "",
+        "nextDiscoveryRunAt": next_at,
+        "lastDiscoveryAgeSeconds": age_seconds,
+        "intervalSeconds": SIGNAL_DISCOVERY_BOT_INTERVAL_SECONDS,
+    }
 
 
 def candidate_prefetch_due(now: datetime | None = None) -> bool:
@@ -17744,6 +17834,7 @@ def dashboard_summary(payload: dict) -> dict:
         "blockedSignalCount": summary.get("blockedSignalCount"),
         "coreCandidateCount": summary.get("coreCandidateCount"),
         "reviewCandidateCount": summary.get("reviewCandidateCount"),
+        "entryCandidateCount": summary.get("entryCandidateCount", summary.get("actionCandidateCount")),
         "compressedTopCandidates": summary.get("compressedTopCandidates", []),
         "evidenceStrongCount": summary.get("evidenceStrongCount"),
         "evidenceQualifiedCount": summary.get("evidenceQualifiedCount"),
@@ -17919,10 +18010,57 @@ def discovery_bot_status() -> dict:
             "lastCheckedAt": DISCOVERY_BOT_STATE.get("lastCheckedAt", ""),
             "lastRun": DISCOVERY_BOT_STATE.get("lastRun") or discovery_latest_record(False),
         }
+    latest = discovery_latest_record(False)
+    if not isinstance(latest, dict):
+        latest = {}
+    summary = latest.get("summary", {}) if isinstance(latest.get("summary"), dict) else {}
+    compression_counts = summary.get("candidateCompressionCounts", {}) if isinstance(summary.get("candidateCompressionCounts"), dict) else {}
+    pool_counts = summary.get("candidatePoolStatusCounts", {}) if isinstance(summary.get("candidatePoolStatusCounts"), dict) else {}
+    def summary_count(*values, maximum: int = 1_000_000) -> int:
+        for value in values:
+            if value not in (None, ""):
+                return bounded_int(value, 0, maximum)
+        return 0
+
+    core_count = summary_count(summary.get("coreCandidateCount"), compression_counts.get("core"))
+    entry_count = summary_count(summary.get("actionCandidateCount"), summary.get("entryCandidateCount"), compression_counts.get("action"))
+    wait_count = summary_count(summary.get("waitCandidateCount"), compression_counts.get("wait"))
+    portfolio_count = summary_count(summary.get("portfolioLinkedCandidateCount"), compression_counts.get("portfolio"))
+    exclude_count = summary_count(summary.get("excludeCandidateCount"), compression_counts.get("exclude"))
+    data_wait_count = sum(
+        summary_count(summary.get(key))
+        for key in (
+            "serverCollectingCount",
+            "priceBasisWaitCount",
+            "changeWaitCount",
+            "unavailableEvaluationCount",
+        )
+    )
+    pool_total = summary_count(summary.get("candidatePoolCount"), summary.get("candidatePoolActiveCount"), summary.get("candidateCount"))
+    visible_total = core_count + entry_count + wait_count + portfolio_count
+    expanding = core_count + entry_count <= 0
+    pool_status = {
+        "poolCount": pool_total,
+        "visibleCandidateCount": visible_total,
+        "coreCount": core_count,
+        "entryCount": entry_count,
+        "waitCount": wait_count,
+        "portfolioCount": portfolio_count,
+        "excludeCount": exclude_count,
+        "dataWaitCount": data_wait_count,
+        "statusCounts": pool_counts,
+        "searchExpansionActive": expanding,
+        "message": (
+            "핵심/진입 조건 충족 후보가 없어 서버가 후보 풀을 계속 확장 중입니다."
+            if expanding
+            else "핵심/진입 조건 후보가 감지되어 후보 풀을 유지·검증 중입니다."
+        ),
+    }
     return {
         "config": discovery_bot_config_status(),
         "state": state,
-        "latest": discovery_latest_record(False),
+        "latest": latest,
+        "candidatePool": pool_status,
     }
 
 
@@ -20877,11 +21015,21 @@ def scheduler_status() -> dict:
             "lastCandidatePrefetch": SCHEDULER_STATE.get("lastCandidatePrefetch", {}),
             "lastCandidatePrefetchError": SCHEDULER_STATE.get("lastCandidatePrefetchError", ""),
         }
+    job_statuses = scheduler_job_statuses()
+    timing = discovery_run_timing_status()
+    preopen_job = next((item for item in job_statuses if item.get("id") == "preopen"), {})
+    close_job = next((item for item in job_statuses if item.get("id") == "close"), {})
     return {
         "config": scheduler_config_status(),
         "state": state,
         "priceCollector": price_collector_status(),
         "nextRun": next_scheduler_run(),
+        "jobs": job_statuses,
+        "preopenJob": preopen_job,
+        "closeJob": close_job,
+        "nextDiscoveryRunAt": timing.get("nextDiscoveryRunAt", ""),
+        "lastDiscoveryRunAt": timing.get("lastDiscoveryRunAt", ""),
+        "discoveryIntervalSeconds": timing.get("intervalSeconds"),
         "recentRuns": recent_scheduler_runs(),
     }
 
@@ -20905,7 +21053,7 @@ def scheduler_loop() -> None:
                 try:
                     with SCHEDULER_LOCK:
                         SCHEDULER_STATE["running"] = True
-                    run_signal_snapshot(str(job["mode"]), trigger="scheduled")
+                    run_signal_snapshot(str(job["mode"]), trigger=scheduler_job_trigger(job))
                 except Exception as error:
                     with SCHEDULER_LOCK:
                         SCHEDULER_STATE["lastError"] = str(error)[:240]

@@ -3660,6 +3660,8 @@ function updateModeStatus() {
 
 function triggerLabel(trigger) {
   if (trigger === "scheduled") return "자동";
+  if (trigger === "scheduled-preopen") return "장전 자동";
+  if (trigger === "scheduled-close") return "장마감 자동";
   if (String(trigger ?? "").startsWith("manual")) return "수동";
   return trigger || "-";
 }
@@ -3680,7 +3682,9 @@ function renderSchedulerStatus() {
   const config = status.config ?? {};
   const schedulerState = status.state ?? {};
   const nextRun = status.nextRun ?? {};
-  const jobs = Array.isArray(config.jobs) ? config.jobs : [];
+  const jobs = Array.isArray(status.jobs) && status.jobs.length ? status.jobs : Array.isArray(config.jobs) ? config.jobs : [];
+  const preopenJob = status.preopenJob ?? {};
+  const closeJob = status.closeJob ?? {};
   const recentRuns = Array.isArray(status.recentRuns) ? status.recentRuns : [];
   const performanceUpdate = schedulerState.lastPerformanceUpdate ?? {};
   const candidatePrefetch = schedulerState.lastCandidatePrefetch ?? {};
@@ -3696,8 +3700,20 @@ function renderSchedulerStatus() {
       ? "계산 중"
       : "꺼짐";
   const jobText = jobs.length
-    ? jobs.map((job) => `${modeLabel(job.mode)} ${job.time}`).join(" · ")
+    ? jobs.map((job) => `${job.label || modeLabel(job.mode)} ${job.time}`).join(" · ")
     : "-";
+  const preopenText = preopenJob.time
+    ? `${preopenJob.time} · ${preopenJob.status === "done-today" ? "오늘 완료" : preopenJob.status === "ready-now" ? "실행 가능" : "대기"}`
+    : "미설정";
+  const closeText = closeJob.time
+    ? `${closeJob.time} · ${closeJob.status === "done-today" ? "오늘 완료" : closeJob.status === "ready-now" ? "실행 가능" : "대기"}`
+    : "미설정";
+  const discoveryNextText = status.nextDiscoveryRunAt
+    ? scheduleTimeLabel(status.nextDiscoveryRunAt)
+    : "-";
+  const discoveryLastText = status.lastDiscoveryRunAt
+    ? timeLabel(status.lastDiscoveryRunAt)
+    : "아직 없음";
   const performanceText = performanceUpdate.updatedAt
     ? `${performanceUpdate.updatedCount ?? 0}개 반영 · 승률 ${performanceUpdate.hitRate ?? "-"} · ${timeLabel(performanceUpdate.updatedAt)}`
     : "대기";
@@ -3714,6 +3730,9 @@ function renderSchedulerStatus() {
     ["자동 실행", config.enabled, config.enabled ? "켜짐" : "꺼짐"],
     ["실행 상태", !schedulerState.running && !schedulerState.lastError, schedulerState.running ? "실행 중" : schedulerState.lastError ? "확인 필요" : "대기"],
     ["예약", true, jobText],
+    ["장전 발굴", Boolean(preopenJob.time), preopenText],
+    ["장마감 발굴", Boolean(closeJob.time), closeText],
+    ["발굴 최근/다음", Boolean(status.lastDiscoveryRunAt || status.nextDiscoveryRunAt), `${discoveryLastText} / ${discoveryNextText}`],
     ["다음 실행", Boolean(config.enabled && nextRun?.runAt), nextRunText],
     ["후보 보강", Boolean(config.candidatePrefetchEnabled), prefetchText],
     ["최근 보강", Boolean(prefetchAt && !candidatePrefetch.error), prefetchRunText],
@@ -3765,6 +3784,7 @@ function renderDiscoveryBotStatus() {
   const botState = status.state ?? {};
   const latest = status.latest && Object.keys(status.latest).length ? status.latest : botState.lastRun ?? {};
   const summary = latest.summary ?? {};
+  const pool = status.candidatePool ?? {};
   const topText = snapshotTopText({ summary });
   const pipeline = Array.isArray(summary.pipeline) ? summary.pipeline : [];
   const pipelineText = pipeline.length
@@ -3785,6 +3805,9 @@ function renderDiscoveryBotStatus() {
     ["실행 상태", !botState.running && !botState.lastError, botState.running ? "실행 중" : botState.lastError ? "확인 필요" : "대기"],
     ["주기", Boolean(config.intervalSeconds), config.enabled ? `${intervalMinutes}분마다` : "수동 실행"],
     ["최신 발굴", Boolean(latest.createdAt), latestText],
+    ["후보 풀", Number(pool.poolCount ?? 0) > 0, `${pool.poolCount ?? 0}개 · 표시 ${pool.visibleCandidateCount ?? 0}개`],
+    ["핵심/진입", Number((pool.coreCount ?? 0) + (pool.entryCount ?? 0)) > 0, `핵심 ${pool.coreCount ?? 0} · 진입 ${pool.entryCount ?? 0}`],
+    ["탐색 확장", !pool.searchExpansionActive, pool.searchExpansionActive ? "진행 중" : "일반"],
     ["파이프라인", pipeline.length >= 4, pipelineText],
     ["발굴 근거", evidenceText !== "-", evidenceText],
     ["검증 신호", validationText !== "-", validationText],
@@ -3792,6 +3815,9 @@ function renderDiscoveryBotStatus() {
   ];
   const lastError = botState.lastError
     ? `<div><span>최근 오류</span><strong class="warn">${escapeHtml(botState.lastError)}</strong></div>`
+    : "";
+  const poolMessage = pool.message
+    ? `<div><span>후보 상태</span><strong class="${pool.searchExpansionActive ? "warn" : "ok"}">${escapeHtml(pool.message)}</strong></div>`
     : "";
   els.discoveryBotStatus.innerHTML = `
     ${rows
@@ -3805,6 +3831,7 @@ function renderDiscoveryBotStatus() {
         `;
       })
       .join("")}
+    ${poolMessage}
     ${lastError}
     <div class="schedule-actions">
       <button type="button" data-discovery-action="run">지금 발굴</button>
