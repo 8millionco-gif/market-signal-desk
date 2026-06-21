@@ -222,11 +222,14 @@ const QUICK_SEARCH_PRESETS = [
 
 const DASHBOARD_BROWSER_CACHE_PREFIX = "marketSignalDashboardCache:";
 const DASHBOARD_BROWSER_CACHE_LAST = "marketSignalDashboardCache:last";
+const DASHBOARD_BROWSER_CACHE_MAX_CHARS = 3200000;
+const DASHBOARD_BROWSER_CACHE_CANDIDATE_LIMIT = 60;
 const LIVE_PRICE_MIN_POLL_MS = 5000;
 const LIVE_PRICE_SYMBOL_LIMIT = 80;
 const LIVE_MARKET_DEPTH_REFRESH_EVERY = 0;
 const LIVE_PRICE_RETAIN_SECONDS = 90;
 const LIVE_CHANGE_RETAIN_SECONDS = 180;
+let dashboardBrowserCacheSaveTimer = null;
 
 const SETTINGS_TAB_COPY = {
   personal: {
@@ -353,41 +356,157 @@ function dashboardBrowserCacheKey(mode) {
   return `${DASHBOARD_BROWSER_CACHE_PREFIX}${mode || state.mode || "close"}`;
 }
 
+function dashboardBrowserCacheReadKeys(mode) {
+  const modes = [mode, state.mode, state.autoMode, "intraday", "close", "auto"]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return [...new Set([DASHBOARD_BROWSER_CACHE_LAST, ...modes.map(dashboardBrowserCacheKey)])];
+}
+
+function compactBrowserCacheValue(value, key = "", depth = 0) {
+  if (value == null || typeof value !== "object") {
+    if (typeof value === "string" && value.length > 1200) return `${value.slice(0, 1200)}…`;
+    return value;
+  }
+  if (depth > 7) return undefined;
+  if (Array.isArray(value)) {
+    const lowerKey = key.toLowerCase();
+    const limit = lowerKey === "candidates"
+      ? DASHBOARD_BROWSER_CACHE_CANDIDATE_LIMIT
+      : lowerKey.includes("news") || lowerKey.includes("evidence") || lowerKey.includes("articles")
+        ? 8
+        : lowerKey.includes("history") || lowerKey.includes("chart") || lowerKey.includes("candles")
+          ? 28
+          : 24;
+    return value.slice(0, limit).map((entry) => compactBrowserCacheValue(entry, key, depth + 1));
+  }
+  const heavyKeys = new Set([
+    "raw",
+    "rawData",
+    "debug",
+    "diagnostics",
+    "trace",
+    "logs",
+    "html",
+    "contentHtml",
+    "articleBody",
+    "fullText"
+  ]);
+  const next = {};
+  Object.entries(value).forEach(([entryKey, entryValue]) => {
+    const lowerKey = entryKey.toLowerCase();
+    if (heavyKeys.has(entryKey) || heavyKeys.has(lowerKey)) return;
+    if ((lowerKey.includes("body") || lowerKey.includes("content")) && typeof entryValue === "string" && entryValue.length > 1200) {
+      next[entryKey] = `${entryValue.slice(0, 1200)}…`;
+      return;
+    }
+    const compacted = compactBrowserCacheValue(entryValue, entryKey, depth + 1);
+    if (compacted !== undefined) next[entryKey] = compacted;
+  });
+  return next;
+}
+
+function compactDashboardForBrowserCache(dashboard, candidateLimit = DASHBOARD_BROWSER_CACHE_CANDIDATE_LIMIT) {
+  const compact = compactBrowserCacheValue(dashboard) || {};
+  if (Array.isArray(compact.candidates)) {
+    compact.candidates = compact.candidates.slice(0, candidateLimit);
+  }
+  return compact;
+}
+
+function serializeDashboardCacheRecord(record) {
+  try {
+    const text = JSON.stringify(record);
+    if (text.length <= DASHBOARD_BROWSER_CACHE_MAX_CHARS) return text;
+  } catch (error) {
+    // 순환 참조나 브라우저 직렬화 오류가 있으면 압축 저장으로 전환합니다.
+  }
+  try {
+    const compactRecord = {
+      ...record,
+      compact: true,
+      dashboard: compactDashboardForBrowserCache(record.dashboard)
+    };
+    const text = JSON.stringify(compactRecord);
+    return text.length <= DASHBOARD_BROWSER_CACHE_MAX_CHARS ? text : "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function pruneDashboardBrowserCaches(keepKeys = []) {
+  try {
+    const keep = new Set(keepKeys);
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(DASHBOARD_BROWSER_CACHE_PREFIX) && !keep.has(key)) {
+        window.localStorage.removeItem(key);
+      }
+    }
+  } catch (error) {
+    // 저장소 순회가 제한된 브라우저에서는 현재 쓰기만 재시도합니다.
+  }
+}
+
+function writeDashboardCacheText(key, text) {
+  if (!key || !text) return false;
+  try {
+    window.localStorage.setItem(key, text);
+    return window.localStorage.getItem(key) === text;
+  } catch (error) {
+    pruneDashboardBrowserCaches([key, DASHBOARD_BROWSER_CACHE_LAST]);
+    try {
+      window.localStorage.setItem(key, text);
+      return window.localStorage.getItem(key) === text;
+    } catch (retryError) {
+      return false;
+    }
+  }
+}
+
 function saveDashboardToBrowserCache(dashboard) {
-  if (!dashboard || !Array.isArray(dashboard.candidates) || !dashboard.candidates.length) return;
+  if (!dashboard || !Array.isArray(dashboard.candidates) || !dashboard.candidates.length) return false;
   const mode = dashboard.mode || state.mode || "close";
   const record = {
     mode,
     savedAt: new Date().toISOString(),
     dashboard
   };
-  try {
-    const text = JSON.stringify(record);
-    writeStoredValue(dashboardBrowserCacheKey(mode), text);
-    writeStoredValue(DASHBOARD_BROWSER_CACHE_LAST, text);
-  } catch (error) {
-    // 대시보드가 브라우저 저장 한도를 넘으면 서버 저장본만 사용합니다.
+  const text = serializeDashboardCacheRecord(record);
+  if (!text) return false;
+  const modeKey = dashboardBrowserCacheKey(mode);
+  const wroteMode = writeDashboardCacheText(modeKey, text);
+  const wroteLast = writeDashboardCacheText(DASHBOARD_BROWSER_CACHE_LAST, text);
+  return wroteMode || wroteLast;
+}
+
+function queueDashboardBrowserCacheSave(delay = 1200) {
+  if (dashboardBrowserCacheSaveTimer) {
+    window.clearTimeout(dashboardBrowserCacheSaveTimer);
   }
+  dashboardBrowserCacheSaveTimer = window.setTimeout(() => {
+    dashboardBrowserCacheSaveTimer = null;
+    saveDashboardToBrowserCache(state.dashboard);
+  }, delay);
 }
 
 function readDashboardFromBrowserCache(mode) {
-  const candidates = [
-    readStoredValue(dashboardBrowserCacheKey(mode), ""),
-    readStoredValue(DASHBOARD_BROWSER_CACHE_LAST, "")
-  ];
-  for (const text of candidates) {
+  const records = [];
+  for (const key of dashboardBrowserCacheReadKeys(mode)) {
+    const text = readStoredValue(key, "");
     if (!text) continue;
     try {
       const record = JSON.parse(text);
       const dashboard = record?.dashboard;
       if (dashboard && Array.isArray(dashboard.candidates) && dashboard.candidates.length) {
-        return { ...record, dashboard };
+        records.push({ ...record, key, dashboard });
       }
     } catch (error) {
       // 손상된 브라우저 캐시는 무시하고 다음 후보를 확인합니다.
     }
   }
-  return null;
+  records.sort((left, right) => Date.parse(right.savedAt || right.dashboard?.generatedAt || 0) - Date.parse(left.savedAt || left.dashboard?.generatedAt || 0));
+  return records[0] || null;
 }
 
 function browserCachedDashboardPayload(mode, error) {
@@ -1521,6 +1640,7 @@ async function refreshLivePrices() {
   };
   if (merged) {
     renderLivePriceUpdate(payload);
+    queueDashboardBrowserCacheSave();
   } else {
     renderLivePriceStatus();
   }
