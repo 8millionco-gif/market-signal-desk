@@ -940,6 +940,25 @@ h3 {
   background: rgba(244, 201, 93, 0.12);
 }
 
+.feed-title .personal-badge {
+  color: #d7ecff;
+  border-color: rgba(108, 166, 255, 0.32);
+  background: rgba(108, 166, 255, 0.11);
+}
+
+.feed-title .personal-watch,
+.feed-title .personal-preferred {
+  color: var(--green);
+  border-color: rgba(123, 216, 143, 0.34);
+  background: rgba(123, 216, 143, 0.12);
+}
+
+.feed-title .personal-risk {
+  color: var(--amber);
+  border-color: rgba(244, 201, 93, 0.36);
+  background: rgba(244, 201, 93, 0.12);
+}
+
 .feed-title .group-exclude {
   color: var(--red);
   border-color: rgba(255, 100, 115, 0.35);
@@ -2697,6 +2716,60 @@ h3 {
   line-height: 1.5;
 }
 
+.personalization-summary {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(123, 216, 143, 0.22);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(123, 216, 143, 0.1), rgba(105, 210, 231, 0.06));
+}
+
+.personalization-summary-head {
+  display: grid;
+  gap: 4px;
+}
+
+.personalization-summary-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.personalization-summary-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.personalization-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.personalization-summary-grid div {
+  display: grid;
+  gap: 4px;
+  min-height: 48px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(10, 14, 20, 0.44);
+}
+
+.personalization-summary-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.personalization-summary-grid strong {
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .checkbox-row {
   display: flex;
   flex-wrap: wrap;
@@ -3001,6 +3074,10 @@ h3 {
 @media (max-width: 520px) {
   h1 {
     font-size: 24px;
+  }
+
+  .personalization-summary-grid {
+    grid-template-columns: 1fr;
   }
 
   .signal-update-toast {

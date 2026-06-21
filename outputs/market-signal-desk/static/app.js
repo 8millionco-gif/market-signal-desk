@@ -3293,6 +3293,69 @@ function parseCommaList(value) {
     .filter(Boolean);
 }
 
+function personalRiskLabel(value) {
+  if (value === "conservative") return "보수";
+  if (value === "aggressive") return "공격";
+  return "중립";
+}
+
+function compactListText(items, fallback = "없음", limit = 3) {
+  const values = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!values.length) return fallback;
+  const shown = values.slice(0, limit).join(", ");
+  const rest = values.length - limit;
+  return rest > 0 ? `${shown} 외 ${rest}` : shown;
+}
+
+function dashboardPersonalization() {
+  return state.dashboard?.personalization && typeof state.dashboard.personalization === "object"
+    ? state.dashboard.personalization
+    : {};
+}
+
+function personalizationSummaryMarkup() {
+  const summary = state.dashboard?.summary ?? {};
+  const personalization = dashboardPersonalization();
+  const settings = state.user?.settings ?? {};
+  const thresholds = personalization.thresholds ?? summary.personalThresholds ?? settings.thresholds ?? {};
+  const riskProfile = personalization.riskProfile ?? settings.riskProfile ?? "neutral";
+  const markets = personalization.markets ?? settings.markets ?? [];
+  const excluded = [
+    ...(personalization.excludedSymbols ?? settings.excludedSymbols ?? []),
+    ...(personalization.excludedSectors ?? settings.excludedSectors ?? [])
+  ];
+  const personalized = Boolean(summary.personalized || personalization.userId);
+  const rows = [
+    ["적용 상태", personalized ? "개인화 후보 적용" : "공통 후보 표시"],
+    ["위험 성향", personalRiskLabel(riskProfile)],
+    ["관심/선호", `${Number(summary.watchedCount ?? state.user?.watchlist?.length ?? 0)} 관심 · ${Number(summary.preferredMatchCount ?? 0)} 선호`],
+    ["표시 시장", compactListText(markets, "기본")],
+    ["숨김 조건", `${Number(summary.excludedByUser ?? 0)}개 숨김 · ${compactListText(excluded, "조건 없음", 2)}`],
+    ["리스크 제한", `${Number(summary.riskBlockedCount ?? 0)}개 감점`],
+    ["후보 기준", `핵심 ${Number(thresholds.coreMinScore ?? 70)} · 진입 ${Number(thresholds.entryMinScore ?? 78)} · 리스크 ${Number(thresholds.maxRiskScore ?? 60)}`]
+  ];
+  return `
+    <div class="personalization-summary" aria-label="개인화 적용 상태">
+      <div class="personalization-summary-head">
+        <strong>${personalized ? "개인화 적용 중" : "개인화 대기"}</strong>
+        <span>${personalized ? "저장된 설정이 후보 정렬과 숨김 기준에 반영됩니다." : "저장 후 새 후보 스냅샷부터 더 정확히 반영됩니다."}</span>
+      </div>
+      <div class="personalization-summary-grid">
+        ${rows
+          .map(
+            ([label, value]) => `
+              <div>
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderUserSettingsStatus() {
   if (!els.userSettingsStatus) return;
   if (!state.user?.authenticated) {
@@ -3305,6 +3368,7 @@ function renderUserSettingsStatus() {
   const markets = new Set(settings.markets ?? []);
   els.userSettingsStatus.innerHTML = `
     <div class="settings-form">
+      ${personalizationSummaryMarkup()}
       <label>위험 성향
         <select data-setting-field="riskProfile">
           <option value="conservative" ${settings.riskProfile === "conservative" ? "selected" : ""}>보수</option>
@@ -4127,8 +4191,8 @@ function signalUpdateSummary(schedulerStatus = state.schedulerStatus, discoveryS
   const count = run?.summary?.candidateCount ?? run?.summary?.totalCandidates ?? discoveryStatus?.candidatePool?.activeCount;
   const countText = Number.isFinite(Number(count)) ? `후보 ${Number(count).toLocaleString("ko-KR")}개` : "후보 스냅샷";
   const detail = topText && topText !== "상위 후보 없음"
-    ? `${modeText} · ${countText} · ${topText}`
-    : `${modeText} · ${countText}이 새로 저장됐습니다`;
+    ? `${modeText} · ${countText} · ${topText} · 클릭 시 목록 반영`
+    : `${modeText} · ${countText}이 새로 저장됐습니다 · 클릭 시 목록 반영`;
   return {
     title: "새로운 종목 시그널 발생",
     detail: shortText(detail, 96)
@@ -4142,6 +4206,7 @@ function renderSignalUpdateToast() {
   if (!pending) return;
   if (els.signalUpdateTitle) els.signalUpdateTitle.textContent = pending.title || "새로운 종목 시그널 발생";
   if (els.signalUpdateDetail) els.signalUpdateDetail.textContent = pending.detail || "서버가 새 후보 스냅샷을 저장했습니다.";
+  if (els.signalUpdateButton) els.signalUpdateButton.textContent = "후보 업데이트";
 }
 
 function markCurrentSignalSnapshot() {
@@ -5922,6 +5987,33 @@ function feedReasonText(item, plan) {
   return shortText(signalMeta || headline || priceGuide, 58);
 }
 
+function candidatePersonalizationBadges(item) {
+  const personalization = item?.personalization && typeof item.personalization === "object" ? item.personalization : {};
+  const badges = [];
+  if (item?.isWatched || personalization.watchlisted) {
+    badges.push({ key: "watch", label: "관심" });
+  }
+  if (personalization.preferredMatch) {
+    badges.push({ key: "preferred", label: "선호" });
+  }
+  const personalScore = Number(item?.personalScore);
+  if (Number.isFinite(personalScore)) {
+    badges.push({ key: "score", label: `개인 ${Math.round(personalScore)}` });
+  }
+  const riskPenalty = Number(personalization.riskPenalty ?? 0);
+  if (personalization.riskBlocked) {
+    badges.push({ key: "risk", label: "리스크 제한" });
+  } else if (riskPenalty > 0) {
+    badges.push({ key: "risk", label: "리스크 감점" });
+  }
+  return badges
+    .slice(0, 3)
+    .map(
+      (badge) => `<span class="feed-badge personal-badge personal-${escapeHtml(badge.key)}">${escapeHtml(badge.label)}</span>`
+    )
+    .join("");
+}
+
 function renderFeed() {
   const candidates = filteredCandidates();
   const feedView = visibleFeedCandidates(candidates);
@@ -5956,6 +6048,7 @@ function renderFeed() {
       const liveText = livePriceLabel(item);
       const reasonText = feedReasonText(item, plan);
       const headlineText = shortText(item.headline, active ? 64 : 48);
+      const personalBadges = candidatePersonalizationBadges(item);
       return `
         <button class="feed-item ${active} ${retained}" data-symbol="${escapeHtml(item.symbol)}">
           <span class="logo-mark">${escapeHtml(initials(item.name))}</span>
@@ -5964,6 +6057,7 @@ function renderFeed() {
               <strong>${escapeHtml(item.name)}</strong>
               <span>${escapeHtml(item.symbol)}</span>
               <span class="feed-badge decision-badge decision-${escapeHtml(primaryDecision.key)}" data-feed-decision>${escapeHtml(primaryDecision.label)}</span>
+              ${personalBadges}
             </span>
             <span class="feed-subtitle">${escapeHtml(headlineText)}</span>
             ${active ? `
