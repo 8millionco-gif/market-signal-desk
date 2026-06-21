@@ -113,6 +113,11 @@ const state = {
   lastNotifiedKey: readStoredValue("marketSignalLastNotifiedKey", ""),
   lastRunNotifiedId: readStoredValue("marketSignalLastRunNotifiedId", ""),
   schedulerStatusInitialized: false,
+  signalUpdate: {
+    currentKey: readStoredValue("marketSignalCurrentSnapshotKey", ""),
+    dismissedKey: "",
+    pending: null
+  },
   activity: {
     active: false,
     title: "",
@@ -171,7 +176,12 @@ const els = {
   performanceButton: document.querySelector("#performanceButton"),
   settingsButton: document.querySelector("#settingsButton"),
   deskButton: document.querySelector("#deskButton"),
-  refreshButton: document.querySelector("#refreshButton")
+  refreshButton: document.querySelector("#refreshButton"),
+  signalUpdateToast: document.querySelector("#signalUpdateToast"),
+  signalUpdateTitle: document.querySelector("#signalUpdateTitle"),
+  signalUpdateDetail: document.querySelector("#signalUpdateDetail"),
+  signalUpdateButton: document.querySelector("#signalUpdateButton"),
+  signalUpdateDismiss: document.querySelector("#signalUpdateDismiss")
 };
 
 els.activityBar = document.querySelector("#activityBar");
@@ -684,6 +694,7 @@ async function loadDashboard(options = {}) {
       updateActivity("화면 구성 중", "선정 후보와 가격 행동 지표를 정리합니다");
     }
     render();
+    markCurrentSignalSnapshot();
     finishActivity();
     startLivePricePolling();
   } catch (error) {
@@ -3679,6 +3690,107 @@ function snapshotTopText(run) {
     .slice(0, 3)
     .map((item) => `${item.name ?? item.symbol} ${item.score ?? 0}`)
     .join(" · ");
+}
+
+function runSignalKey(run) {
+  const value = run?.id ?? run?.snapshotId ?? run?.runId ?? run?.createdAt ?? run?.generatedAt ?? run?.finishedAt ?? run?.updatedAt;
+  return String(value ?? "").trim();
+}
+
+function latestSchedulerRun(status = state.schedulerStatus) {
+  if (Array.isArray(status?.recentRuns) && status.recentRuns.length) return status.recentRuns[0];
+  return status?.latestRun ?? status?.state?.latestRun ?? null;
+}
+
+function latestDiscoveryRun(status = state.discoveryBotStatus) {
+  if (status?.latest && Object.keys(status.latest).length) return status.latest;
+  return status?.state?.lastRun ?? null;
+}
+
+function statusSignalKey(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
+  return [
+    runSignalKey(latestSchedulerRun(schedulerStatus)),
+    runSignalKey(latestDiscoveryRun(discoveryStatus))
+  ].filter(Boolean).join("|");
+}
+
+function dashboardSignalKey(dashboard = state.dashboard) {
+  const summary = dashboard?.summary ?? {};
+  const value = summary.snapshotId ?? summary.runId ?? summary.generatedAt ?? dashboard?.generatedAt ?? dashboard?.asOf;
+  return String(value ?? "").trim();
+}
+
+function activeSignalKey() {
+  return statusSignalKey() || dashboardSignalKey();
+}
+
+function signalUpdateSummary(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
+  const run = latestSchedulerRun(schedulerStatus) ?? latestDiscoveryRun(discoveryStatus) ?? {};
+  const topText = snapshotTopText(run);
+  const modeText = modeLabel(run.mode || state.mode);
+  const count = run?.summary?.candidateCount ?? run?.summary?.totalCandidates ?? discoveryStatus?.candidatePool?.activeCount;
+  const countText = Number.isFinite(Number(count)) ? `후보 ${Number(count).toLocaleString("ko-KR")}개` : "후보 스냅샷";
+  const detail = topText && topText !== "상위 후보 없음"
+    ? `${modeText} · ${countText} · ${topText}`
+    : `${modeText} · ${countText}이 새로 저장됐습니다`;
+  return {
+    title: "새로운 종목 시그널 발생",
+    detail: shortText(detail, 96)
+  };
+}
+
+function renderSignalUpdateToast() {
+  if (!els.signalUpdateToast) return;
+  const pending = state.signalUpdate.pending;
+  els.signalUpdateToast.hidden = !pending;
+  if (!pending) return;
+  if (els.signalUpdateTitle) els.signalUpdateTitle.textContent = pending.title || "새로운 종목 시그널 발생";
+  if (els.signalUpdateDetail) els.signalUpdateDetail.textContent = pending.detail || "서버가 새 후보 스냅샷을 저장했습니다.";
+}
+
+function markCurrentSignalSnapshot() {
+  const key = activeSignalKey();
+  if (key) {
+    state.signalUpdate.currentKey = key;
+    writeStoredValue("marketSignalCurrentSnapshotKey", key);
+  }
+  state.signalUpdate.pending = null;
+  renderSignalUpdateToast();
+}
+
+function maybeShowSignalUpdate(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
+  if (!state.dashboard || state.activity.active) return;
+  const key = statusSignalKey(schedulerStatus, discoveryStatus);
+  if (!key) return;
+  if (!state.signalUpdate.currentKey) {
+    state.signalUpdate.currentKey = key;
+    writeStoredValue("marketSignalCurrentSnapshotKey", key);
+    return;
+  }
+  if (key === state.signalUpdate.currentKey || key === state.signalUpdate.dismissedKey) return;
+  state.signalUpdate.pending = {
+    key,
+    ...signalUpdateSummary(schedulerStatus, discoveryStatus)
+  };
+  renderSignalUpdateToast();
+}
+
+function dismissSignalUpdate() {
+  if (state.signalUpdate.pending?.key) {
+    state.signalUpdate.dismissedKey = state.signalUpdate.pending.key;
+  }
+  state.signalUpdate.pending = null;
+  renderSignalUpdateToast();
+}
+
+async function applySignalUpdate() {
+  const pendingKey = state.signalUpdate.pending?.key;
+  if (!pendingKey) return;
+  state.signalUpdate.currentKey = pendingKey;
+  writeStoredValue("marketSignalCurrentSnapshotKey", pendingKey);
+  state.signalUpdate.pending = null;
+  renderSignalUpdateToast();
+  await loadDashboard();
 }
 
 function renderSchedulerStatus() {
@@ -7216,6 +7328,18 @@ if (els.deskButton) {
   els.deskButton.addEventListener("click", showDeskView);
 }
 
+if (els.signalUpdateButton) {
+  els.signalUpdateButton.addEventListener("click", () => {
+    applySignalUpdate().catch(() => {
+      dismissSignalUpdate();
+    });
+  });
+}
+
+if (els.signalUpdateDismiss) {
+  els.signalUpdateDismiss.addEventListener("click", dismissSignalUpdate);
+}
+
 els.refreshButton.addEventListener("click", () => {
   if (state.view === "performance") {
     loadPerformance();
@@ -7243,17 +7367,21 @@ function refreshAutoAnalysisMode() {
 
 async function refreshSchedulerStatusOnly() {
   const status = await safeFetchJson("/api/scheduler/status", statusFallbacks().scheduler, 5000);
+  const discovery = await safeFetchJson("/api/discovery/status", statusFallbacks().discoveryBot, 5000);
   const storage = await safeFetchJson("/api/storage/status", statusFallbacks().storage, 5000);
   const evidence = await safeFetchJson("/api/evidence/status", statusFallbacks().evidence, 5000);
   const stockMaster = await safeFetchJson("/api/stocks/master/status", statusFallbacks().stockMaster, 5000);
   const portfolio = await safeFetchJson("/api/portfolio/status", statusFallbacks().portfolio, 5000);
   state.schedulerStatus = status;
+  state.discoveryBotStatus = discovery;
   state.storageStatus = storage;
   state.evidenceStatus = evidence;
   state.stockMasterStatus = stockMaster;
   state.portfolioStatus = portfolio;
   maybeNotifySchedulerRun(status);
+  maybeShowSignalUpdate(status, discovery);
   renderSchedulerStatus();
+  renderDiscoveryBotStatus();
   renderStorageStatus();
   renderEvidenceStatus();
   renderStockMasterStatus();

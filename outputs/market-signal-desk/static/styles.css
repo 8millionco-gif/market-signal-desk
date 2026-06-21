@@ -227,6 +227,79 @@ h3 {
   }
 }
 
+.signal-update-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 45;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  width: min(520px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid rgba(105, 210, 231, 0.32);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.98);
+  box-shadow: var(--shadow);
+}
+
+.signal-update-toast[hidden] {
+  display: none;
+}
+
+.signal-update-toast div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.signal-update-toast span {
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.signal-update-toast strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-update-toast em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-update-primary,
+.signal-update-close {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  font-weight: 900;
+}
+
+.signal-update-primary {
+  padding: 0 12px;
+  color: #091014;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+}
+
+.signal-update-close {
+  width: 34px;
+  color: var(--muted);
+  background: var(--chip);
+}
+
 .mode-switch,
 .tabs {
   display: flex;
@@ -2804,6 +2877,16 @@ h3 {
 @media (max-width: 520px) {
   h1 {
     font-size: 24px;
+  }
+
+  .signal-update-toast {
+    right: 12px;
+    bottom: 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .signal-update-primary {
+    grid-column: 1 / -1;
   }
 
   .mode-status,
