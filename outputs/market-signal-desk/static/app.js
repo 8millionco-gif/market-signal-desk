@@ -1507,6 +1507,9 @@ function renderLoadError(error) {
 }
 
 function filteredCandidates() {
+  if (state.strategy === "exclude") {
+    state.strategy = "all";
+  }
   const base = baseFilteredCandidates();
   let strategy = state.strategy;
   let actualCandidates = candidatesForStrategy(base, strategy);
@@ -1669,8 +1672,9 @@ function syncSelectedToVisibleCandidates(candidates = filteredCandidates()) {
   return true;
 }
 
-function baseFilteredCandidates() {
+function baseFilteredCandidates(options = {}) {
   const candidates = state.dashboard?.candidates ?? [];
+  const includeExcluded = Boolean(options.includeExcluded) || state.strategy === "exclude";
   return candidates.filter((item) => {
     const matchesFilter =
       state.filter === "all" ||
@@ -1681,7 +1685,7 @@ function baseFilteredCandidates() {
       !query ||
       item.name.toLowerCase().includes(query) ||
       item.symbol.toLowerCase().includes(query);
-    return matchesFilter && matchesQuery;
+    return matchesFilter && matchesQuery && (includeExcluded || isMainDisplayCandidate(item));
   });
 }
 
@@ -2402,6 +2406,23 @@ function isExcludeCandidate(item) {
   return group.key === "exclude" || plan.tone === "risk" || plan.action.includes("제외");
 }
 
+function isMainDisplayCandidate(item) {
+  return !isExcludeCandidate(item);
+}
+
+function candidateVisibilitySummary(candidates = state.dashboard?.candidates ?? []) {
+  const items = Array.isArray(candidates) ? candidates : [];
+  const visible = items.filter(isMainDisplayCandidate);
+  const excluded = Math.max(0, items.length - visible.length);
+  return {
+    totalCount: items.length,
+    visibleCount: visible.length,
+    excludedCount: excluded,
+    visible,
+    counts: candidateStrategyCounts(visible, { alreadyVisible: true })
+  };
+}
+
 function actionPriority(item) {
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
@@ -2507,18 +2528,19 @@ function candidateActionSummary(candidates = []) {
   );
 }
 
-function candidateStrategyCounts(candidates = []) {
+function candidateStrategyCounts(candidates = [], options = {}) {
+  const scoped = options.alreadyVisible ? candidates : candidates.filter(isMainDisplayCandidate);
   return {
-    core: candidates.filter(isCoreCandidate).length,
-    review: candidates.filter(isReviewCandidate).length,
-    action: candidates.filter(isActionCandidate).length,
-    wait: candidates.filter(isWaitBucketCandidate).length,
-    pullback: candidates.filter(isPullbackCandidate).length,
-    hidden: candidates.filter(isHiddenOpportunity).length,
-    momentum: candidates.filter(hasMomentumSignal).length,
-    holding: candidates.filter(isHoldingCandidate).length,
+    core: scoped.filter(isCoreCandidate).length,
+    review: scoped.filter(isReviewCandidate).length,
+    action: scoped.filter(isActionCandidate).length,
+    wait: scoped.filter(isWaitBucketCandidate).length,
+    pullback: scoped.filter(isPullbackCandidate).length,
+    hidden: scoped.filter(isHiddenOpportunity).length,
+    momentum: scoped.filter(hasMomentumSignal).length,
+    holding: scoped.filter(isHoldingCandidate).length,
     exclude: candidates.filter(isExcludeCandidate).length,
-    all: candidates.length
+    all: scoped.length
   };
 }
 
@@ -2526,11 +2548,11 @@ function selectedCandidate() {
   if (selectionLockedByLookup()) {
     return state.selectedLookup;
   }
-  const candidates = state.dashboard?.candidates ?? [];
+  const candidates = filteredCandidates();
   if (state.selectedSymbol) {
     return candidates.find((item) => item.symbol === state.selectedSymbol) || null;
   }
-  return selectionFromCandidates(filteredCandidates());
+  return selectionFromCandidates(candidates);
 }
 
 function candidateFromSearchResult(item, options = {}) {
@@ -2946,10 +2968,13 @@ function candidateSourceDetailRows(summary = {}) {
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
   const compressionCounts = summary.candidateCompressionCounts ?? {};
-  const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
-  const actionCount = Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
-  const waitCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
-  const portfolioCount = Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
+  const visibility = candidateVisibilitySummary();
+  const visibleCounts = visibility.counts ?? {};
+  const coreCount = visibility.totalCount ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
+  const actionCount = visibility.totalCount ? Number(visibleCounts.action ?? 0) : Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const waitCount = visibility.totalCount ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
+  const portfolioCount = visibility.totalCount ? Number(visibleCounts.holding ?? 0) : Number(summary.portfolioCandidateCompressionCount ?? compressionCounts.portfolio ?? 0);
+  const excludedCount = visibility.excludedCount || Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
   const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
   const liveCount = Number(priceBasis.live ?? 0);
   const closedCount = Number(priceBasis.closed_baseline ?? 0);
@@ -2971,7 +2996,7 @@ function candidateSourceDetailRows(summary = {}) {
   const basisText = live.updatedAt && !live.error ? liveText : priceText;
   return [
     ["후보 기준", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}${cachedAt ? ` · ${timeLabel(cachedAt)}` : ""}`],
-    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}`],
+    ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}${excludedCount ? ` · 제외 ${excludedCount} 숨김` : ""}`],
     ["가격 기준", liveCount + closedCount + lastGoodCount > 0 || Boolean(live.updatedAt), basisText],
     ["재료 근거", scanned > 0 || materialNews > 0, scanned > 0 ? `${scanned}종목 점검 · 재료뉴스 ${materialNews}건` : "수집 대기"]
   ];
@@ -3489,13 +3514,17 @@ function renderMarket() {
 function candidateBriefForMain(summary = {}) {
   const discovery = state.dashboard?.integrations?.discovery ?? {};
   const cache = state.dashboard?.cache ?? {};
-  const compressionCounts = summary.candidateCompressionCounts ?? {};
   const priceBasis = state.storageStatus?.basisCounts ?? state.dashboard?.integrations?.marketDataLatest?.basisCounts ?? {};
   const sourceLabel = candidateSourceLabel(summary);
-  const coreCount = Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
-  const actionCount = Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
-  const waitCount = Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
-  const candidateCount = Number(summary.candidateCount ?? 0);
+  const compressionCounts = summary.candidateCompressionCounts ?? {};
+  const visibility = candidateVisibilitySummary();
+  const visibleCounts = visibility.counts ?? {};
+  const hasVisibleBasis = visibility.totalCount > 0;
+  const coreCount = hasVisibleBasis ? Number(visibleCounts.core ?? 0) : Number(summary.coreCandidateCount ?? compressionCounts.core ?? 0);
+  const actionCount = hasVisibleBasis ? Number(visibleCounts.action ?? 0) : Number(summary.actionCandidateCount ?? summary.entryCandidateCount ?? compressionCounts.action ?? 0);
+  const waitCount = hasVisibleBasis ? Number(visibleCounts.wait ?? 0) : Number(summary.waitCandidateCompressionCount ?? compressionCounts.wait ?? 0);
+  const candidateCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
+  const excludedCount = hasVisibleBasis ? visibility.excludedCount : Number(summary.excludeCandidateCount ?? compressionCounts.exclude ?? 0);
   const liveCount = Number(priceBasis.live ?? 0);
   const closedCount = Number(priceBasis.closed_baseline ?? 0);
   const lastGoodCount = Number(priceBasis.last_good ?? 0);
@@ -3527,6 +3556,7 @@ function candidateBriefForMain(summary = {}) {
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
+    excludedCount ? `제외 ${excludedCount} 숨김` : "",
     materialNews ? `재료 ${materialNews}` : "",
     priceText
   ].filter(Boolean).join(" · ");
@@ -3538,17 +3568,27 @@ function candidateBriefForMain(summary = {}) {
 
 function renderMetrics() {
   const summary = state.dashboard?.summary ?? {};
-  els.candidateCount.textContent = `${summary.candidateCount ?? 0}개`;
+  const visibility = candidateVisibilitySummary();
+  const hasVisibleBasis = visibility.totalCount > 0;
+  const visibleCandidates = visibility.visible ?? [];
+  const visibleCount = hasVisibleBasis ? visibility.visibleCount : Number(summary.candidateCount ?? 0);
+  els.candidateCount.textContent = `${visibleCount}개`;
   if (els.candidateSource) {
     const brief = candidateBriefForMain(summary);
     els.candidateSource.textContent = brief.line;
     els.candidateSource.title = brief.title;
   }
   renderCandidateSourceDetail();
-  els.metricCandidates.textContent = summary.candidateCount ?? 0;
-  els.metricHighScore.textContent = summary.highScoreCount ?? 0;
-  els.metricReady.textContent = summary.readyCount ?? 0;
-  els.metricWatched.textContent = summary.watchedCount ?? 0;
+  els.metricCandidates.textContent = visibleCount;
+  els.metricHighScore.textContent = hasVisibleBasis
+    ? visibleCandidates.filter((item) => Number(item?.totalScore ?? 0) >= 75).length
+    : summary.highScoreCount ?? 0;
+  els.metricReady.textContent = hasVisibleBasis
+    ? visibleCandidates.filter((item) => Number(item?.triggerReadiness ?? 0) >= 70).length
+    : summary.readyCount ?? 0;
+  els.metricWatched.textContent = hasVisibleBasis
+    ? visibleCandidates.filter((item) => item?.isWatched).length
+    : summary.watchedCount ?? 0;
 }
 
 function timeLabel(value) {
@@ -5436,16 +5476,16 @@ function strategyLabel(value) {
 }
 
 function strategyEmptyMessage(value) {
-  if (value === "core") return "신뢰도, 가격 반응, 리스크를 동시에 통과한 핵심 후보가 없습니다. 오늘은 후보를 억지로 고르지 않고 검토·눌림 탭에서 관찰만 유지하세요.";
+  if (value === "core") return "신뢰도, 가격 반응, 리스크를 동시에 통과한 핵심 후보가 없습니다. 제외 후보는 메인에서 숨기고 서버가 새 후보를 계속 수집합니다.";
   if (value === "review") return "핵심은 아니지만 추가 확인할 후보가 없습니다. 지금은 대기 또는 전체 후보만 참고하세요.";
-  if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 무리한 진입보다 눌림이나 전체 후보를 확인하세요.";
-  if (value === "wait") return "추가 확인 후보가 없습니다. 지금은 핵심 후보 또는 전체 후보만 참고하세요.";
+  if (value === "action") return "현재는 가격, 준비도, 리스크를 동시에 통과한 진입 후보가 없습니다. 서버가 후보 풀을 보강할 때까지 무리한 진입은 보류합니다.";
+  if (value === "wait") return "추가 확인 후보가 없습니다. 제외 후보는 후보 목록에서 제거했고, 새 후보가 수집되면 다시 표시됩니다.";
   if (value === "pullback") return "눌림이나 반등 확인 구간에 있는 후보가 없습니다. 추격보다 다음 갱신을 기다리는 편이 낫습니다.";
   if (value === "hidden") return "뉴스 대비 가격 반영이 덜 된 숨은 후보가 없습니다. 전체 후보에서 테마 변화를 확인할 수 있습니다.";
   if (value === "momentum") return "뉴스, 가격, 수급 모멘텀이 동시에 살아 있는 후보가 없습니다.";
   if (value === "holding") return "현재 불러온 포트폴리오와 연결되는 후보가 없습니다.";
-  if (value === "exclude") return "제외 후보가 없습니다. 좋은 신호입니다.";
-  return "현재 필터 조건에 맞는 후보가 없습니다. 검색어나 국내/해외 필터를 조정해 보세요.";
+  if (value === "exclude") return "제외 후보는 메인 후보가 아니므로 설정과 성과 검증에서만 참고합니다.";
+  return "현재 필터 조건에 맞는 표시 후보가 없습니다. 제외 후보는 숨겨 두고 서버가 새 후보를 계속 수집합니다.";
 }
 
 function renderStrategyCounts() {
