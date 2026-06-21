@@ -21360,6 +21360,18 @@ def run_discovery_bot_cycle(mode: str | None = None, trigger: str = "manual") ->
         summary = dashboard_summary(payload)
         summary["candidatePrefetch"] = prefetch_status
         summary["postPrefetchMerge"] = post_prefetch_status
+        summary["dashboardCacheUpdateSource"] = f"discovery-{trigger}"
+        cache_updated = write_dashboard_cache_record(
+            selected_mode,
+            payload,
+            source=summary["dashboardCacheUpdateSource"],
+        )
+        summary["dashboardCacheUpdated"] = cache_updated
+        if isinstance(payload.get("summary"), dict):
+            payload["summary"].update({
+                "dashboardCacheUpdated": cache_updated,
+                "dashboardCacheUpdateSource": summary["dashboardCacheUpdateSource"],
+            })
         run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{selected_mode}-discovery-{trigger}"
         record = {
             "id": run_id,
@@ -24247,6 +24259,14 @@ def run_signal_snapshot(mode: str, trigger: str = "manual") -> dict:
     summary = dashboard_summary(payload)
     summary["candidatePrefetch"] = prefetch_status
     summary["postPrefetchCandidateRefresh"] = post_prefetch_refresh
+    summary["dashboardCacheUpdateSource"] = f"snapshot-{trigger}"
+    cache_updated = write_dashboard_cache_record(mode, payload, source=summary["dashboardCacheUpdateSource"])
+    summary["dashboardCacheUpdated"] = cache_updated
+    if isinstance(payload.get("summary"), dict):
+        payload["summary"].update({
+            "dashboardCacheUpdated": cache_updated,
+            "dashboardCacheUpdateSource": f"snapshot-{trigger}",
+        })
     run_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{mode}-{trigger}"
     file_name = f"{now.date().isoformat()}_{mode}_{trigger}_{now.strftime('%H%M%S')}.json"
     path = RUNS_DIR / file_name
