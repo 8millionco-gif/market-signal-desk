@@ -3249,6 +3249,7 @@ function candidateSourceDetailRows(summary = {}) {
   const cachedAt = cache.createdAt || summary.dashboardCacheCreatedAt || summary.storedDiscoveryCreatedAt || state.dashboard?.generatedAt || "";
   const scanned = Number(summary.scannedCount ?? discovery.scannedCount ?? 0);
   const materialNews = Number(summary.selectedMaterialNewsCount ?? summary.materialNewsCount ?? discovery.selectedMaterialNewsItemCount ?? discovery.materialNewsItemCount ?? 0);
+  const materialPolicy = summary.materialCollectionPolicy && typeof summary.materialCollectionPolicy === "object" ? summary.materialCollectionPolicy : {};
   const cacheSuffix = cache.fallbackError ? " · 실시간 실패 대체" : "";
   const compressionCounts = summary.candidateCompressionCounts ?? {};
   const visibility = currentCandidateScopeSummary();
@@ -3276,11 +3277,18 @@ function candidateSourceDetailRows(summary = {}) {
       ? `${timeLabel(live.updatedAt)} · ${live.error ? live.message || "갱신 실패" : live.message || "토스 현재가 반영"}`
       : "대기";
   const basisText = live.updatedAt && !live.error ? liveText : priceText;
+  const materialText = scanned > 0
+    ? `${scanned}종목 점검 · 재료 누적 ${materialNews}건 · 후보 제한 아님`
+    : materialNews > 0
+      ? `재료 누적 ${materialNews}건 · 후보 제한 아님`
+      : "서버 수집 대기";
+  const policyText = materialPolicy.label || "서버가 후보 풀을 계속 넓히는 중";
   return [
     ["후보 기준", sourceLabel !== "시드 후보", `${sourceLabel}${cacheSuffix}${cachedAt ? ` · ${timeLabel(cachedAt)}` : ""}`],
     ["판단 압축", coreCount + actionCount + waitCount + portfolioCount > 0, `핵심 ${coreCount} · 진입 ${actionCount} · 대기 ${waitCount} · 보유 ${portfolioCount}`],
     ["가격 기준", liveCount + closedCount + lastGoodCount > 0 || Boolean(live.updatedAt), basisText],
-    ["재료 근거", scanned > 0 || materialNews > 0, scanned > 0 ? `${scanned}종목 점검 · 재료뉴스 ${materialNews}건` : "수집 대기"]
+    ["재료 근거", scanned > 0 || materialNews > 0, materialText],
+    ["수집 정책", Boolean(policyText), policyText]
   ];
 }
 
@@ -4346,7 +4354,7 @@ function candidateBriefForMain(summary = {}) {
     liveCount > 0
       ? `실시간 ${liveCount}`
       : closedCount > 0
-        ? `장마감 ${closedCount}`
+        ? `장마감 기준가 ${closedCount}`
         : lastGoodCount > 0
           ? `마지막값 ${lastGoodCount}`
           : "가격 보강";
@@ -4364,7 +4372,7 @@ function candidateBriefForMain(summary = {}) {
     `핵심 ${coreCount}`,
     actionCount ? `진입 ${actionCount}` : "",
     waitCount ? `대기 ${waitCount}` : "",
-    materialNews ? `재료 ${materialNews}` : "",
+    materialNews ? `재료 누적 ${materialNews}` : "",
     priceText
   ].filter(Boolean).join(" · ");
   return {

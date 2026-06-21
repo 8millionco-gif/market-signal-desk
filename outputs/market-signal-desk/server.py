@@ -21578,6 +21578,13 @@ def ensure_dashboard_market_snapshot(payload: dict, mode: str = "") -> dict:
         "write_dashboard_snapshot",
     ]
     summary["scoringWeights"] = dict(EVIDENCE_SCORING_WEIGHTS)
+    summary["materialCollectionPolicy"] = {
+        "mode": "continuous",
+        "candidateLimitApplies": False,
+        "label": "재료는 후보 제한 없이 서버가 계속 누적",
+        "description": "재료 수는 후보 등록 상한이 아니라 DB에 저장된 뉴스·공시·트렌드 근거 누적값입니다.",
+        "refreshPolicy": "스케줄러와 수동 발굴이 후보 풀을 계속 넓히고, 화면은 저장 스냅샷을 압축 표시합니다.",
+    }
     return enriched_payload
 
 
