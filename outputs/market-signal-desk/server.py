@@ -353,6 +353,18 @@ SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET = max(
     int(os.getenv("SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET", "80")),
 )
 SIGNAL_DISCOVERY_CORE_ENTRY_TARGET = max(1, int(os.getenv("SIGNAL_DISCOVERY_CORE_ENTRY_TARGET", "3")))
+SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET = max(
+    SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
+    int(os.getenv("SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET", "5")),
+)
+SIGNAL_DISCOVERY_CLOSE_CORE_VISIBLE_TARGET = max(
+    SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET,
+    int(os.getenv("SIGNAL_DISCOVERY_CLOSE_CORE_VISIBLE_TARGET", "5")),
+)
+SIGNAL_DISCOVERY_INTRADAY_CORE_VISIBLE_TARGET = max(
+    SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
+    int(os.getenv("SIGNAL_DISCOVERY_INTRADAY_CORE_VISIBLE_TARGET", "3")),
+)
 SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED = max(
     1,
     int(os.getenv("SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED", "1")),
@@ -12668,7 +12680,7 @@ def promote_candidate_to_core_expansion(candidate: dict, reason: str) -> None:
 
 
 def assign_candidate_compression(candidates: list[dict]) -> dict:
-    max_core = 3
+    max_core = SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET
     max_entry = 5
     for item in candidates:
         item["signalValidation"] = candidate_signal_validation_profile(item)
@@ -19349,7 +19361,49 @@ def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> di
     }
 
 
-def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_core: int = 3) -> dict:
+def dashboard_core_visible_target(payload: dict, candidates: list[dict]) -> int:
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    integrations = payload.get("integrations", {}) if isinstance(payload.get("integrations"), dict) else {}
+    market = integrations.get("market", {}) if isinstance(integrations.get("market"), dict) else {}
+    mode = str(
+        payload.get("mode")
+        or summary.get("mode")
+        or summary.get("analysisMode")
+        or summary.get("storedDiscoveryMode")
+        or market.get("mode")
+        or ""
+    ).strip().lower()
+    market_session = str(
+        summary.get("marketSession")
+        or summary.get("marketPhase")
+        or market.get("session")
+        or market.get("phase")
+        or ""
+    ).strip().lower()
+
+    close_like = mode not in {"intraday", "live", "open"} or market_session in {
+        "close",
+        "closed",
+        "after_close",
+        "preopen",
+        "holiday",
+        "weekend",
+    }
+    if close_like:
+        return SIGNAL_DISCOVERY_CLOSE_CORE_VISIBLE_TARGET
+
+    snapshot = candidate_compression_snapshot_from_candidates(candidates)
+    entry_count = summary_count_value(
+        snapshot.get("entryCandidateCount"),
+        summary.get("entryCandidateCount"),
+        summary.get("actionCandidateCount"),
+    )
+    if entry_count <= 0:
+        return max(SIGNAL_DISCOVERY_INTRADAY_CORE_VISIBLE_TARGET, SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET)
+    return SIGNAL_DISCOVERY_INTRADAY_CORE_VISIBLE_TARGET
+
+
+def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_core: int = SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET) -> dict:
     snapshot = candidate_compression_snapshot_from_candidates(candidates)
     core_shortfall = max(0, max_core - bounded_int(snapshot.get("coreCandidateCount", 0), 0, max_core))
     if core_shortfall <= 0:
@@ -19358,6 +19412,7 @@ def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_cor
             "count": 0,
             "symbols": [],
             "reason": "",
+            "target": max_core,
         }
 
     ranked = sorted(
@@ -19384,6 +19439,7 @@ def ensure_core_expansion_for_visible_candidates(candidates: list[dict], max_cor
         "count": len(expanded),
         "symbols": expanded,
         "reason": reason_text,
+        "target": max_core,
     }
 
 
@@ -19439,7 +19495,8 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     )
     candidates, hidden_records = split_visible_candidate_records(candidates)
     hidden_record_count = len(hidden_records)
-    final_core_expansion = ensure_core_expansion_for_visible_candidates(candidates)
+    core_visible_target = dashboard_core_visible_target(enriched, candidates)
+    final_core_expansion = ensure_core_expansion_for_visible_candidates(candidates, max_core=core_visible_target)
     enriched["selected"] = synchronize_selected_candidate_from_candidates(
         candidates,
         enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
@@ -19517,6 +19574,7 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         expansion_selection_fields = {
             "selectionExpansionActive": True,
             "selectionExpansionCount": final_core_expansion.get("count", 0),
+            "selectionExpansionTarget": final_core_expansion.get("target", core_visible_target),
             "selectionExpansionMode": "core_fallback",
             "selectionExpansionReason": (
                 final_core_expansion.get("reason")
@@ -19528,6 +19586,8 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
         if isinstance(selection_status, dict):
             selection_status.update(actual_selection)
             selection_status.update(expansion_selection_fields)
+    summary["coreVisibleTarget"] = core_visible_target
+    summary["practicalCandidateTarget"] = core_visible_target + SIGNAL_DISCOVERY_CORE_ENTRY_TARGET
 
     pool_status = integrations.get("candidatePool", {}) if isinstance(integrations.get("candidatePool"), dict) else {}
     if not pool_status:
@@ -20955,6 +21015,9 @@ def discovery_bot_config_status() -> dict:
         "visibleCandidateTarget": SIGNAL_DISCOVERY_VISIBLE_CANDIDATE_TARGET,
         "visibleRefillTarget": SIGNAL_DISCOVERY_VISIBLE_REFILL_TARGET,
         "coreEntryTarget": SIGNAL_DISCOVERY_CORE_ENTRY_TARGET,
+        "coreVisibleTarget": SIGNAL_DISCOVERY_CORE_VISIBLE_TARGET,
+        "closeCoreVisibleTarget": SIGNAL_DISCOVERY_CLOSE_CORE_VISIBLE_TARGET,
+        "intradayCoreVisibleTarget": SIGNAL_DISCOVERY_INTRADAY_CORE_VISIBLE_TARGET,
         "replacementMinExcluded": SIGNAL_DISCOVERY_REPLACEMENT_MIN_EXCLUDED,
         "excludedRatioTrigger": float(SIGNAL_DISCOVERY_EXCLUDED_RATIO_TRIGGER),
         "newsDisplay": SIGNAL_DISCOVERY_NEWS_DISPLAY,
