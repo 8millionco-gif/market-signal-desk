@@ -18016,13 +18016,48 @@ def synchronize_selected_candidate_compression(candidates: list[dict], selected:
     return synced if replaced else candidates
 
 
+def candidate_entry_reaction_gate_for_snapshot(candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return {}
+    compression = candidate.get("candidateCompression", {}) if isinstance(candidate.get("candidateCompression"), dict) else {}
+    gate = compression.get("entryGate") if isinstance(compression.get("entryGate"), dict) else {}
+    if not gate:
+        gate = candidate.get("entryReactionGate", {}) if isinstance(candidate.get("entryReactionGate"), dict) else {}
+    if not isinstance(gate, dict) or not gate.get("key") or not isinstance(gate.get("checks"), dict):
+        try:
+            gate = candidate_entry_reaction_gate(candidate)
+        except Exception:
+            gate = {}
+    if isinstance(gate, dict) and gate:
+        candidate["entryReactionGate"] = gate
+        if not isinstance(compression, dict):
+            compression = {}
+        compression["entryGateKey"] = gate.get("key", "")
+        compression["entryGateLabel"] = gate.get("label", "")
+        compression["entryGate"] = gate
+        candidate["candidateCompression"] = compression
+    return gate if isinstance(gate, dict) else {}
+
+
 def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> dict:
     counts = {"core": 0, "entry": 0, "wait": 0, "portfolio": 0, "exclude": 0}
+    entry_gate_counts: dict[str, int] = {}
+    entry_gate_labels: dict[str, str] = {}
+    entry_ready_symbols: list[str] = []
     top_candidates: list[dict] = []
     for item in candidates:
         if not isinstance(item, dict):
             continue
         compression = item.get("candidateCompression", {}) if isinstance(item.get("candidateCompression"), dict) else {}
+        entry_gate = candidate_entry_reaction_gate_for_snapshot(item)
+        entry_gate_key = str(entry_gate.get("key") or compression.get("entryGateKey") or "unknown")
+        entry_gate_label = str(entry_gate.get("label") or compression.get("entryGateLabel") or entry_gate_key)
+        entry_gate_counts[entry_gate_key] = entry_gate_counts.get(entry_gate_key, 0) + 1
+        entry_gate_labels.setdefault(entry_gate_key, entry_gate_label)
+        if entry_gate.get("ready"):
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if symbol:
+                entry_ready_symbols.append(symbol)
         tier = str(compression.get("tier", "wait")).strip().lower()
         if tier not in counts:
             tier = "wait"
@@ -18039,9 +18074,16 @@ def candidate_compression_snapshot_from_candidates(candidates: list[dict]) -> di
                 "reason": compression.get("reason", ""),
                 "validation": compression.get("validationLabel", ""),
                 "expanded": bool(compression.get("expanded")),
+                "entryGateKey": entry_gate_key,
+                "entryGateLabel": entry_gate_label,
+                "entryReady": bool(entry_gate.get("ready")),
             })
     return {
         "candidateCompressionCounts": counts,
+        "entryReactionGateCounts": entry_gate_counts,
+        "entryReactionGateLabels": entry_gate_labels,
+        "entryReadySymbolCount": len(entry_ready_symbols),
+        "entryReadySymbols": entry_ready_symbols,
         "coreCandidateCount": counts.get("core", 0),
         "entryCandidateCount": counts.get("entry", 0),
         "waitCandidateCompressionCount": counts.get("wait", 0),
@@ -18149,6 +18191,11 @@ def ensure_dashboard_discovery_expansion_fields(payload: dict) -> dict:
     integrations = enriched.get("integrations", {}) if isinstance(enriched.get("integrations"), dict) else {}
     selection_status = integrations.get("selection", {}) if isinstance(integrations.get("selection"), dict) else {}
     actual_selection = candidate_compression_snapshot_from_candidates(candidates)
+    enriched["selected"] = synchronize_selected_candidate_from_candidates(
+        candidates,
+        enriched.get("selected") if isinstance(enriched.get("selected"), dict) else None,
+    )
+    enriched["candidates"] = candidates
 
     fallback_selection = price_only_selection_status(candidates, summary, integrations) if candidates else {}
     compression_counts = actual_selection.get("candidateCompressionCounts")
