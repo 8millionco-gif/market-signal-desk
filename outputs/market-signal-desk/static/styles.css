@@ -92,6 +92,177 @@ h3 {
   gap: 10px;
 }
 
+.account-menu-wrap {
+  position: relative;
+}
+
+.account-button {
+  display: grid;
+  gap: 3px;
+  min-width: 96px;
+  min-height: 42px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(23, 26, 34, 0.82);
+  text-align: left;
+}
+
+.account-button span {
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.account-button em {
+  overflow: hidden;
+  max-width: 128px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-button.authenticated {
+  border-color: rgba(123, 216, 143, 0.42);
+  background: linear-gradient(135deg, rgba(123, 216, 143, 0.14), rgba(105, 210, 231, 0.06));
+}
+
+.account-button.authenticated em {
+  color: var(--green);
+}
+
+.account-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  z-index: 35;
+  width: min(340px, calc(100vw - 28px));
+  padding: 14px;
+  border: 1px solid rgba(108, 166, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(23, 26, 34, 0.98);
+  box-shadow: var(--shadow);
+}
+
+.account-popover[hidden] {
+  display: none;
+}
+
+.account-popover-head {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.account-popover-head span {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.account-popover-head strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.account-popover-head em,
+.account-hint {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.account-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.account-status-grid div {
+  display: grid;
+  gap: 4px;
+  min-height: 52px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #11151d;
+}
+
+.account-status-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.account-status-grid strong {
+  color: var(--soft);
+  font-size: 12px;
+}
+
+.account-status-grid strong.ok {
+  color: var(--green);
+}
+
+.social-auth-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.social-auth-button,
+.account-actions button {
+  min-height: 36px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(36, 42, 55, 0.92);
+  font-weight: 900;
+}
+
+.social-auth-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.social-auth-button span {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  color: #11151d;
+  background: var(--text);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.social-auth-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.account-form {
+  margin-top: 12px;
+}
+
+.account-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .mode-status {
   display: grid;
   gap: 3px;
@@ -2853,6 +3024,29 @@ h3 {
   background: #11151d;
 }
 
+.connection-list .settings-form,
+.connection-list .social-auth-row,
+.connection-list .account-actions {
+  display: grid;
+  align-items: initial;
+  justify-content: initial;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.connection-list .settings-form {
+  gap: 12px;
+}
+
+.connection-list .social-auth-row,
+.connection-list .account-actions {
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .connection-list strong {
   flex: 0 0 auto;
   max-width: 62%;
@@ -3043,6 +3237,19 @@ h3 {
     flex: 0 0 124px;
   }
 
+  .account-menu-wrap {
+    flex: 1 1 128px;
+  }
+
+  .account-button {
+    width: 100%;
+  }
+
+  .account-popover {
+    left: 0;
+    right: auto;
+  }
+
   .settings-header {
     align-items: stretch;
     flex-direction: column;
@@ -3123,8 +3330,23 @@ h3 {
     grid-column: 1 / -1;
   }
 
+  .account-popover {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: 86px;
+    width: auto;
+  }
+
+  .social-auth-row,
+  .account-actions,
+  .account-status-grid {
+    grid-template-columns: 1fr;
+  }
+
   .mode-status,
-  .mode-select-label {
+  .mode-select-label,
+  .account-menu-wrap {
     flex-basis: 100%;
     width: 100%;
   }

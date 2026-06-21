@@ -97,6 +97,7 @@ const state = {
     loading: false,
     message: ""
   },
+  accountMenuOpen: false,
   schedulerStatus: null,
   discoveryBotStatus: null,
   storageStatus: null,
@@ -191,6 +192,11 @@ const els = {
   openaiStatus: document.querySelector("#openaiStatus"),
   performanceButton: document.querySelector("#performanceButton"),
   settingsButton: document.querySelector("#settingsButton"),
+  accountButton: document.querySelector("#accountButton"),
+  accountButtonLabel: document.querySelector("#accountButtonLabel"),
+  accountButtonMeta: document.querySelector("#accountButtonMeta"),
+  accountPopover: document.querySelector("#accountPopover"),
+  accountPopoverContent: document.querySelector("#accountPopoverContent"),
   deskButton: document.querySelector("#deskButton"),
   refreshButton: document.querySelector("#refreshButton"),
   signalUpdateToast: document.querySelector("#signalUpdateToast"),
@@ -715,6 +721,7 @@ async function loadDashboard(options = {}) {
     state.newsStatus = newsStatus;
     state.openaiStatus = openaiStatus;
     maybeNotifySchedulerRun(schedulerStatus);
+    renderAccountMenu();
     renderUserAccountStatus();
     renderUserSettingsStatus();
     renderAuthStatus();
@@ -3135,6 +3142,7 @@ function renderCandidateSourceDetail(rows = null) {
 function render() {
   updateShellView();
   updateModeStatus();
+  renderAccountMenu();
   renderMarket();
   renderMetrics();
   renderTradeDecisionStatus();
@@ -3295,6 +3303,97 @@ function userLoginRequiredMarkup() {
   `;
 }
 
+function socialAuthMarkup() {
+  return `
+    <div class="social-auth-row" aria-label="소셜 로그인">
+      <button type="button" class="social-auth-button" disabled title="Google OAuth Client ID와 callback 설정 후 활성화됩니다.">
+        <span>G</span>
+        Google로 계속
+      </button>
+      <button type="button" class="social-auth-button" disabled title="Toss OAuth 또는 제휴 로그인 설정 후 활성화됩니다.">
+        <span>T</span>
+        Toss로 계속
+      </button>
+    </div>
+    <p class="account-hint">소셜 로그인은 OAuth 설정을 연결한 뒤 활성화됩니다. 지금은 이메일 계정으로 개인화를 사용할 수 있습니다.</p>
+  `;
+}
+
+function renderAccountMenu() {
+  if (!els.accountButton || !els.accountPopover || !els.accountPopoverContent) return;
+  const profile = state.user?.user;
+  const authenticated = Boolean(state.user?.authenticated && profile);
+  const watchCount = Number(state.user?.watchlist?.length ?? 0);
+  const displayName = profile?.displayName || profile?.email?.split("@")?.[0] || "계정";
+
+  els.accountButton.classList.toggle("authenticated", authenticated);
+  els.accountButton.setAttribute("aria-expanded", String(Boolean(state.accountMenuOpen)));
+  if (els.accountButtonLabel) {
+    els.accountButtonLabel.textContent = authenticated ? displayName : "로그인";
+  }
+  if (els.accountButtonMeta) {
+    els.accountButtonMeta.textContent = authenticated ? `${watchCount} 관심 · 개인화 ON` : "개인화";
+  }
+
+  els.accountPopover.hidden = !state.accountMenuOpen;
+  if (!state.accountMenuOpen) return;
+
+  if (authenticated) {
+    els.accountPopoverContent.innerHTML = `
+      <div class="account-popover-head">
+        <span>계정</span>
+        <strong>${escapeHtml(profile.email)}</strong>
+        <em>로그인 후 관심종목, 제외 조건, 후보 기준이 계정별로 적용됩니다.</em>
+      </div>
+      <div class="account-status-grid">
+        <div><span>개인화</span><strong class="ok">적용 중</strong></div>
+        <div><span>관심종목</span><strong>${watchCount}개</strong></div>
+        <div><span>위험 성향</span><strong>${escapeHtml(personalRiskLabel(state.user?.settings?.riskProfile))}</strong></div>
+        <div><span>후보 기준</span><strong>계정 저장</strong></div>
+      </div>
+      <div class="account-actions">
+        <button type="button" data-account-menu-action="settings">개인 설정</button>
+        <button type="button" data-user-auth-action="logout">로그아웃</button>
+      </div>
+    `;
+  } else {
+    els.accountPopoverContent.innerHTML = `
+      <div class="account-popover-head">
+        <span>개인화 시작</span>
+        <strong>로그인하면 후보가 내 기준으로 정렬됩니다.</strong>
+        <em>비로그인 상태에서는 공통 후보와 공통 판단만 표시됩니다.</em>
+      </div>
+      ${socialAuthMarkup()}
+      <div class="settings-form account-form">
+        <label>이메일<input type="email" data-user-field="email" autocomplete="email" placeholder="you@example.com" /></label>
+        <label>비밀번호<input type="password" data-user-field="password" autocomplete="current-password" placeholder="8자 이상" /></label>
+        <label>표시 이름<input type="text" data-user-field="displayName" autocomplete="name" placeholder="회원가입 시 선택" /></label>
+        <div class="account-actions">
+          <button type="button" data-user-auth-action="login">로그인</button>
+          <button type="button" data-user-auth-action="signup">회원가입</button>
+        </div>
+        ${state.user?.message ? `<p class="form-message">${escapeHtml(state.user.message)}</p>` : ""}
+      </div>
+    `;
+  }
+
+  els.accountPopoverContent.querySelectorAll("[data-user-auth-action]").forEach((button) => {
+    button.addEventListener("click", () => handleUserAuthAction(button.dataset.userAuthAction, els.accountPopoverContent));
+  });
+  els.accountPopoverContent.querySelectorAll("[data-account-menu-action='settings']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.accountMenuOpen = false;
+      state.view = "settings";
+      state.settingsTab = "personal";
+      writeStoredValue("marketSignalSettingsTab", state.settingsTab);
+      updateViewButtons();
+      updateShellView();
+      renderAccountMenu();
+      renderSettingsPanels();
+    });
+  });
+}
+
 function renderUserAccountStatus() {
   if (!els.userAccountStatus) return;
   const profile = state.user?.user;
@@ -3310,6 +3409,7 @@ function renderUserAccountStatus() {
   } else {
     els.userAccountStatus.innerHTML = `
       <div class="settings-form">
+        ${socialAuthMarkup()}
         <label>이메일<input type="email" data-user-field="email" autocomplete="email" placeholder="you@example.com" /></label>
         <label>비밀번호<input type="password" data-user-field="password" autocomplete="current-password" placeholder="8자 이상" /></label>
         <label>표시 이름<input type="text" data-user-field="displayName" autocomplete="name" placeholder="선택 사항" /></label>
@@ -3322,7 +3422,7 @@ function renderUserAccountStatus() {
     `;
   }
   els.userAccountStatus.querySelectorAll("[data-user-auth-action]").forEach((button) => {
-    button.addEventListener("click", () => handleUserAuthAction(button.dataset.userAuthAction));
+    button.addEventListener("click", () => handleUserAuthAction(button.dataset.userAuthAction, els.userAccountStatus));
   });
 }
 
@@ -3446,8 +3546,7 @@ function renderUserSettingsStatus() {
   els.userSettingsStatus.querySelector("[data-user-settings-action='save']")?.addEventListener("click", saveUserSettingsFromForm);
 }
 
-function collectUserAuthFields() {
-  const root = els.userAccountStatus;
+function collectUserAuthFields(root = els.userAccountStatus) {
   return {
     email: root?.querySelector("[data-user-field='email']")?.value?.trim() || "",
     password: root?.querySelector("[data-user-field='password']")?.value || "",
@@ -3455,35 +3554,41 @@ function collectUserAuthFields() {
   };
 }
 
-async function handleUserAuthAction(action) {
+async function handleUserAuthAction(action, root = els.userAccountStatus) {
   if (state.user?.loading) return;
   if (action === "logout") {
     state.user = { ...state.user, loading: true, message: "로그아웃 중입니다." };
+    renderAccountMenu();
     renderUserAccountStatus();
     try {
       await postJson("/api/auth/logout", {});
       state.user = { authenticated: false, user: null, settings: null, watchlist: [], loading: false, message: "로그아웃되었습니다." };
+      state.accountMenuOpen = false;
       await loadDashboard();
     } catch (error) {
       state.user = { ...state.user, loading: false, message: "로그아웃에 실패했습니다." };
+      renderAccountMenu();
       renderUserAccountStatus();
     }
     return;
   }
 
-  const fields = collectUserAuthFields();
+  const fields = collectUserAuthFields(root);
   if (!fields.email || !fields.password) {
     state.user = { ...state.user, message: "이메일과 비밀번호를 입력하세요." };
+    renderAccountMenu();
     renderUserAccountStatus();
     return;
   }
   if (action === "signup" && fields.password.length < 8) {
     state.user = { ...state.user, message: "비밀번호는 8자 이상이어야 합니다." };
+    renderAccountMenu();
     renderUserAccountStatus();
     return;
   }
 
   state.user = { ...state.user, loading: true, message: action === "signup" ? "회원가입 중입니다." : "로그인 중입니다." };
+  renderAccountMenu();
   renderUserAccountStatus();
   try {
     const payload = await postJson(action === "signup" ? "/api/auth/signup" : "/api/auth/login", fields, 20000);
@@ -3495,12 +3600,14 @@ async function handleUserAuthAction(action) {
       loading: false,
       message: action === "signup" ? "계정이 생성되었습니다." : "로그인되었습니다."
     };
+    state.accountMenuOpen = false;
     await loadDashboard();
   } catch (error) {
     const message = error?.message === "invalid-login"
       ? "이메일 또는 비밀번호가 올바르지 않습니다."
       : error?.message || "계정 처리에 실패했습니다. DB 연결 상태를 확인하세요.";
     state.user = { ...state.user, loading: false, message };
+    renderAccountMenu();
     renderUserAccountStatus();
   }
 }
@@ -7873,6 +7980,28 @@ if (els.performanceButton) {
 if (els.settingsButton) {
   els.settingsButton.addEventListener("click", showSettingsView);
 }
+
+if (els.accountButton) {
+  els.accountButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.accountMenuOpen = !state.accountMenuOpen;
+    renderAccountMenu();
+  });
+}
+
+document.addEventListener("click", (event) => {
+  if (!state.accountMenuOpen) return;
+  const target = event.target;
+  if (target?.closest?.("#accountButton, #accountPopover")) return;
+  state.accountMenuOpen = false;
+  renderAccountMenu();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !state.accountMenuOpen) return;
+  state.accountMenuOpen = false;
+  renderAccountMenu();
+});
 
 if (els.deskButton) {
   els.deskButton.addEventListener("click", showDeskView);
