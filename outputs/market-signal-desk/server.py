@@ -18109,13 +18109,29 @@ def snapshot_storage_status(fast: bool = True) -> dict:
                 news_events = news_event_storage_status()
                 candidate_data = candidate_data_snapshot_status(fast=fast)
                 market_data = market_data_latest_status(fast=fast)
+    market_by_type = market_data.get("byType", {}) if isinstance(market_data.get("byType"), dict) else {}
+    market_news_count = bounded_int(market_by_type.get("news", 0), 0, 10_000_000)
+    market_disclosure_count = bounded_int(market_by_type.get("disclosures", market_by_type.get("disclosure", 0)), 0, 10_000_000)
+    market_evidence_count = market_news_count + market_disclosure_count
+    news_event_count = bounded_int(news_events.get("count", 0), 0, 10_000_000)
+    news_persistent = bool(
+        news_events.get("persistent")
+        or (market_data.get("persistent") and market_evidence_count > 0)
+    )
+    evidence_read_source = (
+        "news_events"
+        if news_events.get("persistent")
+        else "market_data_latest"
+        if news_persistent
+        else news_events.get("implementation", "")
+    )
     analysis_ready = bool(
         bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000) > 0
         and bounded_int(market_data.get("itemCount", 0), 0, 1_000_000) > 0
     )
-    news_ready = bool(bounded_int(news_events.get("count", 0), 0, 10_000_000) > 0)
+    news_ready = bool(news_event_count > 0 or market_evidence_count > 0)
     analysis_persistent = bool(candidate_data.get("persistent") and market_data.get("persistent") and analysis_ready)
-    evidence_persistent = bool(analysis_persistent and news_events.get("persistent") and news_ready)
+    evidence_persistent = bool(analysis_persistent and news_persistent and news_ready)
     stored_candidate_count = bounded_int(candidate_data.get("itemCount", 0), 0, 1_000_000)
     basis_counts = market_data.get("basisCounts", {}) if isinstance(market_data.get("basisCounts"), dict) else {}
     price_record_count = bounded_int(market_data.get("priceRecordCount", market_data.get("priceCount", 0)), 0, 1_000_000)
@@ -18167,14 +18183,14 @@ def snapshot_storage_status(fast: bool = True) -> dict:
     collector_roles = {
         "candidateDiscovery": "ready" if stored_candidate_count > 0 else "waiting",
         "priceCollector": "ready" if stored_price_count > 0 else "waiting",
-        "depthCollector": "ready" if bounded_int(market_data.get("byType", {}).get("candles", 0) if isinstance(market_data.get("byType"), dict) else 0, 0, 1_000_000) > 0 else "waiting",
+        "depthCollector": "ready" if bounded_int(market_by_type.get("candles", 0), 0, 1_000_000) > 0 else "waiting",
         "newsCollector": "ready" if news_ready else "waiting",
         "analyzer": "ready" if analysis_ready else "waiting",
         "snapshotWriter": "ready" if bounded_int(len(recent_scheduler_runs(1)), 0, 10) > 0 else "waiting",
     }
     if db_status["enabled"] and db_status["ready"]:
         recent_runs = recent_scheduler_runs()
-        data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent") and news_events.get("persistent"))
+        data_storage_ready = bool(candidate_data.get("persistent") and market_data.get("persistent") and news_persistent)
         price_decision_ready = bool(market_data.get("decisionReady") or usable_price_count > 0)
         operation_ready = bool(evidence_persistent and price_decision_ready)
         display_fallback_ready = bool(analysis_ready and not analysis_persistent)
@@ -18208,6 +18224,11 @@ def snapshot_storage_status(fast: bool = True) -> dict:
             "analysisReady": analysis_ready,
             "analysisPersistent": analysis_persistent,
             "newsReady": news_ready,
+            "newsPersistent": news_persistent,
+            "evidenceReadSource": evidence_read_source,
+            "marketEvidenceCount": market_evidence_count,
+            "marketNewsEventCount": market_news_count,
+            "marketDisclosureEventCount": market_disclosure_count,
             "evidencePersistent": evidence_persistent,
             "displayFallbackReady": display_fallback_ready,
             "degradedDisplayReady": degraded_display_ready,
