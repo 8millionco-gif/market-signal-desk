@@ -1980,6 +1980,27 @@ function compressionForDisplay(item) {
   };
 }
 
+function entryReadinessForDisplay(item) {
+  const compression = item?.candidateCompression ?? {};
+  const tradeGate = item?.tradeDataGate ?? {};
+  const validation = signalValidationForDisplay(item);
+  const entryGate = compression.entryGate && typeof compression.entryGate === "object"
+    ? compression.entryGate
+    : item?.entryReactionGate && typeof item.entryReactionGate === "object"
+      ? item.entryReactionGate
+      : {};
+  const validationKey = String(compression.validationKey || validation.key || "");
+  const entryGateKey = String(compression.entryGateKey || entryGate.key || "");
+  return {
+    tier: compressionForDisplay(item).tier,
+    tradeReady: Boolean(compression.tradeReady || tradeGate.tradeReady),
+    entryReady: Boolean(compression.entryReady || tradeGate.entryReady || validation.entryReady),
+    validationConfirmed: validationKey === "confirmed",
+    gateReady: Boolean(entryGate.ready) || entryGateKey === "entry_ready",
+    gateKey: entryGateKey
+  };
+}
+
 function isCoreCandidate(item) {
   return compressionForDisplay(item).tier === "core";
 }
@@ -2613,20 +2634,13 @@ function candidatePoolStateForDisplay(item) {
 }
 
 function isActionCandidate(item) {
-  const gate = item?.qualityGate;
-  if (["defer", "exclude"].includes(gate?.key)) return false;
-  if (compressionForDisplay(item).tier === "entry") return true;
-  if (gate?.key === "actionable") return true;
-  const group = decisionGroupForDisplay(item);
-  const plan = tradePlan(item);
-  const score = Number(item?.totalScore ?? 0);
-  const readiness = Number(item?.triggerReadiness ?? 0);
-  const risk = Number(item?.score?.riskPenalty ?? 0);
-  const heat = Number(item?.score?.heatPenalty ?? 0);
-  if (plan.tone === "risk") return false;
-  if (!plan.hasPrice || plan.tone !== "buy") return false;
-  if (group.key === "action" && risk < 18 && heat < 10) return true;
-  return score >= 78 && readiness >= 74 && risk < 18 && heat < 10;
+  if (isExcludeCandidate(item)) return false;
+  const readiness = entryReadinessForDisplay(item);
+  if (readiness.tier !== "entry") return false;
+  return Boolean(
+    readiness.tradeReady ||
+    (readiness.entryReady && readiness.validationConfirmed && readiness.gateReady)
+  );
 }
 
 function isPullbackCandidate(item) {
@@ -2647,6 +2661,13 @@ function isHoldingCandidate(item) {
 }
 
 function isExcludeCandidate(item) {
+  const compression = compressionForDisplay(item);
+  if (compression.tier === "exclude") return true;
+  const pool = item?.candidatePool ?? item?.discovery?.poolMemory ?? {};
+  const poolState = String(pool.stateKey || pool.state || "").toLowerCase();
+  if (["exclude", "excluded", "expired"].includes(poolState)) return true;
+  const actionKey = String(item?.finalDecision?.actionKey || "").toLowerCase();
+  if (["exclude", "stop"].includes(actionKey)) return true;
   if (item?.qualityGate?.key === "exclude") return true;
   const group = decisionGroupForDisplay(item);
   const plan = tradePlan(item);
