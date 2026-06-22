@@ -191,6 +191,24 @@ SIGNAL_LIVE_PRICE_SYMBOL_LIMIT = max(
         int(os.getenv("SIGNAL_LIVE_PRICE_SYMBOL_MAX_LIMIT", "30")),
     ),
 )
+SIGNAL_INTRADAY_TOSS_OVERLAY = os.getenv("SIGNAL_INTRADAY_TOSS_OVERLAY", "1").lower() not in {"0", "false", "no", "off"}
+SIGNAL_LIVE_PRICE_OVERLAY_SYMBOL_LIMIT = max(
+    1,
+    min(
+        int(os.getenv("SIGNAL_LIVE_PRICE_OVERLAY_SYMBOL_LIMIT", "20") or "20"),
+        SIGNAL_LIVE_PRICE_SYMBOL_LIMIT,
+    ),
+)
+SIGNAL_LIVE_PRICE_OVERLAY_MIN_INTERVAL_SECONDS = max(
+    1,
+    int(
+        os.getenv(
+            "SIGNAL_LIVE_PRICE_OVERLAY_MIN_INTERVAL_SECONDS",
+            str(max(5, SIGNAL_LIVE_PRICE_POLL_SECONDS)),
+        )
+        or str(max(5, SIGNAL_LIVE_PRICE_POLL_SECONDS))
+    ),
+)
 SIGNAL_LIVE_STATE_STORAGE_ENABLED = os.getenv("SIGNAL_LIVE_STATE_STORAGE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 SIGNAL_LIVE_STATE_RETAIN_SECONDS = int(os.getenv("SIGNAL_LIVE_STATE_RETAIN_SECONDS", str(max(180, SIGNAL_LIVE_PRICE_POLL_SECONDS * 18))))
 SIGNAL_LIVE_STATE_MAX_ITEMS = int(os.getenv("SIGNAL_LIVE_STATE_MAX_ITEMS", "240"))
@@ -497,6 +515,7 @@ FX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.repla
 INDEX_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 DISCOVERY_CACHE: dict[str, object] = {"payload": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 LIVE_PRICE_RESPONSE_CACHE: dict[tuple[str, str, tuple[str, ...]], dict[str, object]] = {}
+LIVE_PRICE_ON_DEMAND_REFRESH_AT: dict[str, datetime] = {}
 STORAGE_STATUS_CACHE: dict[str, object] = {"payload": None, "created_at": datetime.min.replace(tzinfo=timezone.utc), "expires_at": datetime.min.replace(tzinfo=timezone.utc)}
 DB_KV_READ_CACHE: dict[str, dict[str, object]] = {}
 DB_KV_READ_CACHE_STATS: dict[str, int] = {"hits": 0, "misses": 0, "writes": 0, "evictions": 0}
@@ -506,6 +525,7 @@ GDELT_BACKOFF_UNTIL = datetime.min.replace(tzinfo=timezone.utc)
 SCHEDULER_LOCK = threading.Lock()
 DISCOVERY_BOT_LOCK = threading.Lock()
 LIVE_PRICE_RESPONSE_CACHE_LOCK = threading.Lock()
+LIVE_PRICE_ON_DEMAND_REFRESH_LOCK = threading.Lock()
 STORAGE_STATUS_CACHE_LOCK = threading.Lock()
 DB_KV_READ_CACHE_LOCK = threading.Lock()
 CANDIDATE_POOL_LOCK = threading.Lock()
@@ -24055,7 +24075,14 @@ def dashboard_base_for_live_prices_fast(mode: str, store_payloads: dict | None =
         dashboard_payload_from_market_data_latest_store(mode, market_data_payload),
     ):
         if payload is not None:
-            return payload
+            return attach_live_price_diagnostics(
+                payload,
+                read_source="db-market-data-latest-lite",
+                db_only=True,
+                cache_hit=True,
+                toss_requested_count=0,
+                toss_received_count=0,
+            )
     return seed_dashboard_payload_for_live_prices_fast(mode), "seed_fast"
 
 
@@ -24259,6 +24286,131 @@ def price_only_selection_status(candidates: list[dict], base_summary: dict, base
     return status
 
 
+def live_price_diag_int(value, default: int = 0) -> int:
+    try:
+        if value in ("", None):
+            return int(default)
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def live_price_diagnostic_counts(candidates: list[dict]) -> dict:
+    fresh_count = 0
+    stale_count = 0
+    last_updated_at = ""
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        live_price = item.get("livePrice", {}) if isinstance(item.get("livePrice"), dict) else {}
+        freshness = live_price.get("freshness", {}) if isinstance(live_price.get("freshness"), dict) else {}
+        price_value = (
+            live_price.get("lastPrice")
+            or live_price.get("price")
+            or item.get("price")
+            or item.get("lastPrice")
+        )
+        updated_at = str(
+            live_price.get("updatedAt")
+            or live_price.get("timestamp")
+            or item.get("updatedAt")
+            or item.get("updated")
+            or ""
+        ).strip()
+        if updated_at and (not last_updated_at or updated_at > last_updated_at):
+            last_updated_at = updated_at
+        status = str(freshness.get("status", "") or "").strip().lower()
+        basis = str(live_price.get("basis", "") or item.get("priceBasis", "") or "").strip().lower()
+        has_price = price_value not in ("", None, "-")
+        stale_flag = bool(
+            live_price.get("stale")
+            or live_price.get("isStale")
+            or item.get("stale")
+            or status in {"stale", "last-good", "last_good", "expired", "old"}
+            or basis in {"last_good", "unknown"}
+        )
+        if has_price and not stale_flag:
+            fresh_count += 1
+        elif has_price or stale_flag:
+            stale_count += 1
+    return {
+        "freshCount": fresh_count,
+        "staleCount": stale_count,
+        "lastUpdatedAt": last_updated_at,
+    }
+
+
+def attach_live_price_diagnostics(
+    payload: dict,
+    *,
+    read_source: str,
+    db_only: bool,
+    cache_hit: bool,
+    toss_requested_count: int = 0,
+    toss_received_count: int = 0,
+    fresh_count: int | None = None,
+    stale_count: int | None = None,
+    last_updated_at: str = "",
+) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    candidates = payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []
+    counts = live_price_diagnostic_counts(candidates)
+    fresh = counts["freshCount"] if fresh_count is None else live_price_diag_int(fresh_count)
+    stale = counts["staleCount"] if stale_count is None else live_price_diag_int(stale_count)
+    latest_at = str(last_updated_at or counts["lastUpdatedAt"] or payload.get("updatedAt") or "").strip()
+    diagnostics = {
+        "readSource": read_source,
+        "dbOnly": bool(db_only),
+        "cacheHit": bool(cache_hit),
+        "tossRequestedCount": live_price_diag_int(toss_requested_count),
+        "tossReceivedCount": live_price_diag_int(toss_received_count),
+        "freshCount": fresh,
+        "staleCount": stale,
+        "lastUpdatedAt": latest_at,
+    }
+    payload.update(diagnostics)
+
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    summary.update({
+        "livePriceReadSource": diagnostics["readSource"],
+        "livePriceDbOnly": diagnostics["dbOnly"],
+        "livePriceCacheHit": diagnostics["cacheHit"],
+        "livePriceTossRequestedCount": diagnostics["tossRequestedCount"],
+        "livePriceTossReceivedCount": diagnostics["tossReceivedCount"],
+        "livePriceFreshCount": diagnostics["freshCount"],
+        "livePriceStaleCount": diagnostics["staleCount"],
+        "livePriceLastUpdatedAt": diagnostics["lastUpdatedAt"],
+    })
+    payload["summary"] = summary
+
+    cache = payload.get("cache", {}) if isinstance(payload.get("cache"), dict) else {}
+    cache["hit"] = diagnostics["cacheHit"]
+    payload["cache"] = cache
+
+    integrations = payload.get("integrations", {}) if isinstance(payload.get("integrations"), dict) else {}
+    live_price_status = integrations.get("livePrice", {}) if isinstance(integrations.get("livePrice"), dict) else {}
+    live_price_status.update(diagnostics)
+    integrations["livePrice"] = live_price_status
+
+    toss_status = integrations.get("toss", {}) if isinstance(integrations.get("toss"), dict) else {}
+    prices_status = toss_status.get("prices", {}) if isinstance(toss_status.get("prices"), dict) else {}
+    prices_status.update({
+        "readSource": diagnostics["readSource"],
+        "dbOnly": diagnostics["dbOnly"],
+        "cacheHit": diagnostics["cacheHit"],
+        "requestedCount": diagnostics["tossRequestedCount"],
+        "receivedCount": diagnostics["tossReceivedCount"],
+        "freshCount": diagnostics["freshCount"],
+        "staleCount": diagnostics["staleCount"],
+        "lastUpdatedAt": diagnostics["lastUpdatedAt"],
+    })
+    toss_status["prices"] = prices_status
+    integrations["toss"] = toss_status
+    payload["integrations"] = integrations
+    return payload
+
+
 def dashboard_live_price_payload_from_db_lite(symbols: list[str], mode: str, detail: str = "price") -> dict:
     mode = normalize_signal_mode(mode)
     session = market_session_context("KR")
@@ -24412,6 +24564,15 @@ def dashboard_live_price_payload_from_db_lite(symbols: list[str], mode: str, det
             "message": "DB 가격 필드 직접 조회 결과입니다.",
         },
     }
+    payload = attach_live_price_diagnostics(
+        payload,
+        read_source="db-market-data-latest-lite",
+        db_only=True,
+        cache_hit=False,
+        toss_requested_count=0,
+        toss_received_count=0,
+    )
+
     if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
         with LIVE_PRICE_RESPONSE_CACHE_LOCK:
             LIVE_PRICE_RESPONSE_CACHE[cache_key] = {
@@ -24458,7 +24619,15 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
             live_price_status["cache"] = payload["cache"]
             integrations["livePrice"] = live_price_status
             payload["integrations"] = integrations
-            return normalize_dashboard_visible_candidates(payload)
+            payload = normalize_dashboard_visible_candidates(payload)
+            return attach_live_price_diagnostics(
+                payload,
+                read_source="db-market-data-latest",
+                db_only=True,
+                cache_hit=True,
+                toss_requested_count=0,
+                toss_received_count=0,
+            )
     now_text = datetime.now(KST).isoformat(timespec="seconds")
     store_payloads = live_price_fast_store_payloads()
     base_payload, base_source = dashboard_base_for_live_prices_fast(mode, store_payloads=store_payloads)
@@ -24626,6 +24795,14 @@ def dashboard_live_price_payload_from_db(symbols: list[str], mode: str, detail: 
         "message": "DB 최신 스냅샷 응답을 새로 구성했습니다.",
     }
     payload = normalize_dashboard_visible_candidates(payload)
+    payload = attach_live_price_diagnostics(
+        payload,
+        read_source="db-market-data-latest",
+        db_only=True,
+        cache_hit=False,
+        toss_requested_count=0,
+        toss_received_count=0,
+    )
     if SIGNAL_LIVE_PRICE_RESPONSE_CACHE_SECONDS > 0:
         with LIVE_PRICE_RESPONSE_CACHE_LOCK:
             LIVE_PRICE_RESPONSE_CACHE[cache_key] = {
