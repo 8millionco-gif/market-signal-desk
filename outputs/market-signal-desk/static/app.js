@@ -627,6 +627,16 @@ function browserCachedDashboardPayload(mode, error) {
   return dashboard;
 }
 
+function shouldRenderBrowserWarmCache() {
+  if (navigator.onLine === false) return true;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("warmCache") === "1";
+  } catch (error) {
+    return false;
+  }
+}
+
 function uniqueTexts(values = [], limit = 8) {
   const seen = new Set();
   const result = [];
@@ -680,6 +690,19 @@ function adminHeaders(extra = {}) {
   return headers;
 }
 
+function noStorePath(path) {
+  const text = String(path ?? "");
+  if (!text.startsWith("/api/")) return text;
+  try {
+    const url = new URL(text, window.location.origin);
+    url.searchParams.set("_", String(Date.now()));
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch (error) {
+    const join = text.includes("?") ? "&" : "?";
+    return `${text}${join}_=${Date.now()}`;
+  }
+}
+
 function isAuthError(error) {
   return error?.message === "auth-required";
 }
@@ -688,10 +711,12 @@ async function fetchJson(path, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(path, {
+    const requestPath = noStorePath(path);
+    const response = await fetch(requestPath, {
+      cache: "no-store",
       signal: controller.signal,
       credentials: "same-origin",
-      headers: adminHeaders()
+      headers: adminHeaders({ "Cache-Control": "no-cache", Pragma: "no-cache" })
     });
     if (response.status === 401) {
       let payload = {};
@@ -957,7 +982,7 @@ async function loadDashboard(options = {}) {
   });
 
   let warmCacheRendered = false;
-  if (!forceRefresh) {
+  if (!forceRefresh && shouldRenderBrowserWarmCache()) {
     const cachedDashboard = browserCachedDashboardPayload(state.mode, { name: "WarmStart" });
     if (cachedDashboard) {
       state.dashboard = cachedDashboard;
@@ -1173,26 +1198,42 @@ function mergeLivePricePayload(payload) {
   if (!state.dashboard || !incoming.length) return false;
   const priceOnly = payload?.detail === "price" || payload?.selectionCycle === "price-only";
   const existing = state.dashboard.candidates ?? [];
-  const existingBySymbol = new Map(existing.map((item) => [item.symbol, item]));
+  const allowAppend = !priceOnly && payload?.allowCandidateAppend === true;
+  const existingBySymbol = new Map();
+  existing.forEach((item) => {
+    const key = candidateLiveSymbol(item);
+    if (key) existingBySymbol.set(key, item);
+  });
   const signatureOptions = { priceOnly };
-  const previousSignatures = new Map(existing.map((item) => [item.symbol, candidateLiveRenderSignature(item, signatureOptions)]));
-  const incomingBySymbol = new Map(incoming.map((item) => [item.symbol, item]));
+  const previousSignatures = new Map(
+    existing
+      .map((item) => [candidateLiveSymbol(item), candidateLiveRenderSignature(item, signatureOptions)])
+      .filter(([key]) => key)
+  );
+  const incomingBySymbol = new Map();
+  incoming.forEach((item) => {
+    const key = candidateLiveSymbol(item);
+    if (key && !incomingBySymbol.has(key)) incomingBySymbol.set(key, item);
+  });
   const incomingSymbols = new Set(incomingBySymbol.keys());
   const merged = existing.map((item) => {
-    const next = incomingBySymbol.get(item.symbol);
+    const next = incomingBySymbol.get(candidateLiveSymbol(item));
     return next ? mergeLiveCandidate(item, next, { priceOnly }) : item;
   });
-  if (payload?.allowCandidateAppend) {
+  if (allowAppend) {
     incoming.forEach((item) => {
-      if (!existingBySymbol.has(item.symbol)) merged.push(item);
+      const key = candidateLiveSymbol(item);
+      if (key && !existingBySymbol.has(key)) merged.push(item);
     });
   }
   const changedSymbols = merged
-    .filter((item) => previousSignatures.get(item.symbol) !== candidateLiveRenderSignature(item, signatureOptions))
-    .map((item) => item.symbol);
+    .filter((item) => previousSignatures.get(candidateLiveSymbol(item)) !== candidateLiveRenderSignature(item, signatureOptions))
+    .map((item) => candidateLiveSymbol(item))
+    .filter(Boolean);
+  const selectedFromMerged = merged.find((item) => candidateLiveSymbol(item) === normalizeLiveSymbol(state.selectedSymbol));
   state.dashboard = {
     ...state.dashboard,
-    generatedAt: payload.updatedAt || state.dashboard.generatedAt,
+    generatedAt: priceOnly ? state.dashboard.generatedAt : (payload.updatedAt || state.dashboard.generatedAt),
     summary: {
       ...(state.dashboard.summary ?? {}),
       ...livePriceSummaryPatch(payload.summary, { priceOnly })
@@ -1202,15 +1243,16 @@ function mergeLivePricePayload(payload) {
       ...livePriceIntegrationsPatch(payload.integrations)
     },
     candidates: merged,
-    selected: merged.find((item) => item.symbol === state.selectedSymbol) || payload.selected || state.dashboard.selected
+    selected: selectedFromMerged || (priceOnly ? state.dashboard.selected : payload.selected || state.dashboard.selected)
   };
   state.livePrice = {
     ...state.livePrice,
     changedSymbols,
     changedCount: changedSymbols.length
   };
-  if (state.selectedLookup && incomingSymbols.has(state.selectedLookup.symbol)) {
-    state.selectedLookup = merged.find((item) => item.symbol === state.selectedLookup.symbol) || null;
+  const selectedLookupSymbol = normalizeLiveSymbol(state.selectedLookup?.symbol);
+  if (selectedLookupSymbol && incomingSymbols.has(selectedLookupSymbol)) {
+    state.selectedLookup = merged.find((item) => candidateLiveSymbol(item) === selectedLookupSymbol) || null;
   }
   return true;
 }
@@ -4643,7 +4685,7 @@ function snapshotTopText(run) {
 }
 
 function runSignalKey(run) {
-  const value = run?.id ?? run?.snapshotId ?? run?.runId ?? run?.createdAt ?? run?.generatedAt ?? run?.finishedAt ?? run?.updatedAt;
+  const value = run?.id ?? run?.snapshotId ?? run?.runId ?? run?.createdAt ?? run?.finishedAt;
   return String(value ?? "").trim();
 }
 
@@ -4658,26 +4700,29 @@ function latestDiscoveryRun(status = state.discoveryBotStatus) {
 }
 
 function candidatePoolSignalKey(discoveryStatus = state.discoveryBotStatus) {
+  const runKey = runSignalKey(latestDiscoveryRun(discoveryStatus));
+  if (runKey) return `discovery:${runKey}`;
   const pool = discoveryStatus?.candidatePool ?? discoveryStatus?.poolStatus ?? {};
   const summary = discoveryStatus?.summary ?? {};
-  return [
-    pool.poolRevision ?? pool.revision ?? summary.candidatePoolRevision,
-    pool.poolUpdatedAt ?? pool.updatedAt ?? summary.candidatePoolUpdatedAt,
-    pool.poolActiveCount ?? pool.activeCount,
-    pool.visibleCandidateCount,
-    pool.coreCount,
-    pool.entryCount,
-    pool.waitCount,
-    pool.portfolioCount,
-    pool.hiddenExcludedCount
-  ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "").join(":");
+  const value = [
+    pool.dashboardSnapshotId,
+    pool.snapshotId,
+    pool.latestSnapshotId,
+    summary.dashboardSnapshotId,
+    summary.snapshotId,
+    summary.latestSnapshotId,
+    summary.lastSnapshotAt,
+    summary.snapshotWrittenAt
+  ].find((item) => String(item ?? "").trim());
+  return value ? `discovery-snapshot:${value}` : "";
 }
 
 function statusSignalKey(schedulerStatus = state.schedulerStatus, discoveryStatus = state.discoveryBotStatus) {
+  const schedulerKey = runSignalKey(latestSchedulerRun(schedulerStatus));
+  const discoveryKey = candidatePoolSignalKey(discoveryStatus);
   return [
-    runSignalKey(latestSchedulerRun(schedulerStatus)),
-    runSignalKey(latestDiscoveryRun(discoveryStatus)),
-    candidatePoolSignalKey(discoveryStatus)
+    schedulerKey ? `scheduler:${schedulerKey}` : "",
+    discoveryKey
   ].filter(Boolean).join("|");
 }
 
@@ -4701,15 +4746,20 @@ function dashboardCandidateSignature(dashboard = state.dashboard) {
 
 function dashboardSignalKey(dashboard = state.dashboard) {
   const summary = dashboard?.summary ?? {};
+  const cache = dashboard?.cache ?? {};
   const value = [
-    summary.candidateSignalKey,
-    summary.candidateListRevision,
-    dashboardCandidateSignature(dashboard),
+    summary.dashboardSnapshotId,
     summary.snapshotId,
     dashboard?.snapshotId,
-    summary.runId
+    summary.snapshotRunId,
+    summary.runId,
+    cache.snapshotId,
+    cache.runId,
+    summary.snapshotWrittenAt,
+    summary.snapshotCreatedAt,
+    summary.savedAt
   ].find((item) => String(item ?? "").trim());
-  return String(value ?? "").trim();
+  return value ? `dashboard:${normalizeAnalysisMode(dashboard?.mode || state.mode)}:${value}` : "";
 }
 
 function activeSignalKey() {
@@ -4773,10 +4823,8 @@ function maybeShowSignalUpdate(schedulerStatus = state.schedulerStatus, discover
 function maybeShowDashboardSignalUpdate(payload) {
   if (!state.dashboard || state.activity.active || !payload || typeof payload !== "object") return;
   if (payload.detail === "price" || payload.selectionCycle === "price-only" || payload.priceOnly) return;
-  const hasCandidateSignal =
-    Boolean(payload.summary?.candidateSignalKey || payload.summary?.candidateListRevision) ||
-    Array.isArray(payload.candidates);
-  if (!hasCandidateSignal) return;
+  const source = payload.summary?.dashboardCacheSource ?? payload.summary?.readSource ?? payload.cache?.source;
+  if (source === "browser_cache" || source === "filesystem_fallback") return;
   const nextDashboardKey = dashboardSignalKey(payload);
   if (!nextDashboardKey) return;
   const key = [statusSignalKey(), nextDashboardKey].filter(Boolean).join("|");

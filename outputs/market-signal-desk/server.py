@@ -26259,9 +26259,15 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def send_json(self, payload, status: int = 200, headers: dict | None = None) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        default_headers = {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+        merged_headers = {**default_headers, **(headers or {})}
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        for key, value in (headers or {}).items():
+        for key, value in merged_headers.items():
             self.send_header(str(key), str(value))
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
