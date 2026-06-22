@@ -1784,6 +1784,65 @@ h3 {
   font-weight: 900;
 }
 
+[data-feed-price],
+[data-feed-change],
+[data-feed-time],
+[data-selected-price],
+[data-selected-change],
+[data-selected-price-meta],
+[data-reaction-card-meta],
+[data-now-current],
+[data-now-focus],
+.live-data-strip {
+  border-radius: 7px;
+  transition:
+    color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.value-changed {
+  animation: value-pulse 720ms ease-out;
+}
+
+.value-changed-up {
+  color: var(--red) !important;
+}
+
+.value-changed-down {
+  color: var(--blue) !important;
+}
+
+.value-changed-neutral {
+  color: var(--cyan) !important;
+}
+
+@keyframes value-pulse {
+  0% {
+    background: rgba(105, 210, 231, 0.18);
+    box-shadow: 0 0 0 0 rgba(105, 210, 231, 0.22);
+    transform: translateY(-1px);
+  }
+
+  58% {
+    background: rgba(105, 210, 231, 0.08);
+    box-shadow: 0 0 0 6px rgba(105, 210, 231, 0);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow: none;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .value-changed {
+    animation: none;
+  }
+}
+
 .sr-only {
   position: absolute;
   overflow: hidden;

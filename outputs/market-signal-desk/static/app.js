@@ -376,22 +376,73 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function setTextIfChanged(node, value) {
+const valueChangeClasses = [
+  "value-changed",
+  "value-changed-up",
+  "value-changed-down",
+  "value-changed-neutral"
+];
+const valueChangeTimers = new WeakMap();
+
+function valueChangeTone(value) {
+  const text = String(value ?? "").trim();
+  if (!text || text === "-") return "neutral";
+  if (text.includes("-") || text.includes("하락") || text.includes("이탈")) return "down";
+  if (text.includes("+") || text.includes("상승") || text.includes("도달")) return "up";
+  return "neutral";
+}
+
+function markValueChanged(node, tone = "neutral") {
   if (!node) return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+  const timer = valueChangeTimers.get(node);
+  if (timer) window.clearTimeout(timer);
+  node.classList.remove(...valueChangeClasses);
+  void node.offsetWidth;
+  const normalizedTone = ["up", "down", "neutral"].includes(tone) ? tone : "neutral";
+  node.classList.add("value-changed", `value-changed-${normalizedTone}`);
+  valueChangeTimers.set(
+    node,
+    window.setTimeout(() => {
+      node.classList.remove(...valueChangeClasses);
+      valueChangeTimers.delete(node);
+    }, 900)
+  );
+}
+
+function setTextIfChanged(node, value, options = {}) {
+  if (!node) return false;
   const next = String(value ?? "");
-  if (node.textContent !== next) node.textContent = next;
+  if (node.textContent === next) return false;
+  node.textContent = next;
+  if (options.animate) {
+    markValueChanged(node, options.tone || valueChangeTone(next));
+  }
+  return true;
 }
 
 function setClassIfChanged(node, value) {
   if (!node) return;
   const next = String(value ?? "");
-  if (node.className !== next) node.className = next;
+  const transient = valueChangeClasses.filter((className) => node.classList.contains(className));
+  const currentBase = node.className
+    .split(/\s+/)
+    .filter((className) => className && !valueChangeClasses.includes(className))
+    .join(" ");
+  if (currentBase !== next) {
+    node.className = [next, ...transient].filter(Boolean).join(" ");
+  }
 }
 
-function setHtmlIfChanged(node, value) {
-  if (!node) return;
+function setHtmlIfChanged(node, value, options = {}) {
+  if (!node) return false;
   const next = String(value ?? "");
-  if (node.innerHTML !== next) node.innerHTML = next;
+  if (node.innerHTML === next) return false;
+  node.innerHTML = next;
+  if (options.animate) {
+    markValueChanged(node, options.tone || "neutral");
+  }
+  return true;
 }
 
 function dashboardBrowserCacheKey(mode) {
@@ -1405,17 +1456,20 @@ function updateFeedPriceFragments(options = {}) {
       setTextIfChanged(score, item.totalScore ?? "-");
       setClassIfChanged(score, `score-pill ${scoreClass(item.totalScore)}`);
     }
-    setTextIfChanged(time, livePriceLabel(item) || item.updated || "");
-    setTextIfChanged(price, item.price || "-");
+    setTextIfChanged(time, livePriceLabel(item) || item.updated || "", { animate: true });
+    setTextIfChanged(price, item.price || "-", { animate: true });
     if (change) {
-      setTextIfChanged(change, displayCandidateChangeText(item));
       setClassIfChanged(change, candidateChangeClass(item));
+      setTextIfChanged(change, displayCandidateChangeText(item), {
+        animate: true,
+        tone: valueChangeTone(displayCandidateChangeText(item))
+      });
     }
     if (!priceOnly && decision) {
       setTextIfChanged(decision, primary.label);
       setClassIfChanged(decision, `feed-badge decision-badge decision-${primary.key}`);
     }
-    setHtmlIfChanged(liveData, liveDataCoverageChips(item, true));
+    setHtmlIfChanged(liveData, liveDataCoverageChips(item, true), { animate: true });
   });
 }
 
@@ -1434,13 +1488,16 @@ function updateSelectedPriceFragments(options = {}) {
   const decisionNode = document.querySelector("[data-selected-decision-summary]");
   const decisionLabelNode = decisionNode?.querySelector("strong");
   const decisionDetailNode = decisionNode?.querySelector("span");
-  setTextIfChanged(priceNode, item.price || "-");
+  setTextIfChanged(priceNode, item.price || "-", { animate: true });
   if (changeNode) {
-    setTextIfChanged(changeNode, displayCandidateChangeText(item));
     setClassIfChanged(changeNode, candidateChangeClass(item));
+    setTextIfChanged(changeNode, displayCandidateChangeText(item), {
+      animate: true,
+      tone: valueChangeTone(displayCandidateChangeText(item))
+    });
   }
-  setTextIfChanged(sourceNode, priceMeta(item));
-  setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item, true));
+  setTextIfChanged(sourceNode, priceMeta(item), { animate: true });
+  setHtmlIfChanged(liveDataNode, liveDataCoverageChips(item, true), { animate: true });
   if (priceOnly) {
     updateSelectedLivePriceOnlyFragments(item);
     return;
@@ -1459,8 +1516,14 @@ function updateSelectedPriceFragments(options = {}) {
 function updateSelectedLivePriceOnlyFragments(item) {
   const cardMeta = document.querySelector("[data-reaction-card-meta]");
   const liveGrid = document.querySelector("[data-reaction-live-grid]");
-  setTextIfChanged(cardMeta, priceMeta(item));
-  setHtmlIfChanged(liveGrid, reactionLiveGridHtml(item));
+  const plan = tradePlan(item);
+  const now = tradeNowGuide(item, plan);
+  const nowCurrent = document.querySelector("[data-now-current]");
+  const nowFocus = document.querySelector("[data-now-focus]");
+  setTextIfChanged(cardMeta, priceMeta(item), { animate: true });
+  setHtmlIfChanged(liveGrid, reactionLiveGridHtml(item), { animate: true });
+  setTextIfChanged(nowCurrent, now.current || "-", { animate: true });
+  setTextIfChanged(nowFocus, `기준 ${now.focus || "-"}`, { animate: true });
 }
 
 function updateSignalFlowFragments(item, plan, primaryDecision) {
