@@ -869,10 +869,10 @@ h3 {
   gap: 10px;
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 4px;
-  margin-right: -4px;
+  overflow: visible;
+  overscroll-behavior: auto;
+  padding-right: 0;
+  margin-right: 0;
 }
 
 .feed::-webkit-scrollbar {
@@ -1073,36 +1073,6 @@ h3 {
   color: var(--blue);
   font-size: 11px;
   font-weight: 900;
-}
-
-.feed-discovery-notice {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 8px;
-  padding: 12px;
-  border: 1px solid rgba(255, 214, 102, 0.22);
-  border-radius: 8px;
-  color: var(--text);
-  background: rgba(255, 214, 102, 0.08);
-}
-
-.feed-discovery-notice.active {
-  border-color: rgba(255, 214, 102, 0.34);
-  background: rgba(255, 214, 102, 0.11);
-}
-
-.feed-discovery-notice strong {
-  color: #ffd666;
-  font-size: 14px;
-  font-weight: 900;
-}
-
-.feed-discovery-notice span,
-.feed-discovery-notice em {
-  color: var(--muted);
-  font-size: 12px;
-  font-style: normal;
-  line-height: 1.45;
 }
 
 .logo-mark {
@@ -3419,8 +3389,8 @@ h3 {
   }
 
   .signal-panel .feed {
-    max-height: min(62vh, 680px);
-    overflow-y: auto;
+    max-height: none;
+    overflow: visible;
     padding-right: 0;
     margin-right: 0;
   }
@@ -3542,6 +3512,6 @@ h3 {
   }
 
   .signal-panel .feed {
-    max-height: 56vh;
+    max-height: none;
   }
 }

@@ -71,6 +71,7 @@ const state = {
   query: "",
   dashboard: null,
   feedExpanded: false,
+  feedVisibleLimit: 5,
   stockSearch: {
     query: "",
     loading: false,
@@ -259,9 +260,8 @@ const SETTINGS_TAB_COPY = {
   }
 };
 const CANDIDATE_DISPLAY_STICKY_MS = 120000;
-const CANDIDATE_FEED_VISIBLE_LIMIT = 24;
-const CANDIDATE_FEED_ALL_VISIBLE_LIMIT = 60;
-const CANDIDATE_FEED_EXPANDED_LIMIT = 120;
+const CANDIDATE_FEED_PAGE_SIZE = 5;
+const CANDIDATE_FEED_VISIBLE_LIMIT = CANDIDATE_FEED_PAGE_SIZE;
 
 function scoreClass(score) {
   if (score >= 75) return "";
@@ -1853,40 +1853,30 @@ function filteredCandidates() {
 }
 
 function candidateFeedBaseLimit() {
-  const expansionActive = isDiscoveryExpansionActive();
-  const target = candidatePoolVisibleTarget(0);
-  let limit = state.strategy === "all" ? CANDIDATE_FEED_ALL_VISIBLE_LIMIT : CANDIDATE_FEED_VISIBLE_LIMIT;
-  if (expansionActive) {
-    const expansionLimit = state.strategy === "all" ? 48 : 32;
-    const expansionCap = state.strategy === "all" ? 80 : 48;
-    limit = Math.max(limit, Math.min(Math.max(target, expansionLimit), expansionCap));
-  }
-  if (state.strategy === "wait" && expansionActive) {
-    limit = Math.max(limit, 36);
-  }
-  return limit;
+  return CANDIDATE_FEED_VISIBLE_LIMIT;
+}
+
+function resetCandidateFeedLimit() {
+  state.feedExpanded = false;
+  state.feedVisibleLimit = CANDIDATE_FEED_VISIBLE_LIMIT;
 }
 
 function visibleFeedCandidates(candidates = []) {
   const items = Array.isArray(candidates) ? candidates : [];
-  const queryActive = Boolean(state.query.trim());
   const baseLimit = candidateFeedBaseLimit();
-  const collapsedLimit = queryActive ? Math.max(baseLimit, CANDIDATE_FEED_ALL_VISIBLE_LIMIT) : baseLimit;
-  const target = candidatePoolVisibleTarget(items.length);
-  const expandedLimit = Math.max(
-    collapsedLimit,
-    CANDIDATE_FEED_EXPANDED_LIMIT,
-    Math.min(items.length, Math.max(target, 0))
+  const requestedLimit = Number(state.feedVisibleLimit);
+  const effectiveLimit = Math.min(
+    items.length,
+    Math.max(baseLimit, Number.isFinite(requestedLimit) ? Math.round(requestedLimit) : baseLimit)
   );
-  const canToggle = items.length > collapsedLimit;
-  const expanded = Boolean(state.feedExpanded && canToggle);
-  const effectiveLimit = expanded ? Math.min(items.length, expandedLimit) : collapsedLimit;
-  if (!canToggle) {
+  const canToggle = items.length > effectiveLimit;
+  const expanded = effectiveLimit > baseLimit;
+  if (!items.length) {
     return {
       items,
       hiddenCount: 0,
-      baseLimit: collapsedLimit,
-      expandedLimit,
+      baseLimit,
+      expandedLimit: baseLimit,
       canToggle: false,
       expanded: false
     };
@@ -1903,8 +1893,8 @@ function visibleFeedCandidates(candidates = []) {
   return {
     items: visible,
     hiddenCount: Math.max(0, items.length - visible.length),
-    baseLimit: collapsedLimit,
-    expandedLimit,
+    baseLimit,
+    expandedLimit: Math.min(items.length, effectiveLimit + CANDIDATE_FEED_PAGE_SIZE),
     canToggle,
     expanded
   };
@@ -1971,105 +1961,13 @@ function candidatePoolDisplaySummary(totalCount = 0) {
   return parts.join(" / ");
 }
 
-function discoveryTriggerLabel(trigger) {
-  const labels = {
-    core_entry_shortfall: "핵심·진입 후보 부족",
-    entry_empty: "진입 조건 미충족",
-    visible_candidate_shortfall: "실전 후보 보강 중",
-    domestic_visible_shortfall: "국내 후보 보강 중",
-    pool_active_shortfall: "감시 후보 확장 중",
-    high_exclusion_ratio: "탈락 종목 대체 중",
-    candidate_refill_shortfall: "실전 후보 보강 중",
-    pool_refill_shortfall: "후보 풀 보충 중",
-    excluded_replacement_needed: "탈락 종목 대체 중",
-    related_signal_expansion: "관련 뉴스 종목 확장"
-  };
-  return labels[String(trigger || "")] || "";
-}
-
-function discoveryNoticeReason(notice) {
-  const reasonLists = [notice.reasonLabels, notice.reasons];
-  for (const reasons of reasonLists) {
-    if (Array.isArray(reasons)) {
-      const found = reasons.find((reason) => typeof reason === "string" && reason.trim());
-      if (found) return found;
-    }
-  }
-  const triggers = Array.isArray(notice.triggers)
-    ? notice.triggers
-    : Array.isArray(notice.expansionTriggers)
-      ? notice.expansionTriggers
-      : [];
-  const firstTrigger = triggers.find((trigger) => typeof trigger === "string" && trigger.trim());
-  return discoveryTriggerLabel(firstTrigger);
-}
-
-function candidateDiscoveryNoticeMarkup() {
-  const summary = state.dashboard?.summary || {};
-  const notice = summary.discoveryNotice || {};
-  const pool = dashboardCandidatePoolSummary();
-  const core = numericSummaryValue(pool.coreCount, summary.coreCandidateCount);
-  const entry = numericSummaryValue(pool.entryCount, summary.entryCandidateCount, summary.actionCandidateCount);
-  const poolActive = numericSummaryValue(pool.poolActiveCount, summary.candidatePoolActiveCount, summary.candidatePoolCount);
-  const poolTarget = numericSummaryValue(pool.poolActiveTarget, summary.discoveryPoolActiveTarget);
-  const visible = numericSummaryValue(pool.visibleCandidateCount, summary.visibleCandidateCount, state.dashboard?.candidates?.length);
-  const visibleTarget = candidatePoolVisibleTarget();
-  const excluded = numericSummaryValue(pool.excludedHiddenCount, summary.hiddenExcludedCount);
-  const relatedAdded = numericSummaryValue(
-    pool.relatedExpansionAddedCount,
-    pool.relatedSignalExpansionAddedCount,
-    summary.relatedSignalExpansionAddedCount,
-    summary.relatedSignalExpansion?.addedCount
-  );
-  const relatedSeeds = numericSummaryValue(
-    pool.relatedExpansionSeedCount,
-    pool.relatedSignalExpansionSeedCount,
-    summary.relatedSignalExpansionSeedCount,
-    summary.relatedSignalExpansion?.seedCount
-  );
-  const active = Boolean(
-    notice.active
-      || pool.expansionActive
-      || summary.discoveryExpansionActive
-      || pool.relatedExpansionActive
-      || pool.relatedSignalExpansionActive
-      || summary.relatedSignalExpansionActive
-      || relatedAdded
-  );
-  if (core + entry > 0 && !active) return "";
-  const title = core + entry > 0 ? (notice.title || "후보 보강 중") : "핵심·진입 후보 발굴 중";
-  const policyText = "제외는 후보가 아니라 탈락 기록으로만 보관합니다.";
-  const excludedText = excluded
-    ? ` · 탈락 기록 ${excluded}개 제외`
-    : "";
-  const relatedText = relatedAdded
-    ? ` · 관련 신호 ${relatedSeeds || "-"}개에서 ${relatedAdded}종목 추가`
-    : "";
-  const message = core + entry > 0
-    ? `${policyText} ${notice.message || `서버가 관찰 풀 ${poolActive || "-"}개를 유지하며 새 후보를 보강합니다.`}${relatedText}${excludedText}`
-    : `${policyText} 실전 후보 ${visible || 0}${visibleTarget ? `/${visibleTarget}` : ""}개 · 관찰 풀 ${poolActive || 0}${poolTarget ? `/${poolTarget}` : ""}${relatedText}${excludedText}`;
-  const reason = relatedAdded ? "관련 뉴스 종목 확장" : discoveryNoticeReason(notice);
-  return `
-    <div class="feed-discovery-notice ${active ? "active" : ""}">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(message)}</span>
-      ${reason ? `<em>${escapeHtml(reason)}</em>` : ""}
-    </div>
-  `;
-}
-
 function candidateFeedToggleMarkup(feedView, totalCount) {
   if (!feedView?.canToggle) return "";
   const summaryText = candidatePoolDisplaySummary(totalCount);
-  const hiddenText = feedView.expanded
-    ? feedView.hiddenCount > 0
-      ? `${feedView.hiddenCount}개 관찰 종목은 서버와 DB에서 계속 추적합니다.`
-      : "메인 화면을 다시 압축해서 봅니다."
-    : `${feedView.hiddenCount}개 관찰 종목을 더 볼 수 있습니다. 탈락 기록은 후보 수에 포함하지 않습니다.`;
-  const actionText = feedView.expanded ? "상위만 보기" : `더 보기`;
-  const titleText = feedView.expanded
-    ? `관찰 후보 ${feedView.items.length}/${totalCount}개`
-    : `관찰 후보 ${feedView.items.length}개 표시`;
+  const nextCount = Math.min(CANDIDATE_FEED_PAGE_SIZE, Math.max(0, feedView.hiddenCount || 0));
+  const hiddenText = `${nextCount}개를 더 표시합니다. 나머지 후보는 서버와 DB에서 계속 추적합니다.`;
+  const actionText = `+${nextCount}개 더보기`;
+  const titleText = `상위 후보 ${feedView.items.length}/${totalCount}개 표시`;
   return `
     <button class="feed-limit-panel" type="button" data-feed-toggle>
       <span>
@@ -6520,7 +6418,7 @@ function renderPrinciples() {
 function applySearchQuery(query) {
   state.query = String(query ?? "").trim();
   state.selectedLookup = null;
-  state.feedExpanded = false;
+  resetCandidateFeedLimit();
   if (els.searchInput) {
     els.searchInput.value = state.query;
   }
@@ -6687,7 +6585,6 @@ function candidatePersonalizationBadges(item) {
 function renderFeed() {
   const candidates = filteredCandidates();
   const feedView = visibleFeedCandidates(candidates);
-  const discoveryNotice = candidateDiscoveryNoticeMarkup();
   renderStrategyCounts();
   const selectionChanged = syncSelectedToVisibleCandidates(candidates);
   renderQuickSearch();
@@ -6695,7 +6592,6 @@ function renderFeed() {
   if (!candidates.length) {
     const label = strategyLabel(state.strategy);
     els.candidateFeed.innerHTML = `
-      ${discoveryNotice}
       <div class="empty-state">
         <h2>${escapeHtml(label)} 후보가 없습니다</h2>
         <p>${escapeHtml(strategyEmptyMessage(state.strategy))}</p>
@@ -6753,7 +6649,7 @@ function renderFeed() {
       `;
     })
     .join("");
-  els.candidateFeed.innerHTML = `${discoveryNotice}${feedItemsHtml}${candidateFeedToggleMarkup(feedView, candidates.length)}`;
+  els.candidateFeed.innerHTML = `${feedItemsHtml}${candidateFeedToggleMarkup(feedView, candidates.length)}`;
 
   if (selectionChanged && state.view === "signals") {
     window.requestAnimationFrame(() => {
@@ -6778,7 +6674,13 @@ function renderFeed() {
   const toggleButton = els.candidateFeed.querySelector("[data-feed-toggle]");
   if (toggleButton) {
     toggleButton.addEventListener("click", () => {
-      state.feedExpanded = !state.feedExpanded;
+      const currentLimit = Number(state.feedVisibleLimit);
+      state.feedVisibleLimit = Math.min(
+        candidates.length,
+        Math.max(CANDIDATE_FEED_VISIBLE_LIMIT, Number.isFinite(currentLimit) ? currentLimit : CANDIDATE_FEED_VISIBLE_LIMIT) +
+          CANDIDATE_FEED_PAGE_SIZE
+      );
+      state.feedExpanded = state.feedVisibleLimit > CANDIDATE_FEED_VISIBLE_LIMIT;
       renderFeed();
     });
   }
@@ -8430,7 +8332,7 @@ document.querySelectorAll(".tab").forEach((button) => {
     button.classList.add("active");
     state.filter = button.dataset.filter;
     state.selectedLookup = null;
-    state.feedExpanded = false;
+    resetCandidateFeedLimit();
     renderFeed();
     renderTradeDecisionStatus();
     renderDetail();
@@ -8444,7 +8346,7 @@ document.querySelectorAll(".strategy-button").forEach((button) => {
     button.classList.add("active");
     state.strategy = button.dataset.strategy || "action";
     state.selectedLookup = null;
-    state.feedExpanded = false;
+    resetCandidateFeedLimit();
     renderFeed();
     renderTradeDecisionStatus();
     renderDetail();
@@ -8455,7 +8357,7 @@ document.querySelectorAll(".strategy-button").forEach((button) => {
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   state.selectedLookup = null;
-  state.feedExpanded = false;
+  resetCandidateFeedLimit();
   if (state.searchTimer) {
     window.clearTimeout(state.searchTimer);
   }
